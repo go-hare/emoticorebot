@@ -3,13 +3,10 @@
 根据当前 FusionState 决定下一个执行节点。
 
 路由规则：
-  来自 eq_node：
-    - done=True  → "memory"（EQ 已生成回复，进入收尾）
-    - done=False, iq.task 有值, iq.attempts=0 → "iq"（委托给 IQ）
-  来自 iq_node：
-    - iq.attempts 超限 → "memory"（强制结束，防止死循环）
-    - 否则 → "eq"（IQ 结果交回 EQ 处理）
-  兜底 → "memory"
+  - done=True → "memory"（EQ 已生成回复）
+  - iq.task 存在 且 无 result 且 无 error → "iq"（执行/重试任务）
+  - iq.result 或 iq.error 存在 → "eq"（审核结果）
+  - 兜底 → "memory"
 """
 
 from __future__ import annotations
@@ -42,25 +39,28 @@ class FusionRouter:
         iq = state.get("iq", {})
 
         iq_task: str = _get(iq, "task", "")
+        iq_result: str = _get(iq, "result", "")
+        iq_error: str = _get(iq, "error", "")
         iq_attempts: int = _get(iq, "attempts", 0)
 
-        # IQ 尝试次数超限 → 强制结束
-        if iq_attempts >= self.max_iq_attempts:
-            return "memory"
-
-        # EQ 已完成（生成了回复）→ 进入收尾
+        # 1. EQ 已完成 → 进入收尾
         if done:
             return "memory"
 
-        # EQ 首次委托给 IQ（task 已设置但 IQ 尚未执行）
-        if iq_task and iq_attempts == 0:
+        # 2. IQ 尝试次数超限 → 强制结束
+        if iq_attempts >= self.max_iq_attempts:
+            return "memory"
+
+        # 3. 有任务待执行（首次或重试）→ IQ 执行
+        #    条件：task 存在 且 没有 result 且 没有 error
+        if iq_task and not iq_result and not iq_error:
             return "iq"
 
-        # IQ 已执行（有结果或需要追问）→ 交回 EQ 处理
-        if iq_attempts > 0:
+        # 4. IQ 有结果或错误 → EQ 审核
+        if iq_result or iq_error:
             return "eq"
 
-        # 兜底：结束
+        # 5. 兜底：结束
         return "memory"
 
 

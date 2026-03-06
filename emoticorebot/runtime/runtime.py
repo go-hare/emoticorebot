@@ -361,6 +361,39 @@ class FusionRuntime:
     async def eq_followup(self, **kwargs) -> str:
         return await self.eq_service.followup(**kwargs)
 
+    async def eq_respond(
+        self,
+        user_input: str,
+        iq_result: str,
+        iq_error: str,
+        history: list[dict],
+    ) -> dict:
+        """拟人化 EQ 响应（带情绪、精力、记忆）
+
+        Args:
+            user_input: 用户原始输入
+            iq_result: IQ 执行结果
+            iq_error: IQ 错误信息
+            history: 对话历史
+
+        Returns:
+            {"response": "...", "action": {...} | None}
+        """
+        # 获取情绪状态
+        emotion_prompt = self.emotion_mgr.pad.get_emotion_prompt()
+        energy_prompt = f"精力值：{self.emotion_mgr.drive.energy:.0f}/100"
+        emotion_history = self.emotion_mgr.emotion_log.get_recent(5)
+
+        return await self.eq_service.respond(
+            user_input=user_input,
+            iq_result=iq_result,
+            iq_error=iq_error,
+            history=history,
+            emotion_prompt=emotion_prompt,
+            energy_prompt=energy_prompt,
+            emotion_history=emotion_history,
+        )
+
     async def run_iq_task(self, **kwargs) -> dict:
         return await self.iq_service.run_task(**kwargs)
 

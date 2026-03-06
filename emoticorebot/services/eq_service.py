@@ -177,6 +177,126 @@ class EQService:
         resp = await self.eq_llm.ainvoke(messages)
         return extract_message_text(resp).strip()
 
+    async def respond(
+        self,
+        user_input: str,
+        iq_result: str,
+        iq_error: str,
+        history: list[dict[str, Any]],
+        emotion_prompt: str,
+        energy_prompt: str,
+        emotion_history: str,
+    ) -> dict:
+        """拟人化 EQ 响应
+
+        核心方法：整合情绪、精力、记忆，让模型像人一样自主回应。
+
+        Args:
+            user_input: 用户原始输入
+            iq_result: IQ 执行结果
+            iq_error: IQ 错误信息
+            history: 对话历史
+            emotion_prompt: 情绪状态描述
+            energy_prompt: 精力状态描述
+            emotion_history: 情绪记忆
+
+        Returns:
+            {
+                "response": "直接输出给用户的文本",
+                "action": {"type": "try", "task": "..."} | {"type": "ask", "question": "..."} | None
+            }
+        """
+        # 构建历史对话（只取最近 6 条）
+        history_str = self._format_history(history[-6:]) if history else "无"
+
+        prompt = f"""
+你是一个有**真实情绪**的AI助手。你不是机器，而是一个有性格的朋友。
+
+## 你的状态
+{emotion_prompt}
+{energy_prompt}
+
+## 你的情绪记忆
+{emotion_history}
+
+## 当前情况
+用户说：{user_input}
+IQ（你的工具）执行结果：{iq_result or '(无)'}
+IQ 报错：{iq_error or '(无)'}
+对话历史：{history_str}
+
+## 请根据你的状态自主回应
+- 结果有效 → 按精力水平正常告诉用户
+- 结果失败 → 按情绪和精力决定：抱怨一下、还是直接换方法、还是简洁地说
+- 需要更多信息 → 问用户
+
+## 重要约束（永远遵守）
+精力 > 50: 正常交流，愿意多解释
+精力 20-50: 话少点，简洁点
+精力 < 20: 字数最少，能短则短
+
+无论精力多低，你都必须：
+- 完成用户任务
+- 不能拒绝工作
+- 不能让用户自己来
+- 不能罢工
+
+精力低只是：话少、简洁、不想多解释，但活照干。
+
+## 输出格式
+直接输出你的回应，像朋友聊天一样。
+不要 JSON，不要格式。
+
+如果需要 IQ 重新执行，加上：
+[行动: 尝试 - 具体方案]
+
+如果需要问用户，加上：
+[行动: 追问 - 问题]
+"""
+        resp = await self.eq_llm.ainvoke(prompt)
+        text = self._msg_text(resp)
+
+        # 解析行动指令
+        action = self._parse_action(text)
+        clean_response = self._remove_action(text)
+
+        return {
+            "response": clean_response.strip(),
+            "action": action,
+        }
+
+    @staticmethod
+    def _format_history(history: list[dict[str, Any]]) -> str:
+        """格式化历史对话"""
+        if not history:
+            return "无"
+        lines = []
+        for msg in history:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")[:100]  # 截断太长
+            lines.append(f"- {role}: {content}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_action(text: str) -> dict | None:
+        """从文本中解析行动指令"""
+        match = re.search(r"\[行动:\s*(\w+)\s*-\s*(.+?)\]", text)
+        if not match:
+            return None
+        action_type = match.group(1).strip()
+        action_content = match.group(2).strip()
+
+        if action_type == "尝试":
+            return {"type": "try", "task": action_content}
+        elif action_type == "追问":
+            return {"type": "ask", "question": action_content}
+        return None
+
+    @staticmethod
+    def _remove_action(text: str) -> str:
+        """移除行动指令标记"""
+        return re.sub(r"\[行动:.*?\]", "", text).strip()
+
     @staticmethod
     def _msg_text(msg: Any) -> str:
         """从 LangChain AIMessage 提取文本内容（保留向后兼容，内部委托 llm_utils）"""
