@@ -1,0 +1,950 @@
+"""CLI commands for emoticorebot."""
+
+import asyncio
+import os
+import signal
+from pathlib import Path
+import select
+import sys
+
+import typer
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.table import Table
+from rich.text import Text
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.patch_stdout import patch_stdout
+
+from emoticorebot import __version__, __logo__
+from emoticorebot.config.schema import Config
+
+app = typer.Typer(
+    name="emoticorebot",
+    help=f"{__logo__} emoticorebot - Personal AI Assistant",
+    no_args_is_help=True,
+)
+
+console = Console()
+EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
+
+# ---------------------------------------------------------------------------
+# CLI input: prompt_toolkit for editing, paste, history, and display
+# ---------------------------------------------------------------------------
+
+_PROMPT_SESSION: PromptSession | None = None
+_SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
+
+
+def _flush_pending_tty_input() -> None:
+    """Drop unread keypresses typed while the model was generating output."""
+    try:
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return
+    except Exception:
+        return
+
+    try:
+        import termios
+        termios.tcflush(fd, termios.TCIFLUSH)
+        return
+    except Exception:
+        pass
+
+    try:
+        while True:
+            ready, _, _ = select.select([fd], [], [], 0)
+            if not ready:
+                break
+            if not os.read(fd, 4096):
+                break
+    except Exception:
+        return
+
+
+def _restore_terminal() -> None:
+    """Restore terminal to its original state (echo, line buffering, etc.)."""
+    if _SAVED_TERM_ATTRS is None:
+        return
+    try:
+        import termios
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERM_ATTRS)
+    except Exception:
+        pass
+
+
+def _init_prompt_session() -> None:
+    """Create the prompt_toolkit session with persistent file history."""
+    global _PROMPT_SESSION, _SAVED_TERM_ATTRS
+
+    # Save terminal state so we can restore it on exit
+    try:
+        import termios
+        _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        pass
+
+    history_file = Path.home() / ".emoticorebot" / "history" / "cli_history"
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+
+    _PROMPT_SESSION = PromptSession(
+        history=FileHistory(str(history_file)),
+        enable_open_in_editor=False,
+        multiline=False,   # Enter submits (single line mode)
+    )
+
+
+def _print_agent_response(response: str, render_markdown: bool) -> None:
+    """Render assistant response with consistent terminal styling."""
+    content = response or ""
+    body = Markdown(content) if render_markdown else Text(content)
+    console.print()
+    console.print(f"[cyan]{__logo__} emoticorebot[/cyan]")
+    console.print(body)
+    console.print()
+
+
+def _is_exit_command(command: str) -> bool:
+    """Return True when input should end interactive chat."""
+    return command.lower() in EXIT_COMMANDS
+
+
+async def _read_interactive_input_async() -> str:
+    """Read user input using prompt_toolkit (handles paste, history, display).
+
+    prompt_toolkit natively handles:
+    - Multiline paste (bracketed paste mode)
+    - History navigation (up/down arrows)
+    - Clean display (no ghost characters or artifacts)
+    """
+    if _PROMPT_SESSION is None:
+        raise RuntimeError("Call _init_prompt_session() first")
+    try:
+        with patch_stdout():
+            return await _PROMPT_SESSION.prompt_async(
+                HTML("<b fg='ansiblue'>You:</b> "),
+            )
+    except EOFError as exc:
+        raise KeyboardInterrupt from exc
+
+
+
+def version_callback(value: bool):
+    if value:
+        console.print(f"{__logo__} emoticorebot v{__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        None, "--version", "-v", callback=version_callback, is_eager=True
+    ),
+):
+    """emoticorebot - Personal AI Assistant."""
+    pass
+
+
+# ============================================================================
+# Onboard / Setup
+# ============================================================================
+
+
+@app.command()
+def onboard():
+    """Initialize emoticorebot configuration and workspace."""
+    from emoticorebot.config.loader import get_config_path, load_config, save_config
+    from emoticorebot.config.schema import Config
+    from emoticorebot.utils.helpers import get_workspace_path
+    
+    config_path = get_config_path()
+    
+    if config_path.exists():
+        console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
+        console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
+        console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
+        if typer.confirm("Overwrite?"):
+            config = Config()
+            save_config(config)
+            console.print(f"[green]✓[/green] Config reset to defaults at {config_path}")
+        else:
+            config = load_config()
+            save_config(config)
+            console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
+    else:
+        save_config(Config())
+        console.print(f"[green]✓[/green] Created config at {config_path}")
+    
+    # Create workspace
+    workspace = get_workspace_path()
+    
+    if not workspace.exists():
+        workspace.mkdir(parents=True, exist_ok=True)
+        console.print(f"[green]✓[/green] Created workspace at {workspace}")
+    
+    # Create default bootstrap files
+    _create_workspace_templates(workspace)
+    
+    console.print(f"\n{__logo__} emoticorebot is ready!")
+    console.print("\nNext steps:")
+    console.print("  1. Add your API key to [cyan]~/.emoticorebot/config.json[/cyan]")
+    console.print("     Get one at: https://openrouter.ai/keys")
+    console.print("  2. Chat: [cyan]emoticorebot agent -m \"Hello!\"[/cyan]")
+    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/go-hare/emoticorebot#-chat-apps[/dim]")
+
+
+
+
+def _create_workspace_templates(workspace: Path):
+    """Create default workspace template files from bundled templates."""
+    from importlib.resources import files as pkg_files
+
+    templates_dir = pkg_files("emoticorebot") / "templates"
+
+    for item in templates_dir.iterdir():
+        if not (item.name.endswith(".md") or item.name.endswith(".yaml")):
+            continue
+        dest = workspace / item.name
+        if not dest.exists():
+            dest.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
+            console.print(f"  [dim]Created {item.name}[/dim]")
+
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir(exist_ok=True)
+
+    memory_template = templates_dir / "memory" / "MEMORY.md"
+    memory_file = memory_dir / "MEMORY.md"
+    if not memory_file.exists():
+        memory_file.write_text(memory_template.read_text(encoding="utf-8"), encoding="utf-8")
+        console.print("  [dim]Created memory/MEMORY.md[/dim]")
+
+    history_file = memory_dir / "HISTORY.md"
+    if not history_file.exists():
+        history_file.write_text("", encoding="utf-8")
+        console.print("  [dim]Created memory/HISTORY.md[/dim]")
+
+    emotion_log_template = templates_dir / "memory" / "EMOTION_LOG.md"
+    emotion_log_file = memory_dir / "EMOTION_LOG.md"
+    if not emotion_log_file.exists():
+        emotion_log_file.write_text(
+            emotion_log_template.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        console.print("  [dim]Created memory/EMOTION_LOG.md[/dim]")
+
+    config_dir = workspace / "config"
+    config_dir.mkdir(exist_ok=True)
+
+    drive_template = templates_dir / "drive_config.yaml"
+    drive_file = config_dir / "drive_config.yaml"
+    if not drive_file.exists() and drive_template.exists():
+        drive_file.write_text(drive_template.read_text(encoding="utf-8"), encoding="utf-8")
+        console.print("  [dim]Created config/drive_config.yaml[/dim]")
+
+    (workspace / "skills").mkdir(exist_ok=True)
+
+
+
+# ============================================================================
+# Gateway / Server
+# ============================================================================
+
+
+@app.command()
+def gateway(
+    port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Start the emoticorebot gateway."""
+    from emoticorebot.config.loader import load_config, get_data_dir
+    from emoticorebot.bus.queue import MessageBus
+    from emoticorebot.runtime.runtime import FusionRuntime
+    from emoticorebot.channels.manager import ChannelManager
+    from emoticorebot.session.manager import SessionManager
+    from emoticorebot.cron.service import CronService
+    from emoticorebot.cron.types import CronJob
+    
+    if verbose:
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
+    
+    console.print(f"{__logo__} Starting emoticorebot gateway on port {port}...")
+    
+    config = load_config()
+    bus = MessageBus()
+    session_manager = SessionManager(config.workspace_path)
+    
+    # Create cron service first (callback set after agent creation)
+    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron = CronService(cron_store_path)
+    
+    # Create agent with cron service
+    agent = FusionRuntime(
+        bus=bus,
+        workspace=config.workspace_path,
+        iq_mode=config.agents.defaults.iq_mode,
+        eq_mode=config.agents.defaults.eq_mode,
+        providers_config=config.providers,
+        brave_api_key=config.tools.web.search.api_key or None,
+        exec_config=config.tools.exec,
+        cron_service=cron,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
+        mcp_servers=config.tools.mcp_servers,
+        channels_config=config.channels,
+    )
+    
+    # Set cron callback (needs agent)
+    async def on_cron_job(job: CronJob) -> str | None:
+        """Execute a cron job through the agent."""
+        response = await agent.process_direct(
+            job.payload.message,
+            session_key=f"cron:{job.id}",
+            channel=job.payload.channel or "cli",
+            chat_id=job.payload.to or "direct",
+        )
+        if job.payload.deliver and job.payload.to:
+            from emoticorebot.bus.events import OutboundMessage
+            await bus.publish_outbound(OutboundMessage(
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to,
+                content=response or ""
+            ))
+        return response
+    cron.on_job = on_cron_job
+    
+    # Initialize subconscious daemon and heartbeat service (integrated in FusionRuntime)
+    hb_cfg = config.gateway.heartbeat
+    agent.initialize_subconscious(
+        enable_reflection=True,  # 启用反思和主动对话
+        enable_heartbeat=hb_cfg.enabled,  # 根据配置启用心跳
+    )
+    
+    # Create channel manager
+    channels = ChannelManager(config, bus)
+    
+    if channels.enabled_channels:
+        console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
+    else:
+        console.print("[yellow]Warning: No channels enabled[/yellow]")
+    
+    cron_status = cron.status()
+    if cron_status["jobs"] > 0:
+        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+    
+    if agent.heartbeat and agent.heartbeat.enabled:
+        console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
+    
+    if agent.subconscious:
+        console.print("[green]✓[/green] Subconscious daemon: reflection & proactive chat enabled")
+    
+    async def run():
+        try:
+            await cron.start()
+            agent.start_background_services()  # 启动潜意识守护进程和心跳服务
+            await asyncio.gather(
+                agent.run(),
+                channels.start_all(),
+            )
+        except KeyboardInterrupt:
+            console.print("\nShutting down...")
+        finally:
+            await agent.close_mcp()
+            agent.stop_background_services()  # 停止潜意识守护进程和心跳服务
+            cron.stop()
+            agent.stop()
+            await channels.stop_all()
+    
+    asyncio.run(run())
+
+
+
+
+# ============================================================================
+# Agent Commands
+# ============================================================================
+
+
+@app.command()
+def agent(
+    message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
+    session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
+    markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
+    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show emoticorebot runtime logs during chat"),
+):
+    """Interact with the agent directly."""
+    from emoticorebot.config.loader import load_config, get_data_dir
+    from emoticorebot.bus.queue import MessageBus
+    from emoticorebot.runtime.runtime import FusionRuntime
+    from emoticorebot.cron.service import CronService
+    from loguru import logger
+    
+    config = load_config()
+    
+    bus = MessageBus()
+    # Create cron service for tool usage (no callback needed for CLI unless running)
+    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron = CronService(cron_store_path)
+
+    if logs:
+        logger.enable("emoticorebot")
+    else:
+        logger.disable("emoticorebot")
+    
+    agent_loop = FusionRuntime(
+        bus=bus,
+        workspace=config.workspace_path,
+        iq_mode=config.agents.defaults.iq_mode,
+        eq_mode=config.agents.defaults.eq_mode,
+        providers_config=config.providers,
+        brave_api_key=config.tools.web.search.api_key or None,
+        exec_config=config.tools.exec,
+        cron_service=cron,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        mcp_servers=config.tools.mcp_servers,
+        channels_config=config.channels,
+    )
+    
+    # Show spinner when logs are off (no output to miss); skip when logs are on
+    def _thinking_ctx():
+        if logs:
+            from contextlib import nullcontext
+            return nullcontext()
+        # Animated spinner is safe to use with prompt_toolkit input handling
+        return console.status("[dim]emoticorebot is thinking...[/dim]", spinner="dots")
+
+    async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
+        ch = agent_loop.channels_config
+        if ch and tool_hint and not ch.send_tool_hints:
+            return
+        if ch and not tool_hint and not ch.send_progress:
+            return
+        console.print(f"  [dim]↳ {content}[/dim]")
+
+    if message:
+        # Single message mode — direct call, no bus needed
+        async def run_once():
+            try:
+                with _thinking_ctx():
+                    response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
+                _print_agent_response(response, render_markdown=markdown)
+            finally:
+                await agent_loop.close_mcp()
+
+        asyncio.run(run_once())
+    else:
+        # Interactive mode — route through bus like other channels
+        from emoticorebot.bus.events import InboundMessage
+        _init_prompt_session()
+        console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
+
+        if ":" in session_id:
+            cli_channel, cli_chat_id = session_id.split(":", 1)
+        else:
+            cli_channel, cli_chat_id = "cli", session_id
+
+        def _exit_on_sigint(signum, frame):
+            _restore_terminal()
+            console.print("\nGoodbye!")
+            os._exit(0)
+
+        signal.signal(signal.SIGINT, _exit_on_sigint)
+
+        async def run_interactive():
+            bus_task = asyncio.create_task(agent_loop.run())
+            turn_done = asyncio.Event()
+            turn_done.set()
+            turn_response: list[str] = []
+
+            async def _consume_outbound():
+                while True:
+                    try:
+                        msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                        if msg.metadata.get("_progress"):
+                            is_tool_hint = msg.metadata.get("_tool_hint", False)
+                            ch = agent_loop.channels_config
+                            if ch and is_tool_hint and not ch.send_tool_hints:
+                                pass
+                            elif ch and not is_tool_hint and not ch.send_progress:
+                                pass
+                            else:
+                                console.print(f"  [dim]↳ {msg.content}[/dim]")
+                        elif not turn_done.is_set():
+                            if msg.content:
+                                turn_response.append(msg.content)
+                            turn_done.set()
+                        elif msg.content:
+                            console.print()
+                            _print_agent_response(msg.content, render_markdown=markdown)
+                    except asyncio.TimeoutError:
+                        continue
+                    except asyncio.CancelledError:
+                        break
+
+            outbound_task = asyncio.create_task(_consume_outbound())
+
+            try:
+                while True:
+                    try:
+                        _flush_pending_tty_input()
+                        user_input = await _read_interactive_input_async()
+                        command = user_input.strip()
+                        if not command:
+                            continue
+
+                        if _is_exit_command(command):
+                            _restore_terminal()
+                            console.print("\nGoodbye!")
+                            break
+
+                        turn_done.clear()
+                        turn_response.clear()
+
+                        await bus.publish_inbound(InboundMessage(
+                            channel=cli_channel,
+                            sender_id="user",
+                            chat_id=cli_chat_id,
+                            content=user_input,
+                        ))
+
+                        with _thinking_ctx():
+                            await turn_done.wait()
+
+                        if turn_response:
+                            _print_agent_response(turn_response[0], render_markdown=markdown)
+                    except KeyboardInterrupt:
+                        _restore_terminal()
+                        console.print("\nGoodbye!")
+                        break
+                    except EOFError:
+                        _restore_terminal()
+                        console.print("\nGoodbye!")
+                        break
+            finally:
+                agent_loop.stop()
+                outbound_task.cancel()
+                await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
+                await agent_loop.close_mcp()
+
+        asyncio.run(run_interactive())
+
+
+# ============================================================================
+# Channel Commands
+# ============================================================================
+
+
+channels_app = typer.Typer(help="Manage channels")
+app.add_typer(channels_app, name="channels")
+
+
+@channels_app.command("status")
+def channels_status():
+    """Show channel status."""
+    from emoticorebot.config.loader import load_config
+
+    config = load_config()
+
+    table = Table(title="Channel Status")
+    table.add_column("Channel", style="cyan")
+    table.add_column("Enabled", style="green")
+    table.add_column("Configuration", style="yellow")
+
+    # WhatsApp
+    wa = config.channels.whatsapp
+    table.add_row(
+        "WhatsApp",
+        "✓" if wa.enabled else "✗",
+        wa.bridge_url
+    )
+
+    dc = config.channels.discord
+    table.add_row(
+        "Discord",
+        "✓" if dc.enabled else "✗",
+        dc.gateway_url
+    )
+
+    # Feishu
+    fs = config.channels.feishu
+    fs_config = f"app_id: {fs.app_id[:10]}..." if fs.app_id else "[dim]not configured[/dim]"
+    table.add_row(
+        "Feishu",
+        "✓" if fs.enabled else "✗",
+        fs_config
+    )
+
+    # Mochat
+    mc = config.channels.mochat
+    mc_base = mc.base_url or "[dim]not configured[/dim]"
+    table.add_row(
+        "Mochat",
+        "✓" if mc.enabled else "✗",
+        mc_base
+    )
+    
+    # Telegram
+    tg = config.channels.telegram
+    tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
+    table.add_row(
+        "Telegram",
+        "✓" if tg.enabled else "✗",
+        tg_config
+    )
+
+    # Slack
+    slack = config.channels.slack
+    slack_config = "socket" if slack.app_token and slack.bot_token else "[dim]not configured[/dim]"
+    table.add_row(
+        "Slack",
+        "✓" if slack.enabled else "✗",
+        slack_config
+    )
+
+    # DingTalk
+    dt = config.channels.dingtalk
+    dt_config = f"client_id: {dt.client_id[:10]}..." if dt.client_id else "[dim]not configured[/dim]"
+    table.add_row(
+        "DingTalk",
+        "✓" if dt.enabled else "✗",
+        dt_config
+    )
+
+    # QQ
+    qq = config.channels.qq
+    qq_config = f"app_id: {qq.app_id[:10]}..." if qq.app_id else "[dim]not configured[/dim]"
+    table.add_row(
+        "QQ",
+        "✓" if qq.enabled else "✗",
+        qq_config
+    )
+
+    # Email
+    em = config.channels.email
+    em_config = em.imap_host if em.imap_host else "[dim]not configured[/dim]"
+    table.add_row(
+        "Email",
+        "✓" if em.enabled else "✗",
+        em_config
+    )
+
+    console.print(table)
+
+
+def _get_bridge_dir() -> Path:
+    """Get the bridge directory, setting it up if needed."""
+    import shutil
+    import subprocess
+    
+    # User's bridge location
+    user_bridge = Path.home() / ".emoticorebot" / "bridge"
+    
+    # Check if already built
+    if (user_bridge / "dist" / "index.js").exists():
+        return user_bridge
+    
+    # Check for npm
+    if not shutil.which("npm"):
+        console.print("[red]npm not found. Please install Node.js >= 18.[/red]")
+        raise typer.Exit(1)
+    
+    # Find source bridge: first check package data, then source dir
+    pkg_bridge = Path(__file__).parent.parent / "bridge"  # emoticorebot/bridge (installed)
+    src_bridge = Path(__file__).parent.parent.parent / "bridge"  # repo root/bridge (dev)
+    
+    source = None
+    if (pkg_bridge / "package.json").exists():
+        source = pkg_bridge
+    elif (src_bridge / "package.json").exists():
+        source = src_bridge
+    
+    if not source:
+        console.print("[red]Bridge source not found.[/red]")
+        console.print("Try reinstalling: pip install --force-reinstall emoticorebot")
+        raise typer.Exit(1)
+    
+    console.print(f"{__logo__} Setting up bridge...")
+    
+    # Copy to user directory
+    user_bridge.parent.mkdir(parents=True, exist_ok=True)
+    if user_bridge.exists():
+        shutil.rmtree(user_bridge)
+    shutil.copytree(source, user_bridge, ignore=shutil.ignore_patterns("node_modules", "dist"))
+    
+    # Install and build
+    try:
+        console.print("  Installing dependencies...")
+        subprocess.run(["npm", "install"], cwd=user_bridge, check=True, capture_output=True)
+        
+        console.print("  Building...")
+        subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
+        
+        console.print("[green]✓[/green] Bridge ready\n")
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Build failed: {e}[/red]")
+        if e.stderr:
+            console.print(f"[dim]{e.stderr.decode()[:500]}[/dim]")
+        raise typer.Exit(1)
+    
+    return user_bridge
+
+
+@channels_app.command("login")
+def channels_login():
+    """Link device via QR code."""
+    import subprocess
+    from emoticorebot.config.loader import load_config
+    
+    config = load_config()
+    bridge_dir = _get_bridge_dir()
+    
+    console.print(f"{__logo__} Starting bridge...")
+    console.print("Scan the QR code to connect.\n")
+    
+    env = {**os.environ}
+    if config.channels.whatsapp.bridge_token:
+        env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
+    
+    try:
+        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Bridge failed: {e}[/red]")
+    except FileNotFoundError:
+        console.print("[red]npm not found. Please install Node.js.[/red]")
+
+
+# ============================================================================
+# Cron Commands
+# ============================================================================
+
+cron_app = typer.Typer(help="Manage scheduled tasks")
+app.add_typer(cron_app, name="cron")
+
+
+@cron_app.command("list")
+def cron_list(
+    all: bool = typer.Option(False, "--all", "-a", help="Include disabled jobs"),
+):
+    """List scheduled jobs."""
+    from emoticorebot.config.loader import get_data_dir
+    from emoticorebot.cron.service import CronService
+    
+    store_path = get_data_dir() / "cron" / "jobs.json"
+    service = CronService(store_path)
+    
+    jobs = service.list_jobs(include_disabled=all)
+    
+    if not jobs:
+        console.print("No scheduled jobs.")
+        return
+    
+    table = Table(title="Scheduled Jobs")
+    table.add_column("ID", style="cyan")
+    table.add_column("Name")
+    table.add_column("Schedule")
+    table.add_column("Status")
+    table.add_column("Next Run")
+    
+    import time
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    for job in jobs:
+        # Format schedule
+        if job.schedule.kind == "every":
+            sched = f"every {(job.schedule.every_ms or 0) // 1000}s"
+        elif job.schedule.kind == "cron":
+            sched = f"{job.schedule.expr or ''} ({job.schedule.tz})" if job.schedule.tz else (job.schedule.expr or "")
+        else:
+            sched = "one-time"
+        
+        # Format next run
+        next_run = ""
+        if job.state.next_run_at_ms:
+            ts = job.state.next_run_at_ms / 1000
+            try:
+                tz = ZoneInfo(job.schedule.tz) if job.schedule.tz else None
+                next_run = _dt.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                next_run = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+        
+        status = "[green]enabled[/green]" if job.enabled else "[dim]disabled[/dim]"
+        
+        table.add_row(job.id, job.name, sched, status, next_run)
+    
+    console.print(table)
+
+
+@cron_app.command("add")
+def cron_add(
+    name: str = typer.Option(..., "--name", "-n", help="Job name"),
+    message: str = typer.Option(..., "--message", "-m", help="Message for agent"),
+    every: int = typer.Option(None, "--every", "-e", help="Run every N seconds"),
+    cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression (e.g. '0 9 * * *')"),
+    tz: str | None = typer.Option(None, "--tz", help="IANA timezone for cron (e.g. 'America/Vancouver')"),
+    at: str = typer.Option(None, "--at", help="Run once at time (ISO format)"),
+    deliver: bool = typer.Option(False, "--deliver", "-d", help="Deliver response to channel"),
+    to: str = typer.Option(None, "--to", help="Recipient for delivery"),
+    channel: str = typer.Option(None, "--channel", help="Channel for delivery (e.g. 'telegram', 'whatsapp')"),
+):
+    """Add a scheduled job."""
+    from emoticorebot.config.loader import get_data_dir
+    from emoticorebot.cron.service import CronService
+    from emoticorebot.cron.types import CronSchedule
+    
+    if tz and not cron_expr:
+        console.print("[red]Error: --tz can only be used with --cron[/red]")
+        raise typer.Exit(1)
+
+    # Determine schedule type
+    if every:
+        schedule = CronSchedule(kind="every", every_ms=every * 1000)
+    elif cron_expr:
+        schedule = CronSchedule(kind="cron", expr=cron_expr, tz=tz)
+    elif at:
+        import datetime
+        dt = datetime.datetime.fromisoformat(at)
+        schedule = CronSchedule(kind="at", at_ms=int(dt.timestamp() * 1000))
+    else:
+        console.print("[red]Error: Must specify --every, --cron, or --at[/red]")
+        raise typer.Exit(1)
+    
+    store_path = get_data_dir() / "cron" / "jobs.json"
+    service = CronService(store_path)
+    
+    try:
+        job = service.add_job(
+            name=name,
+            schedule=schedule,
+            message=message,
+            deliver=deliver,
+            to=to,
+            channel=channel,
+        )
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from e
+
+    console.print(f"[green]✓[/green] Added job '{job.name}' ({job.id})")
+
+
+@cron_app.command("remove")
+def cron_remove(
+    job_id: str = typer.Argument(..., help="Job ID to remove"),
+):
+    """Remove a scheduled job."""
+    from emoticorebot.config.loader import get_data_dir
+    from emoticorebot.cron.service import CronService
+    
+    store_path = get_data_dir() / "cron" / "jobs.json"
+    service = CronService(store_path)
+    
+    if service.remove_job(job_id):
+        console.print(f"[green]✓[/green] Removed job {job_id}")
+    else:
+        console.print(f"[red]Job {job_id} not found[/red]")
+
+
+@cron_app.command("enable")
+def cron_enable(
+    job_id: str = typer.Argument(..., help="Job ID"),
+    disable: bool = typer.Option(False, "--disable", help="Disable instead of enable"),
+):
+    """Enable or disable a job."""
+    from emoticorebot.config.loader import get_data_dir
+    from emoticorebot.cron.service import CronService
+    
+    store_path = get_data_dir() / "cron" / "jobs.json"
+    service = CronService(store_path)
+    
+    job = service.enable_job(job_id, enabled=not disable)
+    if job:
+        status = "disabled" if disable else "enabled"
+        console.print(f"[green]✓[/green] Job '{job.name}' {status}")
+    else:
+        console.print(f"[red]Job {job_id} not found[/red]")
+
+
+@cron_app.command("run")
+def cron_run(
+    job_id: str = typer.Argument(..., help="Job ID to run"),
+    force: bool = typer.Option(False, "--force", "-f", help="Run even if disabled"),
+):
+    """Manually run a job."""
+    from loguru import logger
+    from emoticorebot.config.loader import load_config, get_data_dir
+    from emoticorebot.cron.service import CronService
+    from emoticorebot.cron.types import CronJob
+    from emoticorebot.bus.queue import MessageBus
+    from emoticorebot.runtime.runtime import FusionRuntime
+    logger.disable("emoticorebot")
+
+    config = load_config()
+    bus = MessageBus()
+    agent_loop = FusionRuntime(
+        bus=bus,
+        workspace=config.workspace_path,
+        iq_mode=config.agents.defaults.iq_mode,
+        eq_mode=config.agents.defaults.eq_mode,
+        providers_config=config.providers,
+        brave_api_key=config.tools.web.search.api_key or None,
+        exec_config=config.tools.exec,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        mcp_servers=config.tools.mcp_servers,
+        channels_config=config.channels,
+    )
+
+    store_path = get_data_dir() / "cron" / "jobs.json"
+    service = CronService(store_path)
+
+    result_holder = []
+
+    async def on_job(job: CronJob) -> str | None:
+        response = await agent_loop.process_direct(
+            job.payload.message,
+            session_key=f"cron:{job.id}",
+            channel=job.payload.channel or "cli",
+            chat_id=job.payload.to or "direct",
+        )
+        result_holder.append(response)
+        return response
+
+    service.on_job = on_job
+
+    async def run():
+        return await service.run_job(job_id, force=force)
+
+    if asyncio.run(run()):
+        console.print("[green]✓[/green] Job executed")
+        if result_holder:
+            _print_agent_response(result_holder[0], render_markdown=True)
+    else:
+        console.print(f"[red]Failed to run job {job_id}[/red]")
+
+
+# ============================================================================
+# Status Commands
+# ============================================================================
+
+
+@app.command()
+def status():
+    """Show emoticorebot status."""
+    from emoticorebot.config.loader import load_config, get_config_path
+
+    config_path = get_config_path()
+    config = load_config()
+    workspace = config.workspace_path
+
+    console.print(f"{__logo__} emoticorebot Status\n")
+
+    console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
+    console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
+
+    if config_path.exists():
+        console.print(f"Model: {config.agents.defaults.model}")
+
+
+if __name__ == "__main__":
+    app()
