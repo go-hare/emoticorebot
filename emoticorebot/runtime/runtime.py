@@ -22,8 +22,6 @@ from loguru import logger
 from emoticorebot.core.context import ContextBuilder
 from emoticorebot.core.graph import run_fusion_agent
 from emoticorebot.core.model import LLMFactory
-from emoticorebot.core.policy_engine import PolicyEngine
-from emoticorebot.core.signal_extractor import SignalExtractor
 from emoticorebot.core.state import get_emotion_label
 from emoticorebot.bus.events import InboundMessage, OutboundMessage
 from emoticorebot.bus.queue import MessageBus
@@ -83,10 +81,6 @@ class FusionRuntime:
         self.memory_facade = MemoryFacade(workspace)
         # 将 memory_facade 注入 ContextBuilder，避免创建两份独立实例
         self.context = ContextBuilder(workspace, memory_facade=self.memory_facade)
-
-        # 信号提取和策略引擎
-        self.signal_extractor = SignalExtractor()
-        self.policy_engine = PolicyEngine()
 
         # LLM 实例 - 通过 LLMFactory 按配置构建
         _factory = LLMFactory(
@@ -247,27 +241,6 @@ class FusionRuntime:
         # 加载历史
         history = session.get_history(max_messages=self.memory_window)
 
-        # 提取信号并生成策略
-        emotion_prompt = self.emotion_mgr.get_emotion_prompt()
-        turn_signals = self.signal_extractor.extract(msg.content, emotion_state=emotion_prompt)
-        runtime_adjustment = self.memory_facade.load_policy_adjustment()
-        policy = self.policy_engine.make_policy(turn_signals, runtime_adjustment=runtime_adjustment)
-
-        # 能量策略：低能量时强制简洁模式
-        policy = self._apply_energy_policy(policy)
-
-        logger.info(
-            "Fusion policy: iq={:.2f} eq={:.2f} empathy_depth={} fact_depth={} tool_budget={} tone={} conf={:.2f} ({})",
-            policy.iq_weight,
-            policy.eq_weight,
-            policy.empathy_depth,
-            policy.fact_depth,
-            policy.tool_budget,
-            policy.tone,
-            policy.confidence,
-            turn_signals.reason,
-        )
-
         content, final_state = await run_fusion_agent(
             user_input=msg.content,
             workspace=self.workspace,
@@ -276,7 +249,6 @@ class FusionRuntime:
             channel=msg.channel,
             chat_id=msg.chat_id,
             session_id=key,
-            policy=policy,
             on_progress=on_progress,
             agent=self._compiled_agent,
         )
@@ -314,20 +286,6 @@ class FusionRuntime:
         """停止 Runtime"""
         self._running = False
 
-    def _apply_energy_policy(self, policy):
-        """能量策略：低能量时调整表达节奏"""
-        from dataclasses import replace
-
-        energy = float(getattr(getattr(self.emotion_mgr, "drive", None), "energy", 100.0))
-        if energy > 20:
-            return policy
-
-        return replace(
-            policy,
-            empathy_depth=max(0, int(policy.empathy_depth) - 1),
-            tone="concise",
-        )
-
     def get_emotion_label(self, pad: dict) -> str:
         """获取情绪标签"""
         return get_emotion_label(pad)
@@ -351,7 +309,11 @@ class FusionRuntime:
         user_input: str,
         iq_result: str,
         iq_error: str,
-        history: list[dict],
+        history: list[dict[str, Any]],
+        emotion: str,
+        pad: dict[str, float],
+        channel: str,
+        chat_id: str,
     ) -> dict:
         """拟人化 EQ 响应（带情绪、精力、记忆）
 
@@ -364,19 +326,17 @@ class FusionRuntime:
         Returns:
             {"response": "...", "action": {...} | None}
         """
-        # 获取情绪状态
-        emotion_prompt = self.emotion_mgr.pad.get_emotion_prompt()
-        energy_prompt = f"精力值：{self.emotion_mgr.drive.energy:.0f}/100"
-        emotion_history = self.emotion_mgr.emotion_log.get_recent(5)
+    
 
         return await self.eq_service.respond(
             user_input=user_input,
             iq_result=iq_result,
             iq_error=iq_error,
             history=history,
-            emotion_prompt=emotion_prompt,
-            energy_prompt=energy_prompt,
-            emotion_history=emotion_history,
+            emotion=emotion,
+            pad=pad,
+            channel=channel,
+            chat_id=chat_id,
         )
 
     async def run_iq_task(self, **kwargs) -> dict:

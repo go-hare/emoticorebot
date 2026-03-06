@@ -10,13 +10,10 @@
 - state.py           FusionState / IQState / EQState 数据结构
 - graph.py           LangGraph 图定义与编译
 - router.py          节点路由决策（FusionRouter）
-- policy_engine.py   策略引擎（EQ/IQ 权重、tone、budget）
-- signal_extractor.py信号提取（任务强度、情绪强度、紧急度）
 - context.py         System prompt 构建器
 - model.py           LLM 模型配置与工厂
 - skills.py          技能（Skill）加载器
 - mcp.py             MCP 服务器连接适配
-- observability.py   可观测性（trace/span）
 - nodes/             各图节点实现
 """
 
@@ -31,8 +28,6 @@ from emoticorebot.core.state import (
 )
 from emoticorebot.core.graph import create_fusion_agent, run_fusion_agent
 from emoticorebot.core.router import FusionRouter
-from emoticorebot.core.signal_extractor import SignalExtractor, TurnSignals
-from emoticorebot.core.policy_engine import PolicyEngine, FusionPolicy
 
 __all__ = [
     "FusionState",
@@ -45,8 +40,4 @@ __all__ = [
     "create_fusion_agent",
     "run_fusion_agent",
     "FusionRouter",
-    "SignalExtractor",
-    "TurnSignals",
-    "PolicyEngine",
-    "FusionPolicy",
 ]

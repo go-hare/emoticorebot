@@ -35,6 +35,10 @@ async def eq_node(state: FusionState, runtime) -> FusionState:
         iq_result=iq.result,
         iq_error=iq.error,
         history=eq.discussion_history,
+        emotion=eq.emotion,
+        pad=eq.pad,
+        channel=state.get("channel", ""),
+        chat_id=state.get("chat_id", ""),
     )
 
     action = response.get("action")

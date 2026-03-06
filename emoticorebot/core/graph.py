@@ -16,34 +16,20 @@ from emoticorebot.core.nodes.eq_node import eq_node
 from emoticorebot.core.nodes.iq_node import iq_node
 from emoticorebot.core.nodes.memory_node import memory_node
 from emoticorebot.core.router import FusionRouter
-from emoticorebot.core.observability import get_observability_manager
 
 
 def create_fusion_agent(workspace: Path, runtime):
     """编译 LangGraph fusion 图（一次性，结果应被 runtime 缓存）。"""
     router = FusionRouter(max_iterations=10, max_iq_attempts=3)
     graph = StateGraph(FusionState)
-    obs_manager = get_observability_manager()
 
     async def _eq(s: FusionState) -> FusionState:
-        obs_ctx = obs_manager.get_current_context()
-        if obs_ctx:
-            with obs_ctx.span("eq_node"):
-                return await eq_node(s, runtime)
         return await eq_node(s, runtime)
 
     async def _iq(s: FusionState) -> FusionState:
-        obs_ctx = obs_manager.get_current_context()
-        if obs_ctx:
-            with obs_ctx.span("iq_node"):
-                return await iq_node(s, runtime)
         return await iq_node(s, runtime)
 
     async def _memory(s: FusionState) -> FusionState:
-        obs_ctx = obs_manager.get_current_context()
-        if obs_ctx:
-            with obs_ctx.span("memory_node"):
-                return await memory_node(s, runtime)
         return await memory_node(s, runtime)
 
     graph.add_node("eq", _eq)
@@ -52,11 +38,7 @@ def create_fusion_agent(workspace: Path, runtime):
     graph.set_entry_point("eq")
 
     def route_next(state: FusionState) -> str:
-        next_node = router.route_next(state)
-        obs_ctx = obs_manager.get_current_context()
-        if obs_ctx:
-            obs_ctx.record_route("eq", next_node)
-        return next_node
+        return router.route_next(state)
 
     graph.add_conditional_edges("eq", route_next, {"iq": "iq", "eq": "eq", "memory": "memory"})
     graph.add_conditional_edges("iq", route_next, {"eq": "eq", "iq": "iq", "memory": "memory"})
@@ -72,7 +54,6 @@ async def run_fusion_agent(
     channel: str = "",
     chat_id: str = "",
     session_id: str = "",
-    policy=None,
     on_progress=None,
     agent=None,
 ) -> tuple[str, dict]:
@@ -93,8 +74,6 @@ async def run_fusion_agent(
         session_id=session_id,
     )
 
-    if policy:
-        initial_state["policy"] = policy
     if on_progress:
         initial_state["on_progress"] = on_progress
 

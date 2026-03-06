@@ -24,8 +24,6 @@ class IQState:
     success: bool = False
     error: str = ""
     iterations: int = 0
-    fact_depth: int = 2
-    tool_budget: int = 5
 
 
 @dataclass
@@ -66,7 +64,7 @@ class FusionState(TypedDict, total=False):
     session_id: str
     channel: str
     chat_id: str
-    policy: Any          # FusionPolicy（策略参数）
+    policy: Any          # 策略参数
     on_progress: Any     # Callable[[str], Awaitable[None]]（进度回调）
     metadata: dict       # 元数据（intent_params 等）
     media: list[str]     # 媒体文件路径列表

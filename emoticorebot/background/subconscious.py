@@ -119,7 +119,7 @@ class SubconsciousDaemon:
     async def _do_reflect(self) -> None:
         logger.info("Subconscious reflection started")
         result = await self.reflection.run_cycle(warm_limit=15)
-        if not any((result.persona_delta, result.user_insight, result.policy_adjustment)):
+        if not any((result.persona_delta, result.user_insight)):
             logger.debug("Subconscious reflection: no updates generated")
 
     async def _do_proactive_check(self) -> None:

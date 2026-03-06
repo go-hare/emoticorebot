@@ -38,15 +38,25 @@ class EQService:
         iq_result: str,
         iq_error: str,
         history: list[dict[str, Any]],
-        emotion_prompt: str,
-        energy_prompt: str,
-        emotion_history: str,
+        emotion: str,
+        pad: dict[str, float],
+        channel: str,
+        chat_id: str,
     ) -> dict:
-        # 使用 context 构建 system prompt（包含 EQ 规则）
-        system_prompt = self.context.build_eq_system_prompt(query=user_input)
+        system = self.context.build_eq_system_prompt(
+            query=user_input,
+            current_emotion=emotion,
+            pad_state=(pad.get("pleasure", 0.0), pad.get("arousal", 0.5), pad.get("dominance", 0.5)),
+        )
+        polish_prompt = (
+            "请将以下事实数据，用你的性格转述给用户。\n"
+            "**禁止直接输出JSON或技术报错。禁止篡改数据内容。**\n\n"
+            f"用户的原始问题：{user_input}\n\n"
+            f"事实数据（IQ返回）：\n{iq_result}\n\n"
+        )
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input},
+            {"role": "system", "content": system},
+            {"role": "user", "content": polish_prompt},
         ]
         resp = await self.eq_llm.ainvoke(messages)
         text = self._msg_text(resp)

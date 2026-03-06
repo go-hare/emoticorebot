@@ -48,8 +48,6 @@ class IQService:
         channel: str,
         chat_id: str,
         intent_params: dict[str, Any] | None = None,
-        tool_budget: int | None = None,
-        fact_depth: int | None = None,
         media: list[str] | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
@@ -64,7 +62,7 @@ class IQService:
                 "missing": list[str],  # 仅当 requires_more_info=True 时
             }
         """
-        current_message = self._build_task_message(task, intent_params, fact_depth)
+        current_message = self._build_task_message(task, intent_params)
         
         messages = self.context.build_messages(
             history=history[-12:],
@@ -78,10 +76,7 @@ class IQService:
         lc_messages = self._to_langchain_messages(messages)
         llm = self.iq_llm.bind_tools(self.tools.get_definitions())
         tool_calls: list[dict[str, str]] = []
-        
-        # 使用 tool_budget（若提供）或默认 max_iterations
-        max_calls = tool_budget if tool_budget is not None else self.max_iterations
-        
+        max_calls = self.max_iterations
         for iteration in range(max(1, max_calls)):
             resp = await llm.ainvoke(lc_messages)
             
@@ -139,7 +134,6 @@ class IQService:
         self,
         task: str,
         intent_params: dict[str, Any] | None,
-        fact_depth: int | None,
     ) -> str:
         """构建任务消息（注入参数和深度提示）"""
         current_message = task
@@ -153,29 +147,7 @@ class IQService:
                 "请优先使用以上参数执行任务；若参数不足再根据用户原文补全。"
             )
         
-        # 注入事实深度提示
-        depth_hint = self._get_depth_hint(fact_depth)
-        if depth_hint:
-            current_message = (
-                f"{current_message}\n\n"
-                "[Fact Depth]\n"
-                f"{depth_hint}"
-            )
-        
         return current_message
-    
-    @staticmethod
-    def _get_depth_hint(fact_depth: int | None) -> str:
-        """根据 fact_depth 生成深度提示"""
-        if fact_depth is None:
-            return ""
-        
-        if fact_depth <= 1:
-            return "输出要点结论即可，避免展开过多背景。"
-        elif fact_depth >= 3:
-            return "输出尽量完整，含关键依据、步骤和边界说明。"
-        else:
-            return "输出结论并给出必要依据，保持简洁。"
     
     @staticmethod
     def _msg_text(msg: Any) -> str:

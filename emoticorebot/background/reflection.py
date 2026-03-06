@@ -3,7 +3,6 @@
 定期读取近期关系记忆，通过 LLM 推理更新：
 - SOUL.md  人格文件（微调）
 - USER.md  用户认知（追加）
-- 策略调整（eq_bias / iq_bias / tone_preference 等）
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
@@ -27,11 +26,10 @@ if TYPE_CHECKING:
 class ReflectionResult:
     persona_delta: str | None = None
     user_insight: str | None = None
-    policy_adjustment: dict[str, Any] | None = None
 
 
 class ReflectionEngine:
-    """元认知反思引擎：定期更新 SOUL/USER 和策略状态。"""
+    """元认知反思引擎：定期更新 SOUL/USER。"""
 
     _REFLECT_PROMPT = """你是你自己（AI 角色），请根据最近的情感经历进行自我反思。
 
@@ -44,7 +42,7 @@ class ReflectionEngine:
 ## 当前 USER.md
 {current_user}
 
-请完成以下三项更新：
+请完成以下两项更新：
 1. **更新 SOUL.md**（人格自我进化）：
    - 如果最近有反复出现的情感模式，考虑微调性格描述（保留原有锚点，只微调）
    - 保持格式与原文件一致，保留文件头部的 `>` 注释行
@@ -53,12 +51,8 @@ class ReflectionEngine:
    - 从最近对话中提炼出新的用户信息（习惯/偏好/近况）
    - 追加到"情感认知"区块下，保留已有内容
 
-3. **policy_adjustment（结构化）**：
-   - 字段：eq_bias(-0.3~0.3), iq_bias(-0.3~0.3), tone_preference("warm|professional|balanced"|null), tool_budget_delta(-2~2), duration_hours(1~168), reason
-   - 若无需调整，填 null
-
 以 JSON 格式输出（只输出 JSON，不要其他内容）：
-{{"soul_update": "更新后的完整 SOUL.md 内容", "user_update": "更新后的完整 USER.md 内容", "policy_adjustment": null}}
+{{"soul_update": "更新后的完整 SOUL.md 内容", "user_update": "更新后的完整 USER.md 内容"}}
 若无需更新，对应字段填 null。"""
 
     def __init__(self, runtime: "FusionRuntime", workspace: Path):
@@ -117,15 +111,9 @@ class ReflectionEngine:
                 else:
                     logger.warning("ReflectionEngine: USER.md update rejected by validator")
 
-            adjustment = self._normalize_policy_adjustment(result.get("policy_adjustment"))
-            if adjustment:
-                self.memory.save_policy_adjustment(adjustment)
-                logger.info("ReflectionEngine: policy adjustment saved {}", adjustment)
-
             return ReflectionResult(
                 persona_delta=persona_delta,
                 user_insight=user_insight,
-                policy_adjustment=adjustment,
             )
         except Exception as e:
             logger.warning("ReflectionEngine run failed: {}", e)
@@ -218,27 +206,3 @@ class ReflectionEngine:
             return parsed if isinstance(parsed, dict) else None
         except Exception:
             return None
-
-    @staticmethod
-    def _normalize_policy_adjustment(raw: object) -> dict[str, Any] | None:
-        if not isinstance(raw, dict):
-            return None
-        out: dict[str, Any] = {}
-        try:
-            if "eq_bias" in raw:
-                out["eq_bias"] = max(-0.3, min(0.3, float(raw["eq_bias"])))
-            if "iq_bias" in raw:
-                out["iq_bias"] = max(-0.3, min(0.3, float(raw["iq_bias"])))
-            tone = raw.get("tone_preference")
-            if isinstance(tone, str) and tone in {"warm", "professional", "balanced"}:
-                out["tone_preference"] = tone
-            if "tool_budget_delta" in raw:
-                out["tool_budget_delta"] = max(-2, min(2, int(raw["tool_budget_delta"])))
-            if "duration_hours" in raw:
-                out["duration_hours"] = max(1, min(168, int(raw["duration_hours"])))
-            reason = raw.get("reason")
-            if isinstance(reason, str) and reason.strip():
-                out["reason"] = reason.strip()
-        except Exception:
-            return None
-        return out or None
