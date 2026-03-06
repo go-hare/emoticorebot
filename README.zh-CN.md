@@ -15,7 +15,7 @@
 从源码安装（推荐开发者）：
 
 ```bash
-git clone https://github.com/HKUDS/emoticorebot.git
+git clone https://github.com/go-hare/emoticorebot.git
 cd emoticorebot
 pip install -e .
 ```

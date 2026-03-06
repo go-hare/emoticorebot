@@ -15,7 +15,7 @@ It perceives emotional context in every conversation turn, dynamically balances 
 Install from source (recommended for contributors):
 
 ```bash
-git clone https://github.com/HKUDS/emoticorebot.git
+git clone https://github.com/go-hare/emoticorebot.git
 cd emoticorebot
 pip install -e .
 ```
