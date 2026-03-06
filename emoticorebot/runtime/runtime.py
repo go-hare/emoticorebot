@@ -344,22 +344,7 @@ class FusionRuntime:
         except Exception:
             pass
 
-    # ── 向后兼容接口（Node 层通过 runtime 调用，内部委托给服务） ──────────────
-
-    async def eq_should_delegate(self, **kwargs) -> bool:
-        return await self.eq_service.should_delegate(**kwargs)
-
-    async def eq_direct_reply(self, **kwargs) -> str:
-        return await self.eq_service.direct_reply(**kwargs)
-
-    async def eq_empathy(self, **kwargs) -> str:
-        return await self.eq_service.empathy(**kwargs)
-
-    async def eq_polish(self, **kwargs) -> str:
-        return await self.eq_service.polish(**kwargs)
-
-    async def eq_followup(self, **kwargs) -> str:
-        return await self.eq_service.followup(**kwargs)
+    # ── EQ 响应接口 ────────────────────────────────────────────
 
     async def eq_respond(
         self,

@@ -104,6 +104,11 @@ class ContextBuilder:
     ) -> str:
         parts = [self._get_eq_identity()]
 
+        # 加载 EQ 执行规则（从 AGENTS.md）
+        eq_rules = self._load_eq_rules()
+        if eq_rules:
+            parts.append(f"## EQ 执行规则\n\n{eq_rules}")
+
         soul = self._load_file("SOUL.md")
         if soul:
             parts.append(f"## 人格设定（SOUL）\n\n{soul}")
@@ -187,6 +192,30 @@ class ContextBuilder:
                 return path.read_text(encoding="utf-8").strip()
             except Exception:
                 return ""
+        return ""
+
+    def _load_eq_rules(self) -> str:
+        """从 AGENTS.md 加载 EQ 执行规则"""
+        # 尝试从 workspace 加载
+        content = self._load_file("AGENTS.md")
+        if content and "# EQ 执行层规则" in content:
+            eq_section = content.split("# EQ 执行层规则")[-1]
+            if "---" in eq_section:
+                eq_section = eq_section.split("---")[0]
+            return eq_section.strip()
+
+        # 回退：从包模板加载
+        try:
+            from importlib.resources import files
+            pkg_content = (files("emoticorebot") / "templates" / "AGENTS.md").read_text(encoding="utf-8")
+            if "# EQ 执行层规则" in pkg_content:
+                eq_section = pkg_content.split("# EQ 执行层规则")[-1]
+                if "---" in eq_section:
+                    eq_section = eq_section.split("---")[0]
+                return eq_section.strip()
+        except Exception:
+            pass
+
         return ""
 
     def _load_emotion_log(self, limit: int = 15) -> str:
