@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from emoticorebot.session.iq_context import build_iq_context
 from emoticorebot.utils.helpers import ensure_dir, safe_filename
 
 
@@ -20,8 +21,8 @@ class Session:
     Stores messages in JSONL format for easy reading and persistence.
 
     Important: Messages are append-only for LLM cache efficiency.
-    The consolidation process writes summaries to MEMORY.md/HISTORY.md
-    but does NOT modify the messages list or get_history() output.
+    Background consolidation extracts durable memories into the structured
+    memory stores but does NOT modify the messages list or get_history() output.
     """
 
     key: str  # channel:chat_id
@@ -42,7 +43,12 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
     
-    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
+    def get_history(
+        self,
+        max_messages: int = 500,
+        *,
+        include_iq_context: bool = True,
+    ) -> list[dict[str, Any]]:
         """Return unconsolidated messages for LLM input, aligned to a user turn."""
         unconsolidated = self.messages[self.last_consolidated:]
         sliced = unconsolidated[-max_messages:]
@@ -55,7 +61,13 @@ class Session:
 
         out: list[dict[str, Any]] = []
         for m in sliced:
-            entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
+            content = m.get("content", "")
+            if include_iq_context and m.get("role") == "assistant":
+                iq_context = build_iq_context(m)
+                if iq_context:
+                    content = f"{content}\n\n{iq_context}"
+
+            entry: dict[str, Any] = {"role": m["role"], "content": content}
             for k in ("tool_calls", "tool_call_id", "name"):
                 if k in m:
                     entry[k] = m[k]
@@ -110,6 +122,16 @@ class SessionManager:
             session = Session(key=key)
         
         self._cache[key] = session
+        return session
+
+    def get(self, key: str) -> Session | None:
+        """Get a session if it exists, without creating a new one."""
+        if key in self._cache:
+            return self._cache[key]
+
+        session = self._load(key)
+        if session is not None:
+            self._cache[key] = session
         return session
     
     def _load(self, key: str) -> Session | None:

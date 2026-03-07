@@ -1,73 +1,217 @@
-"""EQ Node - 情绪感知 + 输出生成（唯一用户出口）
+"""EQ Node - EQ 主导的内部讨论与最终用户输出。"""
 
-EQ 是唯一入口，每次调用 eq_respond 自主决定：
-- 首次：判断是否需要 IQ 执行
-- IQ 完成后：判断接受/重试/追问/直接回复
+from __future__ import annotations
 
-全部由模型自主判断，代码只处理指令。
-"""
+from typing import Any
 
-from emoticorebot.core.state import FusionState, IQState, EQState
+from emoticorebot.core.reply_utils import build_companion_prompt, build_missing_info_prompt
+from emoticorebot.core.state import EQState, FusionState, IQState
 
 
-# 最大讨论轮数
 MAX_DISCUSSION_ROUNDS = 3
 
 
 async def eq_node(state: FusionState, runtime) -> FusionState:
-    """EQ 节点：唯一入口，自主决策"""
+    """EQ 节点：先主导判断，再整合 IQ 的内部参谋意见。"""
     eq: EQState = state["eq"]
     iq: IQState = state["iq"]
     user_input = state["user_input"]
+    history = state.get("history", [])
+    metadata = state.get("metadata", {}) or {}
+    pending_task = metadata.get("pending_task") if isinstance(metadata.get("pending_task"), dict) else None
+    discussion_count = int(state.get("discussion_count", 0) or 0)
 
-    # 获取讨论轮数
-    discussion_count = state.get("discussion_count", 0)
+    if not _has_iq_packet(iq):
+        deliberation = await runtime.eq_deliberate(
+            user_input=user_input,
+            history=history,
+            emotion=eq.emotion,
+            pad=eq.pad,
+            pending_task=pending_task,
+        )
+        eq.intent = deliberation.get("intent", "")
+        eq.emotional_goal = deliberation.get("emotional_goal", "")
+        eq.working_hypothesis = deliberation.get("working_hypothesis", "")
+        eq.question_to_iq = deliberation.get("question_to_iq", "")
+        eq.selected_experts = list(deliberation.get("selected_experts", []) or [])
+        eq.expert_questions = dict(deliberation.get("expert_questions", {}) or {})
+        eq.reason = deliberation.get("reason", "")
 
-    # 检查轮数限制
-    if discussion_count >= MAX_DISCUSSION_ROUNDS:
-        state["done"] = True
-        state["output"] = iq.result if iq.result else f"抱歉: {iq.error}"
-        return state
-
-    # 调用 eq_respond，让模型自主决策
-    response = await runtime.eq_respond(
-        user_input=user_input,
-        iq_result=iq.result,
-        iq_error=iq.error,
-        history=eq.discussion_history,
-        emotion=eq.emotion,
-        pad=eq.pad,
-        channel=state.get("channel", ""),
-        chat_id=state.get("chat_id", ""),
-    )
-
-    action = response.get("action")
-
-    if action:
-        action_type = action.get("type")
-
-        if action_type == "delegate":
-            # 需要 IQ 执行
-            iq.task = action.get("task", user_input)
-            iq.result = ""
-            iq.error = ""
-            state["done"] = False
-
-        elif action_type == "try":
-            # 继续尝试：发新任务给 IQ
-            iq.task = action.get("task")
-            iq.result = ""
-            iq.error = ""
+        if deliberation.get("need_iq"):
+            question = eq.question_to_iq or _build_default_iq_question(eq, user_input, pending_task)
+            metadata = _merge_followup_metadata(
+                metadata,
+                pending_task,
+                user_input,
+                selected_experts=eq.selected_experts,
+                expert_questions=eq.expert_questions,
+                accepted_experts=eq.accepted_experts,
+                rejected_experts=eq.rejected_experts,
+                arbitration_summary=eq.arbitration_summary,
+            )
+            state["metadata"] = metadata
+            _queue_iq_question(iq, question)
             state["discussion_count"] = discussion_count + 1
             state["done"] = False
+            return state
 
-        elif action_type == "ask":
-            # 追问用户
-            state["output"] = response["response"]
-            state["done"] = True
-    else:
-        # 直接输出（接受结果 或 不需要 IQ）
-        state["output"] = response["response"]
+        eq.final_decision = deliberation.get("final_decision", "") or "answer"
+        eq.final_message = deliberation.get("final_message", "") or build_companion_prompt(eq.emotion)
+        state["output"] = eq.final_message
         state["done"] = True
+        return state
 
+    finalize = await runtime.eq_finalize(
+        user_input=user_input,
+        history=history,
+        emotion=eq.emotion,
+        pad=eq.pad,
+        pending_task=pending_task,
+        eq_intent=eq.intent,
+        eq_emotional_goal=eq.emotional_goal,
+        eq_working_hypothesis=eq.working_hypothesis,
+        iq_status=iq.status,
+        iq_analysis=iq.analysis,
+        iq_evidence=list(iq.evidence),
+        iq_risks=list(iq.risks),
+        iq_missing_params=list(iq.missing_params),
+        iq_options=list(iq.options),
+        iq_recommended_action=iq.recommended_action,
+        iq_confidence=float(iq.confidence or 0.0),
+        iq_selected_experts=list(iq.selected_experts),
+        iq_expert_packets=list(iq.expert_packets),
+        discussion_count=discussion_count,
+    )
+
+    eq.final_decision = finalize.get("decision", "")
+    eq.final_message = finalize.get("message", "")
+    eq.question_to_iq = finalize.get("question_to_iq", "")
+    eq.selected_experts = list(finalize.get("selected_experts", []) or [])
+    eq.expert_questions = dict(finalize.get("expert_questions", {}) or {})
+    eq.accepted_experts = list(finalize.get("accepted_experts", []) or [])
+    eq.rejected_experts = list(finalize.get("rejected_experts", []) or [])
+    eq.arbitration_summary = str(finalize.get("arbitration_summary", "") or "")
+    eq.reason = finalize.get("reason", "")
+
+    if eq.final_decision == "continue_deliberation":
+        if discussion_count >= MAX_DISCUSSION_ROUNDS:
+            eq.final_decision, eq.final_message = _force_complete(iq)
+            state["output"] = eq.final_message
+            state["done"] = True
+            return state
+
+        question = eq.question_to_iq or _build_followup_iq_question(iq)
+        metadata = _merge_followup_metadata(
+            metadata,
+            pending_task,
+            user_input,
+            selected_experts=eq.selected_experts,
+            expert_questions=eq.expert_questions,
+            accepted_experts=eq.accepted_experts,
+            rejected_experts=eq.rejected_experts,
+            arbitration_summary=eq.arbitration_summary,
+        )
+        state["metadata"] = metadata
+        _queue_iq_question(iq, question)
+        state["discussion_count"] = discussion_count + 1
+        state["done"] = False
+        return state
+
+    if eq.final_decision == "ask_user":
+        state["output"] = eq.final_message or build_missing_info_prompt(iq.missing_params)
+    else:
+        state["output"] = eq.final_message or iq.analysis or "嗯，我把这件事捋顺了，我们接着来。"
+        eq.final_decision = "answer"
+
+    state["done"] = True
     return state
+
+
+def _has_iq_packet(iq: IQState) -> bool:
+    if iq.status in {"completed", "needs_input", "uncertain", "failed"}:
+        return True
+    return bool(iq.analysis or iq.error or iq.attempts)
+
+
+def _merge_followup_metadata(
+    metadata: dict[str, Any],
+    pending_task: dict[str, Any] | None,
+    user_input: str,
+    *,
+    selected_experts: list[str] | None = None,
+    expert_questions: dict[str, str] | None = None,
+    accepted_experts: list[str] | None = None,
+    rejected_experts: list[str] | None = None,
+    arbitration_summary: str = "",
+) -> dict[str, Any]:
+    base_params = metadata.get("intent_params") if isinstance(metadata.get("intent_params"), dict) else {}
+    merged_params = {
+        **base_params,
+        "selected_experts": list(selected_experts or base_params.get("selected_experts") or []),
+        "expert_questions": dict(expert_questions or base_params.get("expert_questions") or {}),
+        "eq_accepted_experts": list(accepted_experts or base_params.get("eq_accepted_experts") or []),
+        "eq_rejected_experts": list(rejected_experts or base_params.get("eq_rejected_experts") or []),
+        "eq_arbitration_summary": arbitration_summary or str(base_params.get("eq_arbitration_summary", "") or ""),
+    }
+    if not pending_task or not pending_task.get("task"):
+        return {
+            **metadata,
+            "intent_params": merged_params,
+        }
+    return {
+        **metadata,
+        "intent_params": {
+            **merged_params,
+            "followup_answer": user_input,
+            "missing_params": list(pending_task.get("missing_params") or []),
+            "resume_task": str(pending_task.get("task", "") or ""),
+        },
+    }
+
+
+def _queue_iq_question(iq: IQState, question: str) -> None:
+    iq.task = question
+    iq.status = "queued"
+    iq.analysis = ""
+    iq.evidence = []
+    iq.risks = []
+    iq.options = []
+    iq.recommended_action = ""
+    iq.confidence = 0.0
+    iq.rationale_summary = ""
+    iq.missing_params = []
+    iq.tool_calls = []
+    iq.error = ""
+    iq.iterations = 0
+
+
+def _build_default_iq_question(
+    eq: EQState,
+    user_input: str,
+    pending_task: dict[str, Any] | None,
+) -> str:
+    if pending_task and pending_task.get("task"):
+        task = str(pending_task.get("task", "") or "").strip()
+        return f"请结合用户刚刚的补充，继续这个任务：{task}。并告诉我还缺什么、风险是什么、建议我怎么回复。"
+    if eq.working_hypothesis:
+        return f"请围绕这个判断做理性分析：{eq.working_hypothesis}。并给我证据、风险和建议动作。"
+    return f"请分析用户这句话的真实需求与可执行性：{user_input}。并给我证据、风险和建议动作。"
+
+
+def _build_followup_iq_question(iq: IQState) -> str:
+    if iq.risks:
+        risk_text = "；".join(iq.risks[:2])
+        return f"请围绕这些风险继续补充最关键的判断依据，并给我更稳妥的下一步建议：{risk_text}"
+    if iq.analysis:
+        return f"请针对这段分析补强最薄弱的部分，并给我更明确建议：{iq.analysis}"
+    return "请补充最关键的证据、风险和建议动作，帮助我完成最终判断。"
+
+
+def _force_complete(iq: IQState) -> tuple[str, str]:
+    if iq.status == "needs_input" or iq.missing_params:
+        return "ask_user", build_missing_info_prompt(iq.missing_params)
+    if iq.analysis:
+        return "answer", iq.analysis
+    if iq.error:
+        return "answer", f"我现在能确定的是：{iq.error}"
+    return "answer", "我先给你一个当前能确认的结论：信息还不够完整，但我会继续帮你推进。"

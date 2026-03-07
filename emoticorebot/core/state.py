@@ -14,37 +14,44 @@ from typing import Any, TypedDict
 
 @dataclass
 class IQState:
-    """IQ 执行层的运行时状态。"""
+    """IQ 参谋层的运行时状态。"""
     task: str = ""
-    result: str = ""
-    needs_input: bool = False
+    status: str = "idle"
+    analysis: str = ""
+    evidence: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+    options: list[dict[str, Any]] = field(default_factory=list)
+    recommended_action: str = ""
+    selected_experts: list[str] = field(default_factory=list)
+    expert_packets: list[dict[str, Any]] = field(default_factory=list)
+    confidence: float = 0.0
+    rationale_summary: str = ""
     missing_params: list[str] = field(default_factory=list)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     attempts: int = 0
-    success: bool = False
     error: str = ""
     iterations: int = 0
 
 
 @dataclass
 class EQState:
-    """EQ 情感层的运行时状态。"""
+    """EQ 主导层的运行时状态。"""
     emotion: str = "平静"
     pad: dict[str, float] = field(
         default_factory=lambda: {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}
     )
-    pending_question: str = ""
-    discussion_history: list[dict[str, str]] = field(default_factory=list)
-    empathy_opening: str = ""
-
-
-# ---------------------------------------------------------------------------
-# 元数据类型
-# ---------------------------------------------------------------------------
-
-class Metadata(TypedDict, total=False):
-    """Graph 元数据（intent_params 等附加信息）。"""
-    intent_params: dict[str, Any]
+    intent: str = ""
+    emotional_goal: str = ""
+    working_hypothesis: str = ""
+    question_to_iq: str = ""
+    selected_experts: list[str] = field(default_factory=list)
+    expert_questions: dict[str, str] = field(default_factory=dict)
+    accepted_experts: list[str] = field(default_factory=list)
+    rejected_experts: list[str] = field(default_factory=list)
+    arbitration_summary: str = ""
+    final_decision: str = ""
+    final_message: str = ""
+    reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -64,10 +71,10 @@ class FusionState(TypedDict, total=False):
     session_id: str
     channel: str
     chat_id: str
-    policy: Any          # 策略参数
     on_progress: Any     # Callable[[str], Awaitable[None]]（进度回调）
     metadata: dict       # 元数据（intent_params 等）
     media: list[str]     # 媒体文件路径列表
+    discussion_count: int
 
 
 # ---------------------------------------------------------------------------
@@ -108,16 +115,6 @@ def get_emotion_label(pad: dict[str, float]) -> str:
     return "平静"
 
 
-def load_soul(workspace: Path) -> str:
-    p = workspace / "SOUL.md"
-    return p.read_text(encoding="utf-8") if p.exists() else ""
-
-
-def load_user(workspace: Path) -> str:
-    p = workspace / "USER.md"
-    return p.read_text(encoding="utf-8") if p.exists() else ""
-
-
 def create_initial_state(
     user_input: str,
     workspace: Path,
@@ -138,6 +135,7 @@ def create_initial_state(
         ),
         "done": False,
         "output": "",
+        "discussion_count": 0,
         "workspace": str(workspace),
         "session_id": session_id,
         "channel": channel,
@@ -149,10 +147,7 @@ __all__ = [
     "FusionState",
     "IQState",
     "EQState",
-    "Metadata",
     "create_initial_state",
     "load_pad_from_workspace",
     "get_emotion_label",
-    "load_soul",
-    "load_user",
 ]

@@ -23,12 +23,12 @@
 - 重试：如果 IQ 失败了，想换方法再试
 - 追问：如果需要用户补充信息
 
-## 行动指令格式
+## 输出协议
 
-- 委托 IQ：`[行动: 委托 - 任务描述]`
-- 重试：`[行动: 尝试 - 新方案]`
-- 追问：`[行动: 追问 - 问题]`
-- 直接输出：无指令，直接说
+- 必须只输出一个 JSON 对象
+- `decision` 只能是：`accept` / `delegate` / `retry` / `ask`
+- `message` 写给用户看的自然语言
+- `task` 仅在 `delegate` / `retry` 时填写，否则为空字符串
 
 ## 约束
 
@@ -47,7 +47,7 @@ emoticorebot cron add --name "reminder" --message "Your message" --at "YYYY-MM-D
 ```
 从当前会话获取 USER_ID 和 CHANNEL（如 `telegram:8281248569`）。
 
-**不要仅将提醒写入 MEMORY.md** — 那样不会触发实际通知。
+**不要仅把提醒写进记忆层** — 那样不会触发实际通知。
 
 ## 心跳任务
 

@@ -12,8 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from math import e
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -22,27 +20,18 @@ from loguru import logger
 from emoticorebot.core.context import ContextBuilder
 from emoticorebot.core.graph import run_fusion_agent
 from emoticorebot.core.model import LLMFactory
-from emoticorebot.core.state import get_emotion_label
 from emoticorebot.bus.events import InboundMessage, OutboundMessage
 from emoticorebot.bus.queue import MessageBus
 from emoticorebot.memory.memory_facade import MemoryFacade
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.services import EQService, IQService, MemoryService, ToolManager
+from emoticorebot.session.iq_context import build_expert_disagreement_summary, build_iq_context, extract_memory_overlay_metadata
 from emoticorebot.session.manager import SessionManager
 from emoticorebot.config.schema import ModelModeConfig
 from emoticorebot.config.schema import ProvidersConfig
 if TYPE_CHECKING:
-    from emoticorebot.config.schema import AgentDefaults, ChannelsConfig, ExecToolConfig, ProvidersConfig
+    from emoticorebot.config.schema import AgentDefaults, ChannelsConfig, ExecToolConfig
     from emoticorebot.cron.service import CronService
-
-
-@dataclass
-class FactPack:
-    """IQ 执行结果包（保留旧版结构）"""
-    summary: str
-    confidence: float
-    actions_taken: list[str] = field(default_factory=list)
-    raw_messages: list[dict[str, Any]] = field(default_factory=list)
 
 
 class FusionRuntime:
@@ -223,6 +212,7 @@ class FusionRuntime:
         # 内置命令处理
         if cmd == "/new":
             session.clear()
+            session.metadata.pop("pending_task", None)
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="New session started. ✨")
@@ -238,14 +228,16 @@ class FusionRuntime:
             msg.channel, msg.chat_id, msg.metadata.get("message_id"), key
         )
 
-        # 加载历史
-        history = session.get_history(max_messages=self.memory_window)
+        # 加载历史（包含上一轮 IQ 的紧凑摘要，供 EQ / IQ 共用）
+        history = session.get_history(max_messages=self.memory_window, include_iq_context=True)
+        turn_metadata = self._build_turn_metadata(session)
 
         content, final_state = await run_fusion_agent(
             user_input=msg.content,
             workspace=self.workspace,
             runtime=self,
             history=history,
+            metadata=turn_metadata,
             channel=msg.channel,
             chat_id=msg.chat_id,
             session_id=key,
@@ -255,10 +247,17 @@ class FusionRuntime:
 
         # 保存对话到 session
         session.add_message("user", msg.content)
-        session.add_message("assistant", content)
+        session.add_message(
+            "assistant",
+            content,
+            **self._build_assistant_session_fields(final_state),
+        )
 
-        # 写入记忆（委托给 MemoryService）
-        await self.memory_service.write_turn_memory(final_state)
+        pending_task = self._build_pending_task_metadata(final_state)
+        if pending_task:
+            session.metadata["pending_task"] = pending_task
+        else:
+            session.metadata.pop("pending_task", None)
 
         self.sessions.save(session)
         self._save_proactive_target(msg.channel, msg.chat_id)
@@ -286,9 +285,107 @@ class FusionRuntime:
         """停止 Runtime"""
         self._running = False
 
-    def get_emotion_label(self, pad: dict) -> str:
-        """获取情绪标签"""
-        return get_emotion_label(pad)
+    def _build_iq_summary(self, final_state: dict[str, Any]) -> str:
+        """Build a compact persisted summary from the current turn's IQ execution."""
+        iq = final_state.get("iq")
+        if iq is None:
+            return ""
+        eq = final_state.get("eq")
+        expert_packets = [packet for packet in getattr(iq, "expert_packets", []) if isinstance(packet, dict)]
+        memory_overlay = extract_memory_overlay_metadata(expert_packets)
+        return build_iq_context(
+            {
+                "iq_task": getattr(iq, "task", ""),
+                "iq_status": getattr(iq, "status", ""),
+                "iq_analysis": getattr(iq, "analysis", ""),
+                "iq_recommended_action": getattr(iq, "recommended_action", ""),
+                "iq_selected_experts": list(getattr(iq, "selected_experts", []) or []),
+                "iq_expert_packets": expert_packets,
+                "iq_disagreement_summary": build_expert_disagreement_summary(expert_packets),
+                "iq_memory_overlay_kind": memory_overlay.get("kind", ""),
+                "iq_memory_resume_task": memory_overlay.get("resume_task", ""),
+                "iq_memory_overlay_summary": memory_overlay.get("summary", ""),
+                "iq_confidence": float(getattr(iq, "confidence", 0.0) or 0.0),
+                "iq_rationale_summary": getattr(iq, "rationale_summary", ""),
+                "iq_error": getattr(iq, "error", ""),
+                "iq_missing_params": list(getattr(iq, "missing_params", []) or []),
+                "iq_tool_calls": list(getattr(iq, "tool_calls", []) or []),
+                "eq_accepted_experts": list(getattr(eq, "accepted_experts", []) or []) if eq is not None else [],
+                "eq_rejected_experts": list(getattr(eq, "rejected_experts", []) or []) if eq is not None else [],
+                "eq_arbitration_summary": getattr(eq, "arbitration_summary", "") if eq is not None else "",
+            }
+        )
+
+    def _build_assistant_session_fields(self, final_state: dict[str, Any]) -> dict[str, Any]:
+        """Extract assistant-side internal metadata that should survive across turns."""
+        iq = final_state.get("iq")
+        if iq is None:
+            return {}
+        eq = final_state.get("eq")
+
+        expert_packets = [packet for packet in getattr(iq, "expert_packets", []) if isinstance(packet, dict)]
+
+        return {
+            "iq_task": getattr(iq, "task", ""),
+            "iq_status": getattr(iq, "status", ""),
+            "iq_analysis": getattr(iq, "analysis", ""),
+            "iq_recommended_action": getattr(iq, "recommended_action", ""),
+            "iq_selected_experts": list(getattr(iq, "selected_experts", []) or []),
+            "iq_expert_packets": list(getattr(iq, "expert_packets", []) or []),
+            "iq_confidence": float(getattr(iq, "confidence", 0.0) or 0.0),
+            "iq_rationale_summary": getattr(iq, "rationale_summary", ""),
+            "iq_error": getattr(iq, "error", ""),
+            "iq_missing_params": list(getattr(iq, "missing_params", []) or []),
+            "iq_tool_calls": list(getattr(iq, "tool_calls", []) or []),
+            "eq_accepted_experts": list(getattr(eq, "accepted_experts", []) or []) if eq is not None else [],
+            "eq_rejected_experts": list(getattr(eq, "rejected_experts", []) or []) if eq is not None else [],
+            "eq_arbitration_summary": getattr(eq, "arbitration_summary", "") if eq is not None else "",
+            "iq_summary": self._build_iq_summary(final_state),
+        }
+
+    def _build_pending_task_metadata(self, final_state: dict[str, Any]) -> dict[str, Any] | None:
+        """Build session metadata for an unfinished task awaiting user input."""
+        iq = final_state.get("iq")
+        if iq is None:
+            return None
+
+        eq = final_state.get("eq")
+        decision = str(getattr(eq, "final_decision", "") or "").strip().lower()
+        status = str(getattr(iq, "status", "") or "").strip().lower()
+        missing_params = [
+            str(item).strip()
+            for item in (getattr(iq, "missing_params", []) or [])
+            if str(item).strip()
+        ]
+        if decision != "ask_user" and status != "needs_input" and not missing_params:
+            return None
+
+        task = str(getattr(iq, "task", "") or "").strip()
+        if not task:
+            return None
+
+        return {
+            "task": task,
+            "missing_params": missing_params,
+            "prompt": str(final_state.get("output", "") or getattr(iq, "analysis", "") or getattr(iq, "error", "")).strip(),
+        }
+
+    def _build_turn_metadata(self, session) -> dict[str, Any]:
+        """Build per-turn graph metadata, including pending IQ resume context."""
+        metadata: dict[str, Any] = {}
+        pending_task = session.metadata.get("pending_task")
+        if isinstance(pending_task, dict) and str(pending_task.get("task", "")).strip():
+            missing_params = [
+                str(item).strip()
+                for item in (pending_task.get("missing_params") or [])
+                if str(item).strip()
+            ]
+            metadata["pending_task"] = {
+                "task": str(pending_task.get("task", "")).strip(),
+                "missing_params": missing_params,
+                "prompt": str(pending_task.get("prompt", "")).strip(),
+            }
+        return metadata
 
     def _save_proactive_target(self, channel: str, chat_id: str) -> None:
         """保存主动对话目标（供潜意识服务使用）"""
@@ -302,42 +399,27 @@ class FusionRuntime:
         except Exception:
             pass
 
-    # ── EQ 响应接口 ────────────────────────────────────────────
+    # ── EQ 主导接口 ────────────────────────────────────────────
 
-    async def eq_respond(
+    async def eq_deliberate(
         self,
+        *,
         user_input: str,
-        iq_result: str,
-        iq_error: str,
         history: list[dict[str, Any]],
         emotion: str,
         pad: dict[str, float],
-        channel: str,
-        chat_id: str,
-    ) -> dict:
-        """拟人化 EQ 响应（带情绪、精力、记忆）
-
-        Args:
-            user_input: 用户原始输入
-            iq_result: IQ 执行结果
-            iq_error: IQ 错误信息
-            history: 对话历史
-
-        Returns:
-            {"response": "...", "action": {...} | None}
-        """
-    
-
-        return await self.eq_service.respond(
+        pending_task: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return await self.eq_service.deliberate(
             user_input=user_input,
-            iq_result=iq_result,
-            iq_error=iq_error,
             history=history,
             emotion=emotion,
             pad=pad,
-            channel=channel,
-            chat_id=chat_id,
+            pending_task=pending_task,
         )
+
+    async def eq_finalize(self, **kwargs) -> dict[str, Any]:
+        return await self.eq_service.finalize(**kwargs)
 
     async def run_iq_task(self, **kwargs) -> dict:
         return await self.iq_service.run_task(**kwargs)

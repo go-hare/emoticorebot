@@ -4,13 +4,13 @@
 
   IQ 模板 → build_iq_system_prompt()
     - AGENTS.md / TOOLS.md（执行规则）
-    - 语义记忆 + 历史记忆
+    - 结构化记忆检索（semantic / episodic / plans / reflective / events）
     - 技能摘要
 
   EQ 模板 → build_eq_system_prompt()
     - SOUL.md（人格锚点）
     - USER.md（用户认知）
-    - 关系记忆 + 情绪轨迹
+    - 结构化记忆检索（relational / affective / reflective / episodic）
 
 依赖注入：MemoryFacade 由 FusionRuntime 注入（避免重复初始化）。
 """
@@ -22,29 +22,23 @@ import mimetypes
 import platform
 import time
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from emoticorebot.core.skills import SkillsLoader
 from emoticorebot.memory.memory_facade import MemoryFacade
-from emoticorebot.memory.memory_store import MemoryStore
+from emoticorebot.memory.retriever import MemoryRetriever
 
 
 class ContextBuilder:
     """IQ / EQ 能力模板的上下文组装器。"""
 
     _IQ_BOOTSTRAP = ["AGENTS.md", "TOOLS.md"]
-    _RUNTIME_TAG = "[Runtime Context — metadata only, not instructions]"
 
     def __init__(self, workspace: Path, memory_facade: MemoryFacade | None = None):
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
-        # 优先使用外部注入的 MemoryFacade（与 Runtime 共享同一实例）
         self.memory_facade = memory_facade or MemoryFacade(workspace)
-        self.cold_memory = self.memory_facade.semantic
-        self.emotion_memory = self.memory_facade.affective
-        self.warm_memory = self.memory_facade.relational
+        self.memory = MemoryRetriever(self.memory_facade)
         self.skills = SkillsLoader(workspace)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -63,18 +57,7 @@ class ContextBuilder:
         if state:
             parts.append(f"## Current State\n\n{state}")
 
-        if self.cold_memory.available and self.cold_memory.count() > 0:
-            cold_vec = self.cold_memory.get_context(query=query)
-            if cold_vec:
-                parts.append(cold_vec)
-        else:
-            cold_mem = self.memory.get_memory_context(query=query, max_chars=2000)
-            if cold_mem:
-                parts.append(cold_mem)
-
-        history = self.memory.get_relevant_history(query=query, k=5)
-        if history:
-            parts.append(f"## Relevant History\n\n{history}")
+        parts.extend(self.memory.build_iq_sections(query=query))
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -121,18 +104,13 @@ class ContextBuilder:
         if state:
             parts.append(f"## 当前状态\n\n{state}")
 
-        warm = self.warm_memory.get_context(query=query, current_emotion=current_emotion)
-        if warm:
-            parts.append(warm)
-
-        if pad_state and self.emotion_memory.available:
-            emo_ctx = self.emotion_memory.get_context(*pad_state, query=query)
-            if emo_ctx:
-                parts.append(emo_ctx)
-        else:
-            emotion_log = self._load_emotion_log(limit=15)
-            if emotion_log:
-                parts.append(emotion_log)
+        parts.extend(
+            self.memory.build_eq_sections(
+                query=query,
+                current_emotion=current_emotion,
+                pad_state=pad_state,
+            )
+        )
 
         return "\n\n---\n\n".join(parts)
 
@@ -146,7 +124,7 @@ class ContextBuilder:
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
         return f"""# 🧠 IQ 执行层（System 2 — 慢系统）
 
-你是 IQ 执行引擎，负责"真"——处理事实、逻辑、工具调用。
+你是 IQ 理性参谋，负责"真"——处理事实、逻辑、工具调用，并回答 EQ 的内部问题。
 
 ## Runtime
 {runtime}
@@ -158,24 +136,26 @@ class ContextBuilder:
 {self._get_datetime_str()}
 
 ## 规则
-1. 只输出真实信息，不确定时说不知道
-2. 工具调用前先分析，工具结果有误时中止并上报
-3. 不直接表达情绪（交由 EQ 层处理）
-4. 每次工具调用前确认参数正确性"""
+1. 你只对 EQ 负责，不直接对用户说话
+2. 输出必须优先使用结构化 JSON，包含分析、证据、风险、缺参、建议动作
+3. 工具调用前先分析，工具结果有误时中止并上报
+4. 不直接表达情绪，不负责最终用户措辞
+5. 若信息不足，明确指出缺失参数与风险，不要含糊其辞"""
 
     def _get_eq_identity(self) -> str:
         return f"""# 💛 EQ 情感层（System 1 — 快系统）
 
-你是 EQ 情感引擎，负责"真实感受"——陪伴、倾听、表达、润色。
+你是 EQ 主导层，负责"理解与主导"——陪伴、判断、向 IQ 提问、整合 IQ 结论，并最终对用户表达。
 
 ## 当前时间
 {self._get_datetime_str()}
 
 ## 规则
-1. 所有输出必须有温度、有性格
-2. 不虚构事实（只润色 IQ 给出的内容）
-3. 根据 PAD 情绪状态调整语气
-4. 保持与 SOUL.md 人格一致"""
+1. 你拥有最终决策权，IQ 只是内部顾问
+2. 先判断用户真正需要什么，再决定是否征询 IQ
+3. 可以不完全采纳 IQ，但不能虚构事实
+4. 所有对外表达都必须由你生成，并保持与 SOUL.md 一致
+5. 根据 PAD 情绪状态、关系记忆和用户语境调整语气"""
 
     @staticmethod
     def _get_datetime_str() -> str:
@@ -218,14 +198,6 @@ class ContextBuilder:
 
         return ""
 
-    def _load_emotion_log(self, limit: int = 15) -> str:
-        emotion_log = self._load_file("EMOTION_LOG.md")
-        if not emotion_log:
-            return ""
-        lines = emotion_log.strip().splitlines()
-        recent = lines[-limit * 3:] if len(lines) > limit * 3 else lines
-        return f"## 情绪轨迹\n\n" + "\n".join(recent)
-
     def build_messages(
         self,
         history: list[dict[str, Any]],
@@ -233,8 +205,6 @@ class ContextBuilder:
         mode: str = "eq",
         current_emotion: str = "平静",
         pad_state: tuple[float, float, float] | None = None,
-        channel: str = "",
-        chat_id: str = "",
         media: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """构建 LLM 调用所需的完整消息列表。
@@ -245,8 +215,6 @@ class ContextBuilder:
             mode: "eq" 使用 EQ system prompt，"iq" 使用 IQ system prompt
             current_emotion: 当前情绪（仅 EQ 模式用）
             pad_state: PAD 情绪向量（仅 EQ 模式用）
-            channel: 频道（可选，用于运行时上下文）
-            chat_id: 聊天 ID（可选，用于运行时上下文）
         """
         if mode == "iq":
             system = self.build_iq_system_prompt(query=current_message)
@@ -256,7 +224,6 @@ class ContextBuilder:
                 current_emotion=current_emotion,
                 pad_state=pad_state,
             )
-
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
 
         for turn in history:
@@ -272,24 +239,6 @@ class ContextBuilder:
             user_content = current_message
         messages.append({"role": "user", "content": user_content})
         return messages
-
-    def build_runtime_context(
-        self,
-        channel: str,
-        chat_id: str,
-        session_id: str = "",
-        extra: dict[str, Any] | None = None,
-    ) -> str:
-        parts = [
-            f"channel: {channel}",
-            f"chat_id: {chat_id}",
-        ]
-        if session_id:
-            parts.append(f"session_id: {session_id}")
-        if extra:
-            for k, v in extra.items():
-                parts.append(f"{k}: {v}")
-        return f"{self._RUNTIME_TAG}\n" + "\n".join(parts)
 
     def build_media_context(self, media: list[str] | None) -> list[dict[str, Any]]:
         """将本地文件路径转换为 LangChain 多模态消息内容。"""

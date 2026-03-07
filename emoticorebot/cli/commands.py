@@ -212,27 +212,8 @@ def _create_workspace_templates(workspace: Path):
             dest.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
             console.print(f"  [dim]Created {item.name}[/dim]")
 
-    memory_dir = workspace / "memory"
-    memory_dir.mkdir(exist_ok=True)
-
-    memory_template = templates_dir / "memory" / "MEMORY.md"
-    memory_file = memory_dir / "MEMORY.md"
-    if not memory_file.exists():
-        memory_file.write_text(memory_template.read_text(encoding="utf-8"), encoding="utf-8")
-        console.print("  [dim]Created memory/MEMORY.md[/dim]")
-
-    history_file = memory_dir / "HISTORY.md"
-    if not history_file.exists():
-        history_file.write_text("", encoding="utf-8")
-        console.print("  [dim]Created memory/HISTORY.md[/dim]")
-
-    emotion_log_template = templates_dir / "memory" / "EMOTION_LOG.md"
-    emotion_log_file = memory_dir / "EMOTION_LOG.md"
-    if not emotion_log_file.exists():
-        emotion_log_file.write_text(
-            emotion_log_template.read_text(encoding="utf-8"), encoding="utf-8"
-        )
-        console.print("  [dim]Created memory/EMOTION_LOG.md[/dim]")
+    data_memory_dir = workspace / "data" / "memory"
+    data_memory_dir.mkdir(parents=True, exist_ok=True)
 
     config_dir = workspace / "config"
     config_dir.mkdir(exist_ok=True)

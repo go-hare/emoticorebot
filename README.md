@@ -4,9 +4,9 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-**emoticorebot** is an ultra-lightweight personal AI assistant with a **fusion pipeline architecture (IQ + EQ)**, built on [LangGraph](https://github.com/langchain-ai/langgraph) and derived from the original Nanobot project.
+**emoticorebot** is an ultra-lightweight personal AI assistant with an **EQ-led fusion architecture (EQ + IQ Layer)**, built on [LangGraph](https://github.com/langchain-ai/langgraph) and derived from the original Nanobot project.
 
-It perceives emotional context in every conversation turn, dynamically balances factual reasoning (IQ) with empathetic expression (EQ), and continuously evolves its persona through background reflection.
+It perceives emotional context in every conversation turn, lets **EQ act as the lead layer**, routes work into a lightweight **sparse MoE IQ layer** when needed, and continuously evolves its persona through background reflection.
 
 ---
 
@@ -74,88 +74,234 @@ emoticorebot gateway
 
 ## Architecture
 
-### Fusion Pipeline (LangGraph)
+### EQ-led Fusion Graph (LangGraph)
 
-emoticorebot uses a **LangGraph state machine** to execute each conversation turn. The graph has three nodes and a dynamic router:
+emoticorebot uses a **LangGraph state machine** to execute each conversation turn. The external graph remains simple, but the internal semantics are now **EQ-led deliberation + lightweight sparse MoE**:
 
 ```
 User Input
     │
     ▼
-[SignalExtractor]  ──→  TurnSignals (task_strength, emotion_intensity,
-    │                               relationship_need, urgency, safety_risk)
-    ▼
-[PolicyEngine]     ──→  FusionPolicy (iq_weight, eq_weight, empathy_depth,
-    │                                 fact_depth, tool_budget, tone)
+Session history / pending-task metadata
+    │
     ▼
  ┌──────────────────────────────────────────────────────┐
  │                  LangGraph Graph                     │
  │                                                      │
- │   ENTRY ──→ [EQ Node] ──┬──→ [IQ Node] ──┐          │
- │               ▲         │        │        │          │
- │               └─────────┘        ▼        │          │
- │                          [Memory Node] ←──┘          │
+ │   ENTRY ──→ [EQ Node] ──┬──→ [IQ Layer] ──┐         │
+ │               ▲         │        │         │         │
+ │               └─────────┘        ▼         │         │
+ │                          [Memory Node] ←───┘         │
  │                                │                     │
  └────────────────────────────────┼─────────────────────┘
                                   ▼
                                END / Output
 ```
 
+`EQ Node` and `IQ Layer` may loop for multiple internal rounds, but **only EQ can terminate the turn and produce the user-facing message**.
+
 **Node responsibilities:**
 
 | Node | Role |
 |------|------|
-| `EQ Node` | Empathy detection, emotion parsing, response style rendering. Decides whether to delegate to IQ. |
-| `IQ Node` | Factual reasoning, tool execution (web search, file ops, code exec, MCP). |
-| `Memory Node` | Writes conversation to semantic / relational / affective stores; saves PAD emotion state. |
+| `EQ Node` | Lead layer. Interprets intent, sets emotional goal, decides whether to consult IQ, chooses experts, reviews expert disagreement, and produces the final user-facing reply. |
+| `IQ Layer` | Lightweight sparse MoE. Runs `ActionExpert` by default, and conditionally adds `MemoryOverlay` and `RiskOverlay`. |
+| `Memory Node` | Writes event / episodic / semantic / relational / affective / plan memories and persists PAD state. |
 
 **Routing logic (`FusionRouter`):**
 
-- `EQ → IQ`: EQ detects a task that needs factual execution.
-- `IQ → EQ`: IQ has results; EQ wraps them in empathetic language.
-- `* → Memory`: `done=True` or IQ attempt limit reached; write-back and exit.
+- `EQ → IQ`: EQ decides the current turn needs internal rational work.
+- `IQ → EQ`: IQ returns a merged packet plus expert packets / disagreement summary.
+- `EQ → Memory`: EQ has decided to answer the user or ask the user for missing info.
+- `* → Memory`: `done=True`; write-back and exit.
+
+### Lightweight Sparse MoE in IQ Layer
+
+The current IQ layer is intentionally lightweight instead of a heavy all-experts MoE.
+
+| Expert | Default | Role |
+|---|---|---|
+| `ActionExpert` | Yes | Main expert for factual analysis, tools, missing params, and next-step recommendation |
+| `MemoryOverlay` | Conditional | Injects historical task / plan / episodic context when the turn looks like a resume / follow-up |
+| `RiskOverlay` | Conditional | Adds cheap risk checks when confidence is low, tools are used, or the action is sensitive |
+
+Selection is **EQ-led**:
+
+- default to `ActionExpert`
+- add `MemoryOverlay` only for history continuation / pending-task recovery
+- add `RiskOverlay` only for uncertainty, sensitive actions, or lower confidence
+- cap the active set to **at most 2 experts** for latency and token control
+
+Each IQ round returns both a **merged packet** and the underlying **expert packets**, so EQ can see internal disagreement instead of only a flattened result.
+
+### Typical Workflows
+
+#### 1. Normal request → `ActionExpert`
+
+Example: “Help me summarize this file.”
+
+```text
+User
+  → EQ judges this is a normal task
+  → EQ selects: [ActionExpert]
+  → IQ Layer runs ActionExpert
+  → EQ finalizes user-facing reply
+```
+
+Properties:
+
+- lowest cost path
+- no extra memory lookup
+- no extra risk overlay unless confidence drops
+
+#### 2. Resume / follow-up request → `ActionExpert + MemoryOverlay`
+
+Example:
+
+- previous turn: “Check the weather for me.”
+- assistant: “Which city?”
+- user: “Shanghai.”
+
+```text
+User follow-up
+  → EQ detects likely pending-task recovery
+  → EQ selects: [ActionExpert, MemoryOverlay]
+  → MemoryOverlay checks pending task / plans / episodic memory
+  → ActionExpert continues the task with overlay context
+  → EQ reviews merged result and answers naturally
+```
+
+Properties:
+
+- optimized for unfinished-task recovery
+- preserves `resume_task` and overlay hit type in session metadata
+- avoids asking the same missing question again when enough context exists
+
+#### 3. Sensitive / low-confidence request → `ActionExpert + RiskOverlay`
+
+Example: “Run this command and delete the old files.”
+
+```text
+User request
+  → EQ detects possible external action / higher risk
+  → EQ selects: [ActionExpert, RiskOverlay]
+  → ActionExpert evaluates feasibility and tools
+  → RiskOverlay points out dangers / uncertainty / missing safeguards
+  → EQ sees disagreement, then either answers conservatively or asks user first
+```
+
+Properties:
+
+- optimized for safety and overconfidence control
+- useful when tools are involved or confidence is low
+- keeps the system lightweight by adding only one overlay
 
 ---
 
-### Signal & Policy Layer
+### Decision Inputs & Prompt Construction
 
-`SignalExtractor` parses each user turn into five float signals `[0, 1]`:
+The current implementation no longer uses standalone `SignalExtractor` / `PolicyEngine` modules. Instead, turn planning is produced by **`EQService` + `FusionRouter` + session metadata**.
 
-| Signal | Meaning |
-|--------|---------|
-| `task_strength` | Presence of action keywords ("查询", "run", "fix", …) |
-| `emotion_intensity` | Emotional keywords + exclamation density |
-| `relationship_need` | Derived from emotion + "你" pronoun presence |
-| `urgency` | Urgency keywords ("立刻", "asap", …) + question marks |
-| `safety_risk` | Hard-coded crisis detection (self-harm phrases → 1.0) |
+**EQ prompt construction (`ContextBuilder.build_eq_system_prompt`)**
 
-`PolicyEngine` converts signals into a `FusionPolicy`:
+- loads EQ execution rules from workspace `AGENTS.md`
+- loads persona anchors from `SOUL.md` and user cognition from `USER.md`
+- loads `current_state.md` for PAD / status grounding
+- retrieves relational / affective / reflective / episodic memory sections
+- asks EQ to decide whether IQ is needed, which experts to activate, and what each expert should focus on
 
-| Policy Field | Effect |
-|---|---|
-| `iq_weight / eq_weight` | Balance between factual and empathetic processing |
-| `empathy_depth` | 0 = none, 1 = light, 2 = deep empathy opening |
-| `fact_depth` | IQ reasoning depth (1–3) |
-| `tool_budget` | Max tool calls per turn (3–6) |
-| `tone` | `professional` / `warm` / `balanced` / `concise` |
+**IQ prompt construction (`ContextBuilder.build_iq_system_prompt`)**
 
-Runtime adjustments from `ReflectionEngine` can bias the policy via `eq_bias`, `iq_bias`, and `tone_preference`.
+- loads workspace `AGENTS.md` and `TOOLS.md` as execution constraints
+- loads `current_state.md`
+- retrieves semantic / episodic / plan / reflective / event memory sections
+- injects active skills summary and skill bodies when configured
+- passes EQ-selected experts and expert-specific questions through `intent_params`
+
+**Session and continuation inputs**
+
+- pending task metadata is injected before EQ deliberation and follow-up IQ rounds
+- assistant-side metadata persists selected experts, expert packets, disagreement summary, and memory overlay anchors
+- EQ arbitration now persists accepted experts, rejected experts, and a short arbitration summary
+- `MemoryOverlay` can recover `resume_task` and hit type so EQ avoids re-asking the same missing question when enough context exists
+
+In short, the working decision loop is now: **history + memory + pending task → EQ planning → sparse expert execution in IQ → EQ finalization**.
 
 ---
 
 ### Memory Layer
 
-All memory is stored as files under `~/.emoticorebot/data/` (or the configured workspace):
+All memory is stored as files under `~/.emoticorebot/data/memory/` (or the configured workspace):
 
 | Store | File | Purpose |
 |-------|------|---------|
-| `SemanticStore` | `semantic_memories.jsonl` | Factual notes with tags and importance scores |
-| `RelationalStore` | `relational_memories.jsonl` | Preferences, relationships, warm memories |
-| `AffectiveStore` | `affective_traces.jsonl` | PAD (Pleasure / Arousal / Dominance) emotional timeline |
-| `PolicyStateStore` | `policy_state.json` | Active runtime policy adjustments with TTL |
+| `EventStore` | `events.jsonl` | Raw event stream for each turn |
+| `EpisodicStore` | `episodic.jsonl` | Conversation episodes distilled from event slices |
+| `SemanticStore` | `semantic.jsonl` | Durable facts with tags and importance scores |
+| `ReflectiveStore` | `reflective.jsonl` | Higher-level insights derived from reflection cycles |
+| `PlanStore` | `plans.jsonl` | Active / blocked / completed task memories |
+| `RelationalStore` | `relational.jsonl` | Preferences, relationships, warm memories |
+| `AffectiveStore` | `affective.jsonl` | PAD (Pleasure / Arousal / Dominance) emotional timeline |
 | `MemoryFacade` | — | Unified read/write API for all stores |
 
+The primary memory flow is now **event stream → episodic / semantic / reflective / plans**, rather than `MEMORY.md` / `HISTORY.md` file summaries.
+
+In addition, assistant-side session metadata now persists:
+
+- selected experts for the round
+- expert disagreement summary
+- compact expert summaries
+- EQ arbitration result (`accepted_experts` / `rejected_experts` / `arbitration_summary`)
+- `MemoryOverlay` hit type / `resume_task` / overlay summary
+
+This makes later turns much better at resuming unfinished work and preserving the shape of past internal deliberation.
+
+EQ arbitration is also written into structured long-term memory:
+
+- assistant dialogue events now carry arbitration metadata for traceability
+- `ReflectiveStore` now records `eq_arbitration` insights when a turn contains real expert selection, rejection, or multiple internal rounds
+- later retrieval can reuse not just “what happened”, but also “how EQ chose between experts”
+
 The **PAD model** (Pleasure-Arousal-Dominance) is used to track the bot's continuous emotional state across sessions. It is loaded at startup from `current_state.md` and written back after every turn.
+
+---
+
+### Current Limitations
+
+The current architecture is already usable, but it is intentionally still conservative in a few places:
+
+- `MemoryOverlay` is currently **rule-first** rather than a fully semantic planner; this keeps it cheap and fast, but it may miss more implicit follow-up turns.
+- `RiskOverlay` is currently a **cheap heuristic overlay**, not yet a small-model specialist; it is good at lightweight guarding, but not yet a deep adversarial critic.
+- IQ-layer merging is still **ActionExpert-centered**; overlay experts mainly refine or constrain the primary result rather than participate in a more advanced arbitration pipeline.
+- EQ arbitration is now persisted, but reflective memory currently stores only a compact arbitration insight rather than a richer multi-step debate trace.
+- The outer LangGraph remains intentionally simple; the system behaves like an EQ-led sparse MoE, but the graph itself is not yet a dedicated multi-expert state machine.
+
+### Roadmap
+
+Recommended next steps for this architecture:
+
+1. **Upgrade `RiskOverlay` to a small-model expert**
+   - make risk review more precise
+   - keep the main path fast by only enabling it when needed
+
+2. **Strengthen `MemoryOverlay` recovery quality**
+   - improve implicit follow-up detection
+   - better reconcile pending-task / plan / episodic signals
+
+3. **Deepen EQ arbitration memory**
+   - enrich `eq_arbitration` reflections with stronger causal tags
+   - let future turns retrieve not only the verdict but also the failure mode that triggered it
+   - prepare for richer agent-memory behavior later
+
+4. **Refactor the IQ layer internally**
+   - split planning / execution / merging more clearly
+   - preserve the current lightweight behavior while making extension easier
+
+5. **Optionally add more experts later**
+   - only after `ActionExpert`, `MemoryOverlay`, and `RiskOverlay` are stable
+   - examples: fact specialist, social-memory specialist, deeper planning specialist
+
+In short: the current version optimizes for **clarity, controllable cost, and recoverable history**, and future work should improve expert quality without giving up the lightweight design.
 
 ---
 
@@ -355,27 +501,33 @@ emoticorebot channels status  # Show channel connection status
 
 ```text
 emoticorebot/
-├── core/                 # Fusion orchestration (LangGraph graph, nodes, router, policy)
+├── core/                 # Fusion orchestration (LangGraph graph, state, router, context)
 │   ├── graph.py          #   LangGraph graph definition & compilation
 │   ├── state.py          #   FusionState / IQState / EQState
-│   ├── signal_extractor.py  # TurnSignals extraction
-│   ├── policy_engine.py  #   FusionPolicy generation
-│   ├── router.py         #   FusionRouter (node routing logic)
+│   ├── router.py         #   FusionRouter (EQ ↔ IQ ↔ Memory routing)
+│   ├── context.py        #   EQ / IQ prompt context builder
 │   ├── model.py          #   LLMFactory (multi-provider)
 │   ├── mcp.py            #   MCP client integration
 │   ├── skills.py         #   Skill loader
-│   ├── context.py        #   Prompt context builder
 │   └── nodes/            #   eq_node / iq_node / memory_node
+├── experts/              # Lightweight sparse MoE experts for the IQ layer
+│   ├── base.py
+│   ├── registry.py
+│   ├── action_expert.py
+│   ├── memory_overlay.py
+│   └── risk_overlay.py
 ├── services/             # Service layer
-│   ├── eq_service.py     #   EQ service (empathy rendering)
-│   ├── iq_service.py     #   IQ service (tool-augmented reasoning)
+│   ├── eq_service.py     #   EQ lead service (deliberate / finalize / expert planning)
+│   ├── iq_service.py     #   IQ Layer coordinator (sparse MoE + tool reasoning)
 │   ├── memory_service.py #   Memory read/write service
 │   └── tool_manager.py   #   Tool registry & execution
-├── memory/               # Layered memory stores
-│   ├── semantic_store.py
-│   ├── relational_store.py
-│   ├── affective_store.py
-│   ├── policy_state_store.py
+├── memory/               # Layered memory implementation
+│   ├── structured_stores.py
+│   ├── stateful_stores.py
+│   ├── extractor.py
+│   ├── retriever.py
+│   ├── schema.py
+│   ├── jsonl_store.py
 │   └── memory_facade.py
 ├── background/           # Background daemons
 │   ├── subconscious.py   #   SubconsciousDaemon (decay / reflect / proactive)
@@ -386,9 +538,9 @@ emoticorebot/
 ├── channels/             # Channel adapters (Telegram, Discord, …)
 ├── providers/            # LLM provider utilities
 ├── runtime/              # FusionRuntime (dispatch + orchestration)
-├── bus/                  # MessageBus (inbound/outbound event queue)
+├── bus/                  # Inbound / outbound event queue
 ├── cron/                 # Cron scheduler service
-├── session/              # Session management
+├── session/              # Session persistence and recovery
 ├── models/               # Shared data models (EmotionState, …)
 ├── config/               # Pydantic config schema
 ├── skills/               # Built-in skill definitions (Markdown)

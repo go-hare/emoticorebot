@@ -1,14 +1,10 @@
 """
-PAD 情感状态机 + 驱动欲望指数 + 情绪事件记忆流
+PAD 情感状态机 + 驱动欲望指数。
 
 设计依据：ai.md §1.1 / §1.2
 - PAD 三维情感模型 (Pleasure-Arousal-Dominance)
 - 驱动欲望 (social / energy)
 - EmotionStateManager：统一管理，线程安全，与 current_state.md 文件同步
-- EmotionEventLog：情绪变化事件记忆流（时间戳+触发词+变化量+后续行为）
-  存储位置：workspace/memory/EMOTION_LOG.md
-  格式：
-    | 2026-03-03 15:31 | "喜欢你" | 愉悦+0.30 激活+0.20 | 傲娇防御，开心 |
 """
 
 from __future__ import annotations
@@ -189,6 +185,18 @@ class DriveState:
         self.energy -= self.energy_decay_per_hour * hours
         self.clamp()
 
+    def on_praise(self) -> None:
+        """用户夸奖：social +5.00, energy +20.00"""
+        self.social += 5.00
+        self.energy += 20.00
+        self.clamp()
+
+    def on_insult(self) -> None:
+        """用户谩骂：social -5.00, energy +20.00"""
+        self.social -= 5.00
+        self.energy += 20.00
+        self.clamp()
+
     def on_chat(self) -> None:
         """每次对话后社交渴望回升 20，精力消耗 2。"""
         self.social += self.recover_per_chat
@@ -239,108 +247,6 @@ class EmotionEvent:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 情绪事件记忆流（持久化到 EMOTION_LOG.md）
-# ─────────────────────────────────────────────────────────────────────────────
-
-class EmotionEventLog:
-    """
-    情绪变化事件记忆流，写入 workspace/memory/EMOTION_LOG.md。
-
-    格式（Markdown 表格）：
-    | 时间戳           | 触发词   | 情绪变化量          | 后续行为         |
-    | 2026-03-03 15:31 | "喜欢你" | 愉悦+0.30 激活+0.20 | 傲娇防御，开心    |
-
-    供 EQ 路径检索：下次遇到相似触发词时预判自身反应，调整回应策略。
-    """
-
-    _HEADER = (
-        "# Emotion Event Log（情绪记忆流）\n"
-        "> 记录每次情绪变化事件。EQ 系统可检索以预判反应、调整策略。\n\n"
-        "| 时间戳 | 触发词 | 情绪变化量 | 后续行为 |\n"
-        "| :--- | :--- | :--- | :--- |\n"
-    )
-    _MAX_ROWS = 500   # 防止文件无限增长，超过后截断旧记录
-
-    def __init__(self, workspace: Path):
-        from emoticorebot.utils.helpers import ensure_dir
-        self._log_file = ensure_dir(workspace / "memory") / "EMOTION_LOG.md"
-        self._lock     = threading.Lock()
-        self._ensure_header()
-
-    def _ensure_header(self) -> None:
-        """
-        文件不存在或为空时写入表头。
-        优先从 emoticorebot/templates/memory/EMOTION_LOG.md 读取（与 onboard 模板保持一致），
-        降级使用内置 _HEADER 字符串。
-        """
-        if not self._log_file.exists() or self._log_file.stat().st_size == 0:
-            try:
-                header = self._HEADER
-                try:
-                    from importlib.resources import files as pkg_files
-                    tpl = pkg_files("emoticorebot") / "templates" / "memory" / "EMOTION_LOG.md"
-                    header = tpl.read_text(encoding="utf-8")
-                except Exception:
-                    pass  # 降级到硬编码表头
-                self._log_file.write_text(header, encoding="utf-8")
-            except Exception as e:
-                logger.warning("EmotionEventLog: failed to init header: {}", e)
-
-    def append(self, event: EmotionEvent) -> None:
-        """追加一条情绪事件记录。"""
-        with self._lock:
-            try:
-                with open(self._log_file, "a", encoding="utf-8") as f:
-                    f.write(event.to_md_row() + "\n")
-                self._maybe_truncate()
-                logger.debug(
-                    "EmotionEvent logged: trigger='{}' Δp={:+.2f} Δa={:+.2f} Δd={:+.2f}",
-                    event.trigger, event.delta_pleasure,
-                    event.delta_arousal, event.delta_dominance,
-                )
-            except Exception as e:
-                logger.warning("EmotionEventLog.append failed: {}", e)
-
-    def get_recent(self, limit: int = 20) -> str:
-        """
-        读取最近 N 条情绪事件，供注入 EQ System Prompt 使用。
-        返回格式化的 Markdown 片段。
-        """
-        if not self._log_file.exists():
-            return ""
-        try:
-            text  = self._log_file.read_text(encoding="utf-8")
-            lines = [l for l in text.splitlines() if l.startswith("|") and "时间戳" not in l and ":---" not in l]
-            recent = lines[-limit:] if len(lines) > limit else lines
-            if not recent:
-                return ""
-            header = (
-                "## 情绪事件记忆流（最近记录）\n"
-                "| 时间戳 | 触发词 | 情绪变化量 | 后续行为 |\n"
-                "| :--- | :--- | :--- | :--- |\n"
-            )
-            return header + "\n".join(recent)
-        except Exception as e:
-            logger.warning("EmotionEventLog.get_recent failed: {}", e)
-            return ""
-
-    def _maybe_truncate(self) -> None:
-        """超过 _MAX_ROWS 行时，删除最旧的 100 条，防止文件无限增长。"""
-        try:
-            text  = self._log_file.read_text(encoding="utf-8")
-            rows  = [l for l in text.splitlines() if l.startswith("|") and "时间戳" not in l and ":---" not in l]
-            if len(rows) > self._MAX_ROWS:
-                kept  = rows[-(self._MAX_ROWS - 100):]
-                self._log_file.write_text(
-                    self._HEADER + "\n".join(kept) + "\n",
-                    encoding="utf-8",
-                )
-                logger.info("EmotionEventLog truncated: kept {} rows", len(kept))
-        except Exception:
-            pass
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 统一管理器：读写 current_state.md
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -356,7 +262,7 @@ class EmotionStateManager:
     - 启动时从文件读取上次状态（持久化）
     - 每次状态变更后立即写回文件（供 ContextBuilder 注入 System Prompt）
     - 线程安全（守护进程和主循环并发写入）
-    - emotion_log：情绪事件记忆流（EmotionEventLog → memory/EMOTION_LOG.md）
+    - 情绪事件对象：由调用方接管并写入结构化记忆层
     """
 
     def __init__(self, workspace: Path):
@@ -377,7 +283,6 @@ class EmotionStateManager:
             recover_per_chat=float(social_cfg.get("recover_per_chat", 20)),
             recover_per_sleep=float(energy_cfg.get("recover_per_sleep", 80)),
         )
-        self.emotion_log = EmotionEventLog(workspace)
         self._load()
 
     # ── 文件读写 ──────────────────────────────────────────────────────────────
@@ -472,7 +377,7 @@ class EmotionStateManager:
         """
         根据对话内容自动检测情绪事件并更新 PAD 状态。
         每次对话结束后调用（ai.md §1.1 更新因子）。
-        同时将情绪变化事件写入情绪记忆流（EMOTION_LOG.md）。
+        情绪变化事件对象由上层写入结构化记忆层。
         """
         with self._lock:
             lower = user_msg.lower()
@@ -489,12 +394,14 @@ class EmotionStateManager:
                 # 找到具体触发词
                 event_trigger  = next((w for w in _PRAISE_WORDS if w in lower), user_msg[:20])
                 self.pad.on_praise()
+                self.drive.on_praise()
                 event_behavior = "开心，略感傲娇，倾向多聊"
                 logger.debug("PAD: praise detected → pleasure↑ arousal↑")
 
             elif any(w in lower for w in _INSULT_WORDS):
                 event_trigger  = next((w for w in _INSULT_WORDS if w in lower), user_msg[:20])
                 self.pad.on_insult()
+                self.drive.on_insult()
                 event_behavior = "生气，回复简短有力"
                 logger.debug("PAD: insult detected → pleasure↓ arousal↑")
 
@@ -521,7 +428,6 @@ class EmotionStateManager:
                     delta_dominance = delta_d,
                     behavior        = event_behavior,
                 )
-                self.emotion_log.append(event)
                 return event  # 返回给调用方，供写入 AffectiveStore
             return None
 

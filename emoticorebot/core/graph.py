@@ -20,7 +20,7 @@ from emoticorebot.core.router import FusionRouter
 
 def create_fusion_agent(workspace: Path, runtime):
     """编译 LangGraph fusion 图（一次性，结果应被 runtime 缓存）。"""
-    router = FusionRouter(max_iterations=10, max_iq_attempts=3)
+    router = FusionRouter(max_iq_attempts=3)
     graph = StateGraph(FusionState)
 
     async def _eq(s: FusionState) -> FusionState:
@@ -51,6 +51,7 @@ async def run_fusion_agent(
     workspace: Path,
     runtime,
     history: list[dict] | None = None,
+    metadata: dict | None = None,
     channel: str = "",
     chat_id: str = "",
     session_id: str = "",
@@ -76,6 +77,8 @@ async def run_fusion_agent(
 
     if on_progress:
         initial_state["on_progress"] = on_progress
+    if metadata:
+        initial_state["metadata"] = metadata
 
     try:
         result = await agent.ainvoke(initial_state)
