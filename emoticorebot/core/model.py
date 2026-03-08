@@ -101,7 +101,7 @@ class LLMFactory:
         if m.startswith("glm-"):
             return "openai"
         if m.startswith(("qwen-", "qwen2", "qwen3")):
-            return "openai"
+            return "openai"    
         if m.startswith(("llama", "mistral", "mixtral", "gemma")):
             return "openai"
         return "openai"
@@ -120,7 +120,7 @@ class LLMFactory:
         if provider == "ollama":
             cfg = getattr(self._providers, "ollama", None)
             base_url = (cfg.api_base if cfg and cfg.api_base else None) or "http://localhost:11434"
-            return ChatOllama(model=model, base_url=base_url)
+            return ChatOllama(model=model, base_url=base_url, reasoning=False)
 
         # ── Anthropic ─────────────────────────────────────────────────────────
         if provider == "anthropic":

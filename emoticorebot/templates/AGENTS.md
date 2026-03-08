@@ -26,9 +26,19 @@
 ## 输出协议
 
 - 必须只输出一个 JSON 对象
-- `decision` 只能是：`accept` / `delegate` / `retry` / `ask`
-- `message` 写给用户看的自然语言
-- `task` 仅在 `delegate` / `retry` 时填写，否则为空字符串
+- 第一轮主导判断（deliberate）输出：
+  - `intent` / `emotional_goal` / `working_hypothesis`
+  - `need_iq`：`true` 或 `false`
+  - `question_to_iq`：仅在 `need_iq=true` 时填写
+  - `selected_experts` / `expert_questions`：仅在需要征询 IQ 时填写
+  - `final_decision`：仅在不需要 IQ 时填写，值为 `answer`
+  - `final_message`：仅在不需要 IQ 时填写
+- 第二轮综合判断（finalize）输出：
+  - `decision` 只能是：`answer` / `ask_user` / `continue_deliberation`
+  - `message`：写给用户的话；若继续内部讨论可为空字符串
+  - `question_to_iq`：仅在 `continue_deliberation` 时填写
+  - `selected_experts` / `expert_questions`：仅在继续内部讨论时填写
+  - `accepted_experts` / `rejected_experts` / `arbitration_summary`：用于记录 EQ 裁决
 
 ## 约束
 

@@ -53,10 +53,6 @@ class ContextBuilder:
             if content:
                 parts.append(f"## {fname}\n\n{content}")
 
-        state = self._load_file("current_state.md")
-        if state:
-            parts.append(f"## Current State\n\n{state}")
-
         parts.extend(self.memory.build_iq_sections(query=query))
 
         always_skills = self.skills.get_always_skills()
@@ -84,6 +80,7 @@ class ContextBuilder:
         query: str = "",
         current_emotion: str = "平静",
         pad_state: tuple[float, float, float] | None = None,
+        internal_iq_summaries: list[str] | None = None,
     ) -> str:
         parts = [self._get_eq_identity()]
 
@@ -103,6 +100,10 @@ class ContextBuilder:
         state = self._load_file("current_state.md")
         if state:
             parts.append(f"## 当前状态\n\n{state}")
+
+        iq_summaries = [str(item).strip() for item in (internal_iq_summaries or []) if str(item).strip()]
+        if iq_summaries:
+            parts.append("## 历史内部摘要\n\n" + "\n".join(f"- {item}" for item in iq_summaries[:5]))
 
         parts.extend(
             self.memory.build_eq_sections(
@@ -206,6 +207,7 @@ class ContextBuilder:
         current_emotion: str = "平静",
         pad_state: tuple[float, float, float] | None = None,
         media: list[str] | None = None,
+        internal_iq_summaries: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """构建 LLM 调用所需的完整消息列表。
 
@@ -223,6 +225,7 @@ class ContextBuilder:
                 query=current_message,
                 current_emotion=current_emotion,
                 pad_state=pad_state,
+                internal_iq_summaries=internal_iq_summaries,
             )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
 

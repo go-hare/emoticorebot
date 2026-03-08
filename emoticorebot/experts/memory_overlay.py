@@ -71,35 +71,6 @@ class MemoryOverlay:
                 },
             )
 
-        episodes = self.memory.episodic.retrieve(query=query, k=2)
-        semantic = self.memory.semantic.retrieve(query=query, k=2)
-        facts: list[str] = []
-        related: list[dict[str, Any]] = []
-        for item in episodes:
-            summary = str(item.get("summary", "") or "").strip()
-            if summary:
-                facts.append(f"近期情节：{summary}")
-                related.append(item)
-        for item in semantic:
-            if item:
-                facts.append(f"稳定信息：{item}")
-                related.append({"text": item})
-        if facts:
-            return ExpertPacket(
-                expert=self.name,
-                status="completed",
-                answer="找到了可作为背景补丁的历史信息。",
-                confidence=0.62,
-                evidence=facts[:3],
-                proposed_action="answer",
-                metadata={
-                    "kind": "contextual_memory",
-                    "summary": facts[0],
-                    "resume_task": "",
-                    "relevant_memories": related[:3],
-                },
-            )
-
         return ExpertPacket(
             expert=self.name,
             status="completed",

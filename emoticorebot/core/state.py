@@ -49,6 +49,8 @@ class EQState:
     accepted_experts: list[str] = field(default_factory=list)
     rejected_experts: list[str] = field(default_factory=list)
     arbitration_summary: str = ""
+    task_continuity: str = ""
+    task_label: str = ""
     final_decision: str = ""
     final_message: str = ""
     reason: str = ""
@@ -62,7 +64,12 @@ class FusionState(TypedDict, total=False):
     """Runtime state for fusion graph."""
 
     user_input: str
-    history: list[dict]
+    # External conversation history for the user↔EQ channel.
+    # This is persisted across turns and must never be fed into IQ directly.
+    user_eq_history: list[dict]
+    # Internal deliberation history for the EQ↔IQ channel.
+    # This is single-turn only and exists only to support retries / follow-up IQ rounds.
+    eq_iq_history: list[dict]
     iq: IQState
     eq: EQState
     done: bool
@@ -118,16 +125,22 @@ def get_emotion_label(pad: dict[str, float]) -> str:
 def create_initial_state(
     user_input: str,
     workspace: Path,
-    history: list[dict] | None = None,
+    user_eq_history: list[dict] | None = None,
+    eq_iq_history: list[dict] | None = None,
     channel: str = "",
     chat_id: str = "",
     session_id: str = "",
 ) -> FusionState:
-    """Build initial graph state."""
+    """Build initial graph state.
+
+    `user_eq_history` is cross-turn external conversation history.
+    `eq_iq_history` is a fresh per-turn internal deliberation buffer.
+    """
     pad = load_pad_from_workspace(workspace)
     return {
         "user_input": user_input,
-        "history": history or [],
+        "user_eq_history": user_eq_history or [],
+        "eq_iq_history": eq_iq_history or [],
         "iq": IQState(),
         "eq": EQState(
             emotion=get_emotion_label(pad),

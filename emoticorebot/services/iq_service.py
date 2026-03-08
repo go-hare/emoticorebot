@@ -14,7 +14,7 @@ from emoticorebot.experts import ActionExpert, ExpertContext, ExpertPacket, Expe
 from emoticorebot.tools import ToolRegistry
 from emoticorebot.utils.llm_utils import extract_message_text
 
-
+from time import time
 class IQService:
     """IQ 参谋层。
 
@@ -44,6 +44,13 @@ class IQService:
         self.experts.register(MemoryOverlay(self.context.memory_facade))
         self.experts.register(RiskOverlay())
 
+    @staticmethod
+    def _compact_text(text: Any, limit: int = 160) -> str:
+        compact = " ".join(str(text or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 1] + "…"
+
     async def run_task(
         self,
         task: str,
@@ -57,10 +64,10 @@ class IQService:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """执行轻量稀疏 MoE，并返回融合后的参谋包。"""
+        history = self._normalize_internal_history(history)
         expert_questions = self._extract_expert_questions(intent_params)
         selected_experts = self._select_experts(
             task=task,
-            history=history,
             intent_params=intent_params,
         )
         packets: list[ExpertPacket] = []
@@ -68,7 +75,7 @@ class IQService:
         pending_task = self._build_pending_task(intent_params)
         base_context = ExpertContext(
             task=task,
-            user_input=self._latest_user_input(history),
+            user_input="",
             history=history,
             intent_params=intent_params,
             pending_task=pending_task,
@@ -154,7 +161,6 @@ class IQService:
             mode="iq",
             media=context.media,
         )
-
         lc_messages = self._to_langchain_messages(messages)
         tool_calls: list[dict[str, Any]] = []
 
@@ -166,8 +172,16 @@ class IQService:
 
         max_calls = max(1, self.max_iterations)
         for iteration in range(max_calls):
+            start = time()
             resp = await llm.ainvoke(lc_messages)
-
+            end = time()
+            self._debug_print_iq_round(
+                iteration=iteration + 1,
+                context=context,
+                lc_messages=lc_messages,
+                response=resp,
+                elapsed_s=end - start,
+            )
             if not getattr(resp, "tool_calls", None):
                 content = self._msg_text(resp)
                 packet = self._parse_advisor_packet(content)
@@ -222,14 +236,13 @@ class IQService:
         self,
         *,
         task: str,
-        history: list[dict[str, Any]],
         intent_params: dict[str, Any] | None,
     ) -> list[str]:
         explicit = self._extract_selected_experts(intent_params)
         if explicit:
             return explicit
         selected = ["ActionExpert"]
-        if self._should_use_memory_overlay(task=task, history=history, intent_params=intent_params):
+        if self._should_use_memory_overlay(task=task, intent_params=intent_params):
             selected.append("MemoryOverlay")
         return selected
 
@@ -269,24 +282,11 @@ class IQService:
         self,
         *,
         task: str,
-        history: list[dict[str, Any]],
         intent_params: dict[str, Any] | None,
     ) -> bool:
         params = intent_params or {}
         if params.get("resume_task") or params.get("missing_params"):
             return True
-        latest = self._latest_user_input(history).strip().lower()
-        task_text = f"{task} {latest}".lower()
-        short_reply = len(latest) <= 12 if latest else False
-        keywords = ["继续", "刚才", "上次", "还是", "按之前", "那个", "补充", "之前", "resume"]
-        if any(keyword in task_text for keyword in keywords):
-            return True
-        if short_reply and history:
-            last_assistant = next((item for item in reversed(history) if item.get("role") == "assistant"), None)
-            if last_assistant is not None:
-                content = str(last_assistant.get("content", "") or "")
-                if any(token in content for token in ["请提供", "还差", "缺少", "哪个", "什么时间", "什么城市"]):
-                    return True
         return False
 
     @staticmethod
@@ -403,11 +403,17 @@ class IQService:
         return merged
 
     @staticmethod
-    def _latest_user_input(history: list[dict[str, Any]]) -> str:
-        for item in reversed(history):
-            if item.get("role") == "user":
-                return str(item.get("content", "") or "")
-        return ""
+    def _normalize_internal_history(history: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+        normalized: list[dict[str, str]] = []
+        for item in history or []:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", "") or "").strip()
+            content = str(item.get("content", "") or "").strip()
+            if role not in {"user", "assistant"} or not content:
+                continue
+            normalized.append({"role": role, "content": content})
+        return normalized[-12:]
 
     def _build_task_message(
         self,
@@ -427,31 +433,24 @@ class IQService:
         )
 
         if intent_params:
-            current_message += (
-                "\n\n[Router Extracted Params]\n"
-                f"{json.dumps(intent_params, ensure_ascii=False)}\n"
-                "请优先使用以上参数理解当前内部任务。\n"
-            )
-            followup_answer = str(intent_params.get("followup_answer", "")).strip()
             missing_params = intent_params.get("missing_params") or []
             resume_task = str(intent_params.get("resume_task", "")).strip()
             eq_accepted = [str(item).strip() for item in (intent_params.get("eq_accepted_experts") or []) if str(item).strip()]
             eq_rejected = [str(item).strip() for item in (intent_params.get("eq_rejected_experts") or []) if str(item).strip()]
             eq_arbitration = str(intent_params.get("eq_arbitration_summary", "") or "").strip()
             if resume_task:
-                current_message += f"\n[Resume Task]\n原待续任务：{resume_task}\n"
-            if followup_answer:
-                current_message += f"\n[Follow-up Answer]\n用户刚补充的信息：{followup_answer}\n"
+                current_message += f"\n[Resume Task]\n原待续任务：{self._compact_text(resume_task, limit=120)}\n"
             if missing_params:
-                current_message += f"需要重点确认是否已补足这些缺参：{json.dumps(missing_params, ensure_ascii=False)}\n"
+                compact_missing = [self._compact_text(item, limit=24) for item in missing_params if str(item).strip()]
+                current_message += f"需要重点确认是否已补足这些缺参：{json.dumps(compact_missing[:5], ensure_ascii=False)}\n"
             if eq_arbitration or eq_accepted or eq_rejected:
                 current_message += "\n[Previous EQ Arbitration]\n"
                 if eq_arbitration:
-                    current_message += f"上一轮 EQ 裁决：{eq_arbitration}\n"
+                    current_message += f"上一轮 EQ 裁决：{self._compact_text(eq_arbitration, limit=140)}\n"
                 if eq_accepted:
-                    current_message += f"上一轮采纳专家：{json.dumps(eq_accepted, ensure_ascii=False)}\n"
+                    current_message += f"上一轮采纳专家：{json.dumps(eq_accepted[:3], ensure_ascii=False)}\n"
                 if eq_rejected:
-                    current_message += f"上一轮压过专家：{json.dumps(eq_rejected, ensure_ascii=False)}\n"
+                    current_message += f"上一轮压过专家：{json.dumps(eq_rejected[:3], ensure_ascii=False)}\n"
                 current_message += "请基于这份裁决继续补强，不要重复已经被 EQ 明确采纳的部分。\n"
 
         if memory_packet:
@@ -461,15 +460,73 @@ class IQService:
             evidence = [str(item).strip() for item in memory_packet.get("evidence", []) if str(item).strip()]
             current_message += "\n[Memory Overlay]\n"
             if summary:
-                current_message += f"summary: {summary}\n"
+                current_message += f"summary: {self._compact_text(summary, limit=140)}\n"
             if resume_task:
-                current_message += f"resume_task: {resume_task}\n"
+                current_message += f"resume_task: {self._compact_text(resume_task, limit=100)}\n"
             if missing:
-                current_message += f"missing_params: {json.dumps(missing, ensure_ascii=False)}\n"
+                compact_missing = [self._compact_text(item, limit=24) for item in missing if str(item).strip()]
+                current_message += f"missing_params: {json.dumps(compact_missing[:5], ensure_ascii=False)}\n"
             if evidence:
-                current_message += "facts:\n" + "\n".join(f"- {item}" for item in evidence[:3]) + "\n"
+                current_message += "facts:\n" + "\n".join(
+                    f"- {self._compact_text(item, limit=90)}" for item in evidence[:2]
+                ) + "\n"
 
         return current_message
+
+    def _debug_print_iq_round(
+        self,
+        *,
+        iteration: int,
+        context: ExpertContext,
+        lc_messages: list[Any],
+        response: Any,
+        elapsed_s: float,
+    ) -> None:
+        internal_history = [
+            {"role": item.get("role", ""), "content": str(item.get("content", "") or "")}
+            for item in (context.history or [])
+            if isinstance(item, dict)
+        ]
+        debug_payload = {
+            "iteration": iteration,
+            "task": context.task,
+            "intent_params_keys": sorted((context.intent_params or {}).keys()),
+            "pending_task": context.pending_task or {},
+            "internal_iq_history": internal_history,
+            "llm_messages": self._format_debug_messages(lc_messages),
+            "response": self._format_debug_response(response),
+            "elapsed_seconds": round(elapsed_s, 4),
+        }
+        print("iq-debug:", json.dumps(debug_payload, ensure_ascii=False, indent=2))
+
+    def _format_debug_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
+        formatted: list[dict[str, Any]] = []
+        for message in messages:
+            role = getattr(message, "type", message.__class__.__name__)
+            entry: dict[str, Any] = {
+                "role": role,
+                "content": self._summarize_response(self._msg_text(message), limit=800),
+            }
+            tool_calls = getattr(message, "tool_calls", None)
+            if tool_calls:
+                entry["tool_calls"] = tool_calls
+            tool_call_id = getattr(message, "tool_call_id", None)
+            if tool_call_id:
+                entry["tool_call_id"] = tool_call_id
+            formatted.append(entry)
+        return formatted
+
+    def _format_debug_response(self, response: Any) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "content": self._summarize_response(self._msg_text(response), limit=1200),
+        }
+        tool_calls = getattr(response, "tool_calls", None)
+        if tool_calls:
+            entry["tool_calls"] = tool_calls
+        invalid_tool_calls = getattr(response, "invalid_tool_calls", None)
+        if invalid_tool_calls:
+            entry["invalid_tool_calls"] = invalid_tool_calls
+        return entry
 
     @staticmethod
     def _msg_text(msg: Any) -> str:

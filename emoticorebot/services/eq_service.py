@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-
 from emoticorebot.core.context import ContextBuilder
 from emoticorebot.core.reply_utils import build_companion_prompt, build_missing_info_prompt
 from emoticorebot.utils.llm_utils import extract_message_text
-
+from time import time
 
 class EQService:
     """EQ 主导服务。
@@ -21,6 +20,40 @@ class EQService:
     def __init__(self, eq_llm, context_builder: ContextBuilder):
         self.eq_llm = eq_llm
         self.context = context_builder
+
+    @staticmethod
+    def _compact_text(text: Any, limit: int = 160) -> str:
+        compact = " ".join(str(text or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 1] + "…"
+
+    @classmethod
+    def _summarize_list(cls, items: list[Any], *, item_limit: int = 3, text_limit: int = 80) -> str:
+        cleaned = [cls._compact_text(item, limit=text_limit) for item in items if str(item or "").strip()]
+        cleaned = [item for item in cleaned if item]
+        if not cleaned:
+            return "(空)"
+        return " | ".join(cleaned[:item_limit])
+
+    @classmethod
+    def _summarize_options(cls, options: list[dict[str, Any]], *, item_limit: int = 2) -> str:
+        if not isinstance(options, list):
+            return "(空)"
+        parts: list[str] = []
+        for option in options[:item_limit]:
+            if not isinstance(option, dict):
+                continue
+            name = cls._compact_text(option.get("name", ""), limit=24)
+            description = cls._compact_text(option.get("description", ""), limit=60)
+            tradeoff = cls._compact_text(option.get("tradeoff", ""), limit=40)
+            bit = name or "option"
+            if description:
+                bit += f": {description}"
+            if tradeoff:
+                bit += f"（取舍: {tradeoff}）"
+            parts.append(bit)
+        return " | ".join(parts) if parts else "(空)"
 
     async def generate_proactive(self, prompt: str) -> str:
         system = self.context.build_eq_system_prompt()
@@ -39,18 +72,22 @@ class EQService:
         emotion: str,
         pad: dict[str, float],
         pending_task: dict[str, Any] | None,
+        current_task: dict[str, Any] | None,
+        internal_iq_summaries: list[str] | None = None,
     ) -> dict[str, Any]:
         lightweight_chat = not pending_task and not self._looks_task_like(user_input)
         if lightweight_chat:
             prompt = (
                 "你正在进行第一轮内部主导判断。\n"
                 "这更像普通闲聊、问候或轻陪伴，不需要征询 IQ。\n"
+                "你还需要判断这条输入是否属于已有任务延续、新任务，或根本不是任务。\n"
                 "请直接给出一句贴近 SOUL.md 的自然回复，短一点、有温度、有一点灵气。\n"
                 "必须只输出一个 JSON 对象，不要输出任何额外文本。\n"
                 "不要生成 selected_experts、expert_questions、question_to_iq 的冗长内容。\n"
                 "JSON 格式：\n"
                 '{"intent":"...","emotional_goal":"...","working_hypothesis":"...","need_iq":false,'
                 '"question_to_iq":"","selected_experts":[],"expert_questions":{},'
+                '"task_continuity":"none|continue|new","task_label":"...",'
                 '"final_decision":"answer","final_message":"...","reason":"..."}\n\n'
                 f"用户输入：{user_input}\n"
             )
@@ -58,6 +95,7 @@ class EQService:
             prompt = (
                 "你正在进行第一轮内部主导判断。\n"
                 "请先理解用户真正需要什么，再决定是否征询 IQ。\n"
+                "你还必须判断：这条输入是在继续当前/旧任务，还是已经切到一个新任务。\n"
                 "专家选择规则：\n"
                 "1. 默认只选 ActionExpert\n"
                 "2. 只有涉及历史承接/续聊/待续任务时才加 MemoryOverlay\n"
@@ -68,16 +106,25 @@ class EQService:
                 "JSON 格式：\n"
                 '{"intent":"...","emotional_goal":"...","working_hypothesis":"...","need_iq":true,"question_to_iq":"...",'
                 '"selected_experts":["ActionExpert"],"expert_questions":{"ActionExpert":"..."},'
+                '"task_continuity":"none|continue|new","task_label":"...",'
                 '"final_decision":"","final_message":"","reason":"..."}\n\n'
                 f"用户输入：{user_input}\n"
             )
         if pending_task:
             prompt += (
                 "\n[Pending Task]\n"
-                f"待续任务：{str(pending_task.get('task', '') or '').strip() or '(空)'}\n"
+                f"待续任务：{self._compact_text(pending_task.get('task', ''), limit=120) or '(空)'}\n"
+                f"待续任务ID：{str(pending_task.get('task_id', '') or '').strip() or '(空)'}\n"
                 f"之前缺失参数：{', '.join(str(x).strip() for x in pending_task.get('missing_params', []) if str(x).strip()) or '(无)'}\n"
-                f"之前追问：{str(pending_task.get('prompt', '') or '').strip() or '(空)'}\n"
+                f"之前追问：{self._compact_text(pending_task.get('prompt', ''), limit=120) or '(空)'}\n"
                 "如果用户当前输入像是在补充这些信息，优先征询 IQ 继续原任务。\n"
+            )
+        if current_task:
+            prompt += (
+                "\n[Current Task Anchor]\n"
+                f"当前任务ID：{str(current_task.get('task_id', '') or '').strip() or '(空)'}\n"
+                f"当前任务标签：{str(current_task.get('task_label', '') or '').strip() or '(空)'}\n"
+                f"最近更新时间：{str(current_task.get('updated_at', '') or '').strip() or '(空)'}\n"
             )
 
         messages = self.context.build_messages(
@@ -86,8 +133,14 @@ class EQService:
             mode="eq",
             current_emotion=emotion,
             pad_state=(pad.get("pleasure", 0.0), pad.get("arousal", 0.5), pad.get("dominance", 0.5)),
+            internal_iq_summaries=internal_iq_summaries,
         )
+        start = time()
         resp = await self.eq_llm.ainvoke(messages)
+        end = time()
+        print("deliberate-messages:",messages)
+        print("deliberate-resp:",resp)
+        print(f"deliberate-llm-时间：{end - start}秒")
         raw_text = extract_message_text(resp)
         parsed = self._parse_json(raw_text)
         if parsed is None:
@@ -98,6 +151,10 @@ class EQService:
                 recovered.setdefault("question_to_iq", "")
                 recovered.setdefault("reason", "recovered_partial_json")
                 return recovered
+            return self._fallback_deliberation(user_input=user_input, pending_task=pending_task, emotion=emotion)
+
+        parsed = self._normalize_deliberation_payload(parsed)
+        if parsed is None:
             return self._fallback_deliberation(user_input=user_input, pending_task=pending_task, emotion=emotion)
 
         need_iq = bool(parsed.get("need_iq", False))
@@ -133,28 +190,23 @@ class EQService:
         emotion: str,
         pad: dict[str, float],
         pending_task: dict[str, Any] | None,
+        current_task: dict[str, Any] | None,
+        internal_iq_summaries: list[str] | None,
         eq_intent: str,
         eq_emotional_goal: str,
         eq_working_hypothesis: str,
+        iq_summary: str,
         iq_status: str,
-        iq_analysis: str,
-        iq_evidence: list[str],
-        iq_risks: list[str],
         iq_missing_params: list[str],
-        iq_options: list[dict[str, Any]],
         iq_recommended_action: str,
-        iq_confidence: float,
         iq_selected_experts: list[str],
-        iq_expert_packets: list[dict[str, Any]],
         discussion_count: int,
     ) -> dict[str, Any]:
-        expert_packets = self._sanitize_expert_packets(iq_expert_packets)
-        expert_summaries = self._build_expert_summaries(expert_packets)
-        disagreement_summary = self._build_disagreement_summary(expert_packets)
         prompt = (
             "你正在进行第二轮内部综合判断。\n"
             "请综合你自己的初判与 IQ 的分析，决定是否直接答用户、向用户追问，或继续向 IQ 发起一轮内部讨论。\n"
             "你也是最终仲裁者：如果本轮已有专家包，你需要明确写出采纳了哪些专家、压过了哪些专家，以及一句最短裁决摘要。\n"
+            "你还必须明确裁定：这轮对话属于继续旧任务、切换成新任务，还是非任务型互动。\n"
             "专家选择规则：\n"
             "1. 默认延续或收缩到 ActionExpert\n"
             "2. 只有当当前问题明显与历史承接相关时才保留/追加 MemoryOverlay\n"
@@ -165,27 +217,23 @@ class EQService:
             '{"decision":"answer|ask_user|continue_deliberation","message":"给用户的话；若继续内部讨论可为空",'
             '"question_to_iq":"若继续讨论则填写问题，否则空字符串","selected_experts":["ActionExpert"],'
             '"expert_questions":{"ActionExpert":"..."},"accepted_experts":["ActionExpert"],'
-            '"rejected_experts":[],"arbitration_summary":"...","reason":"..."}\n\n'
+            '"rejected_experts":[],"arbitration_summary":"...","task_continuity":"none|continue|new","task_label":"...","reason":"..."}\n\n'
             f"用户输入：{user_input}\n"
             f"EQ intent：{eq_intent or '(空)'}\n"
             f"EQ emotional_goal：{eq_emotional_goal or '(空)'}\n"
-            f"EQ working_hypothesis：{eq_working_hypothesis or '(空)'}\n"
-            f"IQ status：{iq_status or '(空)'}\n"
-            f"本轮已启用专家：{json.dumps(iq_selected_experts, ensure_ascii=False)}\n"
-            f"专家分歧摘要：{disagreement_summary or '(无明显分歧)'}\n"
-            f"IQ analysis：{iq_analysis or '(空)'}\n"
-            f"IQ evidence：{json.dumps(iq_evidence, ensure_ascii=False)}\n"
-            f"IQ risks：{json.dumps(iq_risks, ensure_ascii=False)}\n"
-            f"IQ missing_params：{json.dumps(iq_missing_params, ensure_ascii=False)}\n"
-            f"IQ options：{json.dumps(iq_options, ensure_ascii=False)}\n"
-            f"IQ recommended_action：{iq_recommended_action or '(空)'}\n"
-            f"IQ confidence：{iq_confidence:.2f}\n"
+            f"EQ working_hypothesis：{self._compact_text(eq_working_hypothesis, limit=140) or '(空)'}\n"
+            f"本轮已启用专家：{', '.join(iq_selected_experts[:3]) or '(空)'}\n"
+            f"IQ summary：{self._compact_text(iq_summary, limit=320) or '(空)'}\n"
             f"已讨论轮数：{discussion_count}\n"
         )
-        if expert_summaries:
-            prompt += "专家逐项摘要：\n" + "\n".join(f"- {item}" for item in expert_summaries) + "\n"
         if pending_task:
-            prompt += f"待续任务：{str(pending_task.get('task', '') or '').strip() or '(空)'}\n"
+            prompt += f"待续任务：{self._compact_text(pending_task.get('task', ''), limit=120) or '(空)'}\n"
+            prompt += f"待续任务ID：{str(pending_task.get('task_id', '') or '').strip() or '(空)'}\n"
+        if current_task:
+            prompt += (
+                f"当前任务ID：{str(current_task.get('task_id', '') or '').strip() or '(空)'}\n"
+                f"当前任务标签：{self._compact_text(current_task.get('task_label', ''), limit=80) or '(空)'}\n"
+            )
 
         messages = self.context.build_messages(
             history=history,
@@ -193,8 +241,14 @@ class EQService:
             mode="eq",
             current_emotion=emotion,
             pad_state=(pad.get("pleasure", 0.0), pad.get("arousal", 0.5), pad.get("dominance", 0.5)),
+            internal_iq_summaries=internal_iq_summaries,
         )
+        start = time()
         resp = await self.eq_llm.ainvoke(messages)
+        end = time()
+        print("finalize-messages:",messages)
+        print("finalize-resp:",resp)
+        print(f"finalize-llm-时间：{end - start}秒")
         raw_text = extract_message_text(resp)
         parsed = self._parse_json(raw_text)
         if parsed is None:
@@ -210,21 +264,22 @@ class EQService:
                 return recovered
             return self._fallback_finalize(
                 iq_status=iq_status,
-                iq_analysis=iq_analysis,
+                iq_analysis=iq_summary,
                 iq_missing_params=iq_missing_params,
                 iq_recommended_action=iq_recommended_action,
                 iq_selected_experts=iq_selected_experts,
             )
 
-        decision = str(parsed.get("decision", "") or "").strip().lower()
-        if decision not in {"answer", "ask_user", "continue_deliberation"}:
+        parsed = self._normalize_finalize_payload(parsed)
+        if parsed is None:
             return self._fallback_finalize(
                 iq_status=iq_status,
-                iq_analysis=iq_analysis,
+                iq_analysis=iq_summary,
                 iq_missing_params=iq_missing_params,
                 iq_recommended_action=iq_recommended_action,
                 iq_selected_experts=iq_selected_experts,
             )
+        decision = str(parsed.get("decision", "") or "").strip().lower()
         selected_experts, expert_questions = self._normalize_expert_plan(
             selected_experts=parsed.get("selected_experts"),
             expert_questions=parsed.get("expert_questions"),
@@ -238,7 +293,7 @@ class EQService:
             rejected_experts=parsed.get("rejected_experts"),
             arbitration_summary=str(parsed.get("arbitration_summary", "") or "").strip(),
             iq_selected_experts=iq_selected_experts,
-            expert_packets=expert_packets,
+            expert_packets=[],
             decision=decision,
         )
         return {
@@ -250,8 +305,108 @@ class EQService:
             "accepted_experts": accepted_experts,
             "rejected_experts": rejected_experts,
             "arbitration_summary": arbitration_summary,
+            "task_continuity": self._normalize_task_continuity(parsed.get("task_continuity")),
+            "task_label": self._normalize_task_label(parsed.get("task_label"), user_input=user_input),
             "reason": str(parsed.get("reason", "") or "").strip(),
         }
+
+    @classmethod
+    def _normalize_deliberation_payload(cls, parsed: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(parsed, dict):
+            return None
+
+        normalized = dict(parsed)
+        legacy_decision = cls._map_legacy_eq_decision(parsed.get("decision"))
+        legacy_task = str(parsed.get("task", "") or "").strip()
+
+        if legacy_decision == "answer":
+            normalized["need_iq"] = False
+            normalized.setdefault("final_decision", "answer")
+            normalized.setdefault("final_message", str(parsed.get("message", "") or "").strip())
+        elif legacy_decision in {"continue_deliberation", "ask_user"}:
+            normalized["need_iq"] = True
+            normalized.setdefault("question_to_iq", legacy_task or str(parsed.get("message", "") or "").strip())
+            normalized.setdefault("final_decision", "")
+            normalized.setdefault("final_message", "")
+
+        need_iq = normalized.get("need_iq")
+        if not isinstance(need_iq, bool):
+            return None
+        if not need_iq:
+            final_message = str(normalized.get("final_message", "") or "").strip()
+            if not final_message:
+                return None
+            normalized["final_decision"] = "answer"
+        normalized["task_continuity"] = cls._normalize_task_continuity(normalized.get("task_continuity"))
+        normalized["task_label"] = cls._normalize_task_label(
+            normalized.get("task_label"),
+            user_input=str(
+                normalized.get("question_to_iq", "")
+                or normalized.get("final_message", "")
+                or parsed.get("task", "")
+                or ""
+            ),
+        )
+        return normalized
+
+    @classmethod
+    def _normalize_finalize_payload(cls, parsed: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(parsed, dict):
+            return None
+
+        normalized = dict(parsed)
+        decision = str(normalized.get("decision", "") or "").strip().lower()
+        legacy_task = str(normalized.get("task", "") or "").strip()
+
+        if decision not in {"answer", "ask_user", "continue_deliberation"}:
+            decision = cls._map_legacy_eq_decision(decision)
+        if decision not in {"answer", "ask_user", "continue_deliberation"}:
+            return None
+
+        normalized["decision"] = decision
+        normalized["message"] = str(normalized.get("message", "") or "").strip()
+        normalized["question_to_iq"] = str(normalized.get("question_to_iq", "") or "").strip()
+        if decision == "continue_deliberation" and not normalized["question_to_iq"]:
+            normalized["question_to_iq"] = legacy_task or normalized["message"]
+        if decision != "continue_deliberation":
+            normalized["question_to_iq"] = ""
+        if decision in {"answer", "ask_user"} and not normalized["message"]:
+            return None
+        normalized["task_continuity"] = cls._normalize_task_continuity(normalized.get("task_continuity"))
+        normalized["task_label"] = cls._normalize_task_label(normalized.get("task_label"), user_input=normalized.get("message", ""))
+        return normalized
+
+    @staticmethod
+    def _normalize_task_continuity(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if text in {"continue", "new", "none"}:
+            return text
+        if text in {"same", "resume", "old", "existing"}:
+            return "continue"
+        if text in {"new_task", "newtask", "fresh"}:
+            return "new"
+        return "none"
+
+    @staticmethod
+    def _normalize_task_label(value: Any, *, user_input: str) -> str:
+        label = str(value or "").strip()
+        if label:
+            return label[:120]
+        return str(user_input or "").strip()[:120]
+
+    @staticmethod
+    def _map_legacy_eq_decision(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        mapping = {
+            "accept": "answer",
+            "delegate": "continue_deliberation",
+            "retry": "continue_deliberation",
+            "ask": "ask_user",
+            "answer": "answer",
+            "ask_user": "ask_user",
+            "continue_deliberation": "continue_deliberation",
+        }
+        return mapping.get(text, "")
 
     @staticmethod
     def _sanitize_selected_experts(value: Any) -> list[str]:
@@ -509,6 +664,8 @@ class EQService:
                 "question_to_iq": "",
                 "selected_experts": [],
                 "expert_questions": {},
+                "task_continuity": cls._normalize_task_continuity(cls._extract_json_string_field(cleaned, "task_continuity")),
+                "task_label": cls._normalize_task_label(cls._extract_json_string_field(cleaned, "task_label"), user_input=final_message),
                 "final_decision": final_decision,
                 "final_message": final_message,
                 "reason": "recovered_partial_json",
@@ -527,6 +684,8 @@ class EQService:
         return {
             "decision": decision,
             "message": message,
+            "task_continuity": cls._normalize_task_continuity(cls._extract_json_string_field(cleaned, "task_continuity")),
+            "task_label": cls._normalize_task_label(cls._extract_json_string_field(cleaned, "task_label"), user_input=message),
         }
 
     @staticmethod
@@ -578,6 +737,8 @@ class EQService:
                     "ActionExpert": f"请继续任务：{task}，并判断是否还缺关键参数。",
                     "MemoryOverlay": "请判断当前输入是否命中待续任务，并提炼最短历史补丁。",
                 },
+                "task_continuity": "continue",
+                "task_label": task or user_input,
                 "final_decision": "",
                 "final_message": "",
                 "reason": "resume_pending_task",
@@ -593,6 +754,8 @@ class EQService:
                 "expert_questions": {
                     "ActionExpert": "请分析用户请求的可执行性、缺参、工具需求与下一步建议。",
                 },
+                "task_continuity": "new",
+                "task_label": user_input,
                 "final_decision": "",
                 "final_message": "",
                 "reason": "task_like_request",
@@ -605,6 +768,8 @@ class EQService:
             "question_to_iq": "",
             "selected_experts": [],
             "expert_questions": {},
+            "task_continuity": "none",
+            "task_label": "",
             "final_decision": "answer",
             "final_message": build_companion_prompt(emotion),
             "reason": "lightweight_conversation",
@@ -630,6 +795,8 @@ class EQService:
                 "accepted_experts": list(iq_selected_experts or [])[:2],
                 "rejected_experts": [],
                 "arbitration_summary": "EQ 判断当前应先向用户追问缺失信息。",
+                "task_continuity": "continue",
+                "task_label": iq_analysis,
                 "reason": "needs_input",
             }
         if iq_status == "uncertain" or iq_recommended_action == "continue_deliberation":
@@ -645,6 +812,8 @@ class EQService:
                 "accepted_experts": ["RiskOverlay"] if iq_status == "uncertain" else ["ActionExpert"],
                 "rejected_experts": [],
                 "arbitration_summary": "EQ 判断现有结论还不够稳，要求继续内部讨论。",
+                "task_continuity": "continue",
+                "task_label": iq_analysis,
                 "reason": "need_more_internal_analysis",
             }
         return {
@@ -656,6 +825,8 @@ class EQService:
             "accepted_experts": ["ActionExpert"],
             "rejected_experts": [],
             "arbitration_summary": "EQ 采纳当前主专家结论并直接对外回答。",
+            "task_continuity": "continue",
+            "task_label": iq_analysis,
             "reason": iq_status or "answer",
         }
 

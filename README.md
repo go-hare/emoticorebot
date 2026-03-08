@@ -246,13 +246,15 @@ All memory is stored as files under `~/.emoticorebot/data/memory/` (or the confi
 
 The primary memory flow is now **event stream → episodic / semantic / reflective / plans**, rather than `MEMORY.md` / `HISTORY.md` file summaries.
 
-In addition, assistant-side session metadata now persists:
+In the current implementation, the IQ execution layer only receives the **current internal task delegated by EQ**. It no longer replays user/assistant conversation history; cross-turn continuity stays on the EQ side.
 
-- selected experts for the round
-- expert disagreement summary
-- compact expert summaries
-- EQ arbitration result (`accepted_experts` / `rejected_experts` / `arbitration_summary`)
-- `MemoryOverlay` hit type / `resume_task` / overlay summary
+In addition, assistant-side session history now persists a lightweight record:
+
+- compact `iq_summary` for future turn recovery
+- selected experts and EQ arbitration result (`accepted_experts` / `rejected_experts` / `arbitration_summary`)
+- an `iq_audit_id` / `iq_audit_path` pointer to the full turn-level IQ audit payload
+
+The complete internal IQ payload (expert packets, tool calls, disagreement details, overlay anchors, etc.) is preserved separately under `session_audits/` so the hot `sessions/*.jsonl` path stays small.
 
 This makes later turns much better at resuming unfinished work and preserving the shape of past internal deliberation.
 

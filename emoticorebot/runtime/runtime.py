@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from uuid import uuid4
 
 from loguru import logger
 
@@ -25,7 +27,7 @@ from emoticorebot.bus.queue import MessageBus
 from emoticorebot.memory.memory_facade import MemoryFacade
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.services import EQService, IQService, MemoryService, ToolManager
-from emoticorebot.session.iq_context import build_expert_disagreement_summary, build_iq_context, extract_memory_overlay_metadata
+from emoticorebot.session.iq_context import build_expert_disagreement_summary, build_iq_context, compact_text, extract_memory_overlay_metadata
 from emoticorebot.session.manager import SessionManager
 from emoticorebot.config.schema import ModelModeConfig
 from emoticorebot.config.schema import ProvidersConfig
@@ -213,6 +215,11 @@ class FusionRuntime:
         if cmd == "/new":
             session.clear()
             session.metadata.pop("pending_task", None)
+            session.metadata.pop("current_task_id", None)
+            session.metadata.pop("tasks", None)
+            session.metadata.pop("current_task_label", None)
+            session.metadata.pop("current_task_updated_at", None)
+            self.sessions.clear_eq_iq_messages(session.key)
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="New session started. ✨")
@@ -228,15 +235,19 @@ class FusionRuntime:
             msg.channel, msg.chat_id, msg.metadata.get("message_id"), key
         )
 
-        # 加载历史（包含上一轮 IQ 的紧凑摘要，供 EQ / IQ 共用）
-        history = session.get_history(max_messages=self.memory_window, include_iq_context=True)
+        # 加载两条历史：
+        # - `user_eq_history`：跨轮持久的用户↔EQ 外部会话
+        # - `eq_iq_history`：单轮临时的 EQ↔IQ 内部会话（每轮从空开始）
+        user_eq_history = session.get_history(max_messages=self.memory_window, include_iq_context=False)
         turn_metadata = self._build_turn_metadata(session)
+        turn_task_id = self._prepare_turn_task_id(session, turn_metadata)
 
         content, final_state = await run_fusion_agent(
             user_input=msg.content,
             workspace=self.workspace,
             runtime=self,
-            history=history,
+            user_eq_history=user_eq_history,
+            eq_iq_history=[],
             metadata=turn_metadata,
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -246,18 +257,50 @@ class FusionRuntime:
         )
 
         # 保存对话到 session
-        session.add_message("user", msg.content)
+        assistant_timestamp = datetime.now().isoformat()
+        full_iq_fields = self._build_full_iq_session_fields(final_state)
+        resolved_task_id = self._resolve_final_task_id(
+            session=session,
+            user_input=msg.content,
+            final_state=final_state,
+            provisional_task_id=turn_task_id,
+        )
+        self.sessions.append_eq_iq_messages(
+            key,
+            self._build_eq_iq_turn_records(
+                final_state,
+                assistant_timestamp=assistant_timestamp,
+                task_id=resolved_task_id,
+            ),
+        )
+
+        user_fields = self._build_task_message_fields(resolved_task_id)
+        assistant_fields = self._build_assistant_session_fields(
+            final_state,
+            full_fields=full_iq_fields,
+            task_id=resolved_task_id,
+        )
+        session.add_message("user", msg.content, **user_fields)
         session.add_message(
             "assistant",
             content,
-            **self._build_assistant_session_fields(final_state),
+            timestamp=assistant_timestamp,
+            **assistant_fields,
         )
 
         pending_task = self._build_pending_task_metadata(final_state)
         if pending_task:
+            pending_task["task_id"] = resolved_task_id or pending_task.get("task_id", "")
             session.metadata["pending_task"] = pending_task
         else:
             session.metadata.pop("pending_task", None)
+
+        self._update_task_session_metadata(
+            session=session,
+            task_id=resolved_task_id,
+            final_state=final_state,
+            user_input=msg.content,
+        )
 
         self.sessions.save(session)
         self._save_proactive_target(msg.channel, msg.chat_id)
@@ -316,8 +359,8 @@ class FusionRuntime:
             }
         )
 
-    def _build_assistant_session_fields(self, final_state: dict[str, Any]) -> dict[str, Any]:
-        """Extract assistant-side internal metadata that should survive across turns."""
+    def _build_full_iq_session_fields(self, final_state: dict[str, Any]) -> dict[str, Any]:
+        """Extract the full persisted IQ payload for audit purposes."""
         iq = final_state.get("iq")
         if iq is None:
             return {}
@@ -343,6 +386,72 @@ class FusionRuntime:
             "iq_summary": self._build_iq_summary(final_state),
         }
 
+    def _build_assistant_session_fields(
+        self,
+        final_state: dict[str, Any],
+        *,
+        full_fields: dict[str, Any] | None = None,
+        task_id: str = "",
+    ) -> dict[str, Any]:
+        """Keep user_eq clean; internal IQ detail lives in `eq_iq.jsonl`."""
+        return self._build_task_message_fields(task_id)
+
+    def _build_eq_iq_turn_records(
+        self,
+        final_state: dict[str, Any],
+        *,
+        assistant_timestamp: str,
+        task_id: str,
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for item in final_state.get("eq_iq_history", []) or []:
+            if not isinstance(item, dict):
+                continue
+            payload = dict(item)
+            payload.setdefault("timestamp", assistant_timestamp)
+            if task_id:
+                payload["task_id"] = task_id
+            records.append(payload)
+
+        summary_event = self._build_eq_iq_summary_event(
+            final_state,
+            assistant_timestamp=assistant_timestamp,
+            task_id=task_id,
+        )
+        if summary_event:
+            records.append(summary_event)
+        return records
+
+    def _build_eq_iq_summary_event(
+        self,
+        final_state: dict[str, Any],
+        *,
+        assistant_timestamp: str,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        fields = self._build_full_iq_session_fields(final_state)
+        if not fields:
+            return None
+        eq = final_state.get("eq")
+        return {
+            "role": "assistant",
+            "phase": "task_summary",
+            "content": str(fields.get("iq_summary", "") or "").strip(),
+            "timestamp": assistant_timestamp,
+            "task_id": task_id,
+            "task": str(fields.get("iq_task", "") or "").strip(),
+            "task_continuity": str(getattr(eq, "task_continuity", "") or "") if eq is not None else "",
+            "task_label": str(getattr(eq, "task_label", "") or "") if eq is not None else "",
+            "iq_status": str(fields.get("iq_status", "") or "").strip(),
+            "iq_confidence": float(fields.get("iq_confidence", 0.0) or 0.0),
+            "iq_selected_experts": list(fields.get("iq_selected_experts", []) or []),
+            "iq_tool_calls": list(fields.get("iq_tool_calls", []) or []),
+            "eq_accepted_experts": list(fields.get("eq_accepted_experts", []) or []),
+            "eq_rejected_experts": list(fields.get("eq_rejected_experts", []) or []),
+            "eq_arbitration_summary": str(fields.get("eq_arbitration_summary", "") or "").strip(),
+            "final_decision": str(getattr(eq, "final_decision", "") or "") if eq is not None else "",
+        }
+
     def _build_pending_task_metadata(self, final_state: dict[str, Any]) -> dict[str, Any] | None:
         """Build session metadata for an unfinished task awaiting user input."""
         iq = final_state.get("iq")
@@ -365,6 +474,7 @@ class FusionRuntime:
             return None
 
         return {
+            "task_id": str((final_state.get("metadata") or {}).get("task_id", "") or "").strip(),
             "task": task,
             "missing_params": missing_params,
             "prompt": str(final_state.get("output", "") or getattr(iq, "analysis", "") or getattr(iq, "error", "")).strip(),
@@ -384,8 +494,189 @@ class FusionRuntime:
                 "task": str(pending_task.get("task", "")).strip(),
                 "missing_params": missing_params,
                 "prompt": str(pending_task.get("prompt", "")).strip(),
+                "task_id": str(pending_task.get("task_id", "") or "").strip(),
             }
+        active_task_id = str(session.metadata.get("current_task_id", "") or "").strip()
+        current_task = self._get_task_entry(session, active_task_id) if active_task_id else None
+        if current_task:
+            metadata["current_task"] = {
+                "task_id": active_task_id,
+                "task_label": str(current_task.get("task_label", "") or "").strip(),
+                "updated_at": str(current_task.get("updated_at", "") or "").strip(),
+                "status": str(current_task.get("status", "") or "").strip(),
+            }
+        elif active_task_id:
+            metadata["current_task"] = {
+                "task_id": active_task_id,
+                "task_label": str(session.metadata.get("current_task_label", "") or "").strip(),
+                "updated_at": str(session.metadata.get("current_task_updated_at", "") or "").strip(),
+            }
+        recent_iq_summaries: list[str] = []
+        for message in reversed(self.sessions.get_eq_iq_messages(session.key, max_messages=48)):
+            if str(message.get("phase", "") or "") != "task_summary":
+                continue
+            summary = compact_text(str(message.get("content", "") or "").strip(), limit=220)
+            if not summary:
+                continue
+            if summary in recent_iq_summaries:
+                continue
+            recent_iq_summaries.append(summary)
+            if len(recent_iq_summaries) >= 4:
+                break
+        if recent_iq_summaries:
+            metadata["recent_iq_summaries"] = list(reversed(recent_iq_summaries))
         return metadata
+
+    def _prepare_turn_task_id(self, session, metadata: dict[str, Any]) -> str:
+        pending_task = metadata.get("pending_task") if isinstance(metadata.get("pending_task"), dict) else None
+        pending_task_id = str((pending_task or {}).get("task_id", "") or "").strip()
+        if pending_task_id:
+            return pending_task_id
+        return ""
+
+    def _resolve_final_task_id(
+        self,
+        *,
+        session,
+        user_input: str,
+        final_state: dict[str, Any],
+        provisional_task_id: str,
+    ) -> str:
+        pending_task = self._build_pending_task_metadata(final_state)
+        pending_task_id = str((pending_task or {}).get("task_id", "") or "").strip()
+        if pending_task_id:
+            return pending_task_id
+
+        eq = final_state.get("eq")
+        continuity = str(getattr(eq, "task_continuity", "") or "").strip().lower() if eq is not None else ""
+        current_task_id = str(session.metadata.get("current_task_id", "") or "").strip()
+        pending_session = session.metadata.get("pending_task") if isinstance(session.metadata.get("pending_task"), dict) else None
+        pending_session_task_id = str((pending_session or {}).get("task_id", "") or "").strip()
+
+        if continuity == "continue":
+            return pending_session_task_id or current_task_id or provisional_task_id or self._new_task_id()
+        if continuity == "new":
+            return self._new_task_id()
+        if continuity == "none":
+            return ""
+
+        if provisional_task_id:
+            return provisional_task_id
+
+        if not self._turn_contains_task(final_state, user_input):
+            return ""
+
+        current_task_id = str(session.metadata.get("current_task_id", "") or "").strip()
+        if current_task_id and not self._looks_like_explicit_new_task(user_input):
+            return current_task_id
+        return self._new_task_id()
+
+    def _update_task_session_metadata(
+        self,
+        *,
+        session,
+        task_id: str,
+        final_state: dict[str, Any],
+        user_input: str,
+    ) -> None:
+        if not task_id:
+            return
+        session.metadata["current_task_id"] = task_id
+        task_entry = self._ensure_task_entry(session, task_id)
+        task_label = self._build_task_label(final_state, user_input)
+        if task_label:
+            task_entry["task_label"] = task_label
+
+        eq = final_state.get("eq")
+        pending_task = session.metadata.get("pending_task") if isinstance(session.metadata.get("pending_task"), dict) else None
+        final_decision = str(getattr(eq, "final_decision", "") or "").strip().lower() if eq is not None else ""
+        task_entry["updated_at"] = datetime.now().isoformat()
+        task_entry["status"] = "pending" if pending_task else ("completed" if final_decision == "answer" else (final_decision or "active"))
+        task_entry["last_user_input"] = compact_text(str(user_input or "").strip(), limit=240)
+        task_entry["last_output"] = compact_text(str(final_state.get("output", "") or "").strip(), limit=240)
+        task_entry["task_continuity"] = str(getattr(eq, "task_continuity", "") or "") if eq is not None else ""
+
+        session.metadata.pop("current_task_label", None)
+        session.metadata.pop("current_task_updated_at", None)
+
+    @staticmethod
+    def _build_task_message_fields(task_id: str) -> dict[str, Any]:
+        if not task_id:
+            return {}
+        return {"task_id": task_id}
+
+    @staticmethod
+    def _new_task_id() -> str:
+        return f"task_{uuid4().hex[:12]}"
+
+    @staticmethod
+    def _looks_like_explicit_new_task(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        markers = ["新任务", "另外", "另一个", "换个", "重新来", "再来一个", "顺便再", "新增一个"]
+        return any(marker in normalized for marker in markers)
+
+    @staticmethod
+    def _looks_task_like(text: str) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        if len(normalized) >= 18:
+            return True
+        keywords = [
+            "帮我", "请", "分析", "整理", "导出", "生成", "创建", "修改", "比较", "查", "搜索", "运行", "执行",
+            "写", "做", "统计", "汇总", "修复", "继续", "补充", "恢复", "导入", "导出",
+        ]
+        return any(token in normalized for token in keywords)
+
+    def _turn_contains_task(self, final_state: dict[str, Any], user_input: str) -> bool:
+        iq = final_state.get("iq")
+        eq = final_state.get("eq")
+        if iq is not None and str(getattr(iq, "task", "") or "").strip():
+            return True
+        if final_state.get("eq_iq_history"):
+            return True
+        if eq is not None and str(getattr(eq, "final_decision", "") or "").strip() == "ask_user":
+            return True
+        return self._looks_task_like(user_input)
+
+    @staticmethod
+    def _build_task_label(final_state: dict[str, Any], user_input: str) -> str:
+        eq = final_state.get("eq")
+        if eq is not None:
+            task_label = compact_text(str(getattr(eq, "task_label", "") or "").strip(), limit=120)
+            if task_label:
+                return task_label
+        iq = final_state.get("iq")
+        if iq is not None:
+            task = compact_text(str(getattr(iq, "task", "") or "").strip(), limit=120)
+            if task:
+                return task
+        return compact_text(str(user_input or "").strip(), limit=120)
+
+    @staticmethod
+    def _get_task_registry(session) -> dict[str, dict[str, Any]]:
+        tasks = session.metadata.get("tasks")
+        if not isinstance(tasks, dict):
+            tasks = {}
+            session.metadata["tasks"] = tasks
+        return tasks
+
+    def _get_task_entry(self, session, task_id: str) -> dict[str, Any] | None:
+        if not task_id:
+            return None
+        tasks = self._get_task_registry(session)
+        entry = tasks.get(task_id)
+        return entry if isinstance(entry, dict) else None
+
+    def _ensure_task_entry(self, session, task_id: str) -> dict[str, Any]:
+        tasks = self._get_task_registry(session)
+        entry = tasks.get(task_id)
+        if not isinstance(entry, dict):
+            entry = {"task_id": task_id}
+            tasks[task_id] = entry
+        return entry
 
     def _save_proactive_target(self, channel: str, chat_id: str) -> None:
         """保存主动对话目标（供潜意识服务使用）"""
@@ -405,17 +696,21 @@ class FusionRuntime:
         self,
         *,
         user_input: str,
-        history: list[dict[str, Any]],
+        user_eq_history: list[dict[str, Any]],
         emotion: str,
         pad: dict[str, float],
         pending_task: dict[str, Any] | None,
+        current_task: dict[str, Any] | None,
+        internal_iq_summaries: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self.eq_service.deliberate(
             user_input=user_input,
-            history=history,
+            history=user_eq_history,
             emotion=emotion,
             pad=pad,
             pending_task=pending_task,
+            current_task=current_task,
+            internal_iq_summaries=internal_iq_summaries,
         )
 
     async def eq_finalize(self, **kwargs) -> dict[str, Any]:

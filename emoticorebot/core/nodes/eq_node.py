@@ -16,18 +16,22 @@ async def eq_node(state: FusionState, runtime) -> FusionState:
     eq: EQState = state["eq"]
     iq: IQState = state["iq"]
     user_input = state["user_input"]
-    history = state.get("history", [])
+    user_eq_history = state.get("user_eq_history", [])
     metadata = state.get("metadata", {}) or {}
     pending_task = metadata.get("pending_task") if isinstance(metadata.get("pending_task"), dict) else None
+    current_task = metadata.get("current_task") if isinstance(metadata.get("current_task"), dict) else None
+    internal_iq_summaries = metadata.get("recent_iq_summaries") if isinstance(metadata.get("recent_iq_summaries"), list) else []
     discussion_count = int(state.get("discussion_count", 0) or 0)
 
     if not _has_iq_packet(iq):
         deliberation = await runtime.eq_deliberate(
             user_input=user_input,
-            history=history,
+            user_eq_history=user_eq_history,
             emotion=eq.emotion,
             pad=eq.pad,
             pending_task=pending_task,
+            current_task=current_task,
+            internal_iq_summaries=internal_iq_summaries,
         )
         eq.intent = deliberation.get("intent", "")
         eq.emotional_goal = deliberation.get("emotional_goal", "")
@@ -35,14 +39,15 @@ async def eq_node(state: FusionState, runtime) -> FusionState:
         eq.question_to_iq = deliberation.get("question_to_iq", "")
         eq.selected_experts = list(deliberation.get("selected_experts", []) or [])
         eq.expert_questions = dict(deliberation.get("expert_questions", {}) or {})
+        eq.task_continuity = str(deliberation.get("task_continuity", "") or "")
+        eq.task_label = str(deliberation.get("task_label", "") or "")
         eq.reason = deliberation.get("reason", "")
 
         if deliberation.get("need_iq"):
-            question = eq.question_to_iq or _build_default_iq_question(eq, user_input, pending_task)
+            question = eq.question_to_iq or _build_default_iq_question(eq, pending_task)
             metadata = _merge_followup_metadata(
                 metadata,
                 pending_task,
-                user_input,
                 selected_experts=eq.selected_experts,
                 expert_questions=eq.expert_questions,
                 accepted_experts=eq.accepted_experts,
@@ -63,23 +68,20 @@ async def eq_node(state: FusionState, runtime) -> FusionState:
 
     finalize = await runtime.eq_finalize(
         user_input=user_input,
-        history=history,
+        history=user_eq_history,
         emotion=eq.emotion,
         pad=eq.pad,
         pending_task=pending_task,
+        current_task=current_task,
+        internal_iq_summaries=internal_iq_summaries,
         eq_intent=eq.intent,
         eq_emotional_goal=eq.emotional_goal,
         eq_working_hypothesis=eq.working_hypothesis,
+        iq_summary=runtime._build_iq_summary({"iq": iq, "eq": eq}),
         iq_status=iq.status,
-        iq_analysis=iq.analysis,
-        iq_evidence=list(iq.evidence),
-        iq_risks=list(iq.risks),
         iq_missing_params=list(iq.missing_params),
-        iq_options=list(iq.options),
         iq_recommended_action=iq.recommended_action,
-        iq_confidence=float(iq.confidence or 0.0),
         iq_selected_experts=list(iq.selected_experts),
-        iq_expert_packets=list(iq.expert_packets),
         discussion_count=discussion_count,
     )
 
@@ -91,7 +93,10 @@ async def eq_node(state: FusionState, runtime) -> FusionState:
     eq.accepted_experts = list(finalize.get("accepted_experts", []) or [])
     eq.rejected_experts = list(finalize.get("rejected_experts", []) or [])
     eq.arbitration_summary = str(finalize.get("arbitration_summary", "") or "")
+    eq.task_continuity = str(finalize.get("task_continuity", "") or eq.task_continuity or "")
+    eq.task_label = str(finalize.get("task_label", "") or eq.task_label or "")
     eq.reason = finalize.get("reason", "")
+    _append_eq_arbitration_event(state, eq, iq)
 
     if eq.final_decision == "continue_deliberation":
         if discussion_count >= MAX_DISCUSSION_ROUNDS:
@@ -104,7 +109,6 @@ async def eq_node(state: FusionState, runtime) -> FusionState:
         metadata = _merge_followup_metadata(
             metadata,
             pending_task,
-            user_input,
             selected_experts=eq.selected_experts,
             expert_questions=eq.expert_questions,
             accepted_experts=eq.accepted_experts,
@@ -136,7 +140,6 @@ def _has_iq_packet(iq: IQState) -> bool:
 def _merge_followup_metadata(
     metadata: dict[str, Any],
     pending_task: dict[str, Any] | None,
-    user_input: str,
     *,
     selected_experts: list[str] | None = None,
     expert_questions: dict[str, str] | None = None,
@@ -162,7 +165,6 @@ def _merge_followup_metadata(
         **metadata,
         "intent_params": {
             **merged_params,
-            "followup_answer": user_input,
             "missing_params": list(pending_task.get("missing_params") or []),
             "resume_task": str(pending_task.get("task", "") or ""),
         },
@@ -187,15 +189,14 @@ def _queue_iq_question(iq: IQState, question: str) -> None:
 
 def _build_default_iq_question(
     eq: EQState,
-    user_input: str,
     pending_task: dict[str, Any] | None,
 ) -> str:
     if pending_task and pending_task.get("task"):
         task = str(pending_task.get("task", "") or "").strip()
-        return f"请结合用户刚刚的补充，继续这个任务：{task}。并告诉我还缺什么、风险是什么、建议我怎么回复。"
+        return f"请继续这个任务：{task}。并告诉我还缺什么、风险是什么、建议我怎么回复。"
     if eq.working_hypothesis:
         return f"请围绕这个判断做理性分析：{eq.working_hypothesis}。并给我证据、风险和建议动作。"
-    return f"请分析用户这句话的真实需求与可执行性：{user_input}。并给我证据、风险和建议动作。"
+    return "请分析当前内部任务的可执行性，并给我证据、风险和建议动作。"
 
 
 def _build_followup_iq_question(iq: IQState) -> str:
@@ -215,3 +216,26 @@ def _force_complete(iq: IQState) -> tuple[str, str]:
     if iq.error:
         return "answer", f"我现在能确定的是：{iq.error}"
     return "answer", "我先给你一个当前能确认的结论：信息还不够完整，但我会继续帮你推进。"
+
+
+def _append_eq_arbitration_event(state: FusionState, eq: EQState, iq: IQState) -> None:
+    metadata = state.get("metadata", {}) or {}
+    task_id = str(metadata.get("task_id", "") or "").strip()
+    content = str(eq.arbitration_summary or eq.reason or eq.final_decision or "").strip()
+    event = {
+        "role": "assistant",
+        "phase": "eq_arbitration",
+        "task_id": task_id,
+        "task": str(iq.task or "").strip(),
+        "task_continuity": str(eq.task_continuity or "").strip(),
+        "task_label": str(eq.task_label or "").strip(),
+        "content": content,
+        "final_decision": str(eq.final_decision or "").strip(),
+        "accepted_experts": list(eq.accepted_experts or []),
+        "rejected_experts": list(eq.rejected_experts or []),
+        "selected_experts": list(eq.selected_experts or []),
+        "arbitration_summary": str(eq.arbitration_summary or "").strip(),
+    }
+    eq_iq_history = list(state.get("eq_iq_history", []) or [])
+    eq_iq_history.append(event)
+    state["eq_iq_history"] = eq_iq_history
