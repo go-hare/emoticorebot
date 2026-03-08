@@ -428,7 +428,7 @@ class EmotionStateManager:
                     delta_dominance = delta_d,
                     behavior        = event_behavior,
                 )
-                return event  # 返回给调用方，供写入 AffectiveStore
+                return event  # 返回给调用方，供写入对话事件流
             return None
 
     def decay(self, hours: float = 0.5) -> None:

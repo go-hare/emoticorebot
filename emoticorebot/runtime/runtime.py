@@ -25,7 +25,6 @@ from emoticorebot.config.schema import ModelModeConfig, ProvidersConfig
 from emoticorebot.core.context import ContextBuilder
 from emoticorebot.core.graph import run_fusion_agent
 from emoticorebot.core.model import LLMFactory
-from emoticorebot.memory.memory_facade import MemoryFacade
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.services import EQService, IQService, MemoryService, ToolManager
 from emoticorebot.session.iq_context import build_iq_context
@@ -70,9 +69,7 @@ class FusionRuntime:
         # 核心组件
         self.sessions = session_manager or SessionManager(workspace)
         self.emotion_mgr = EmotionStateManager(workspace)
-        self.memory_facade = MemoryFacade(workspace)
-        # 将 memory_facade 注入 ContextBuilder，避免创建两份独立实例
-        self.context = ContextBuilder(workspace, memory_facade=self.memory_facade)
+        self.context = ContextBuilder(workspace)
 
         # LLM 实例 - 通过 LLMFactory 按配置构建
         _factory = LLMFactory(
@@ -87,7 +84,7 @@ class FusionRuntime:
         self.eq_service = EQService(self.eq_llm, self.context)
         self.iq_service = IQService(self.iq_llm, None, self.context)  # registry 稍后注入
         self.memory_service = MemoryService(
-            workspace, self.memory_facade, self.emotion_mgr, self.sessions, iq_mode.memory_window,
+            workspace, self.emotion_mgr, self.sessions, iq_mode.memory_window,
             iq_llm=self.iq_llm,
         )
         self.tool_manager = ToolManager(

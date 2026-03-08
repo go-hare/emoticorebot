@@ -5,9 +5,7 @@
   EQ 模板 → build_eq_system_prompt()
     - SOUL.md（人格锚点）
     - USER.md（用户认知）
-    - 结构化记忆检索（relational / affective / reflective / episodic）
-
-依赖注入：MemoryFacade 由 FusionRuntime 注入（避免重复初始化）。
+    - 认知事件流检索（EQ 流）
 """
 
 from __future__ import annotations
@@ -18,23 +16,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from emoticorebot.cognitive import CognitiveEvent
 from emoticorebot.core.skills import SkillsLoader
-from emoticorebot.memory.memory_facade import MemoryFacade
-from emoticorebot.memory.retriever import MemoryRetriever
 
 
 class ContextBuilder:
     """EQ 能力模板的上下文组装器。"""
 
-    def __init__(self, workspace: Path, memory_facade: MemoryFacade | None = None):
+    def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.memory_facade = memory_facade or MemoryFacade(workspace)
-        self.memory = MemoryRetriever(self.memory_facade)
         self.skills = SkillsLoader(workspace)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # EQ 模板
-    # ─────────────────────────────────────────────────────────────────────────
 
     def build_eq_system_prompt(
         self,
@@ -45,7 +36,6 @@ class ContextBuilder:
     ) -> str:
         parts = [self._get_eq_identity()]
 
-        # 加载 EQ 执行规则（从 AGENTS.md）
         eq_rules = self._load_eq_rules()
         if eq_rules:
             parts.append(f"## EQ 执行规则\n\n{eq_rules}")
@@ -67,7 +57,8 @@ class ContextBuilder:
             parts.append("## 历史内部摘要\n\n" + "\n".join(f"- {item}" for item in iq_summaries[:5]))
 
         parts.extend(
-            self.memory.build_eq_sections(
+            CognitiveEvent.build_eq_sections(
+                self.workspace,
                 query=query,
                 current_emotion=current_emotion,
                 pad_state=pad_state,
@@ -75,10 +66,6 @@ class ContextBuilder:
         )
 
         return "\n\n---\n\n".join(parts)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Identity headers
-    # ─────────────────────────────────────────────────────────────────────────
 
     def _get_eq_identity(self) -> str:
         return f"""# 💛 EQ 情感层（System 1 — 快系统）
@@ -109,6 +96,7 @@ class ContextBuilder:
     @staticmethod
     def _get_datetime_str() -> str:
         import time as _time
+
         now = datetime.now()
         tz = _time.strftime("%Z") or "UTC"
         weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now.weekday()]
@@ -124,8 +112,7 @@ class ContextBuilder:
         return ""
 
     def _load_eq_rules(self) -> str:
-        """从 AGENTS.md 加载 EQ 执行规则"""
-        # 尝试从 workspace 加载
+        """从 AGENTS.md 加载 EQ 执行规则。"""
         content = self._load_file("AGENTS.md")
         if content and "# EQ 执行层规则" in content:
             eq_section = content.split("# EQ 执行层规则")[-1]
@@ -133,9 +120,9 @@ class ContextBuilder:
                 eq_section = eq_section.split("---")[0]
             return eq_section.strip()
 
-        # 回退：从包模板加载
         try:
             from importlib.resources import files
+
             pkg_content = (files("emoticorebot") / "templates" / "AGENTS.md").read_text(encoding="utf-8")
             if "# EQ 执行层规则" in pkg_content:
                 eq_section = pkg_content.split("# EQ 执行层规则")[-1]
@@ -156,14 +143,7 @@ class ContextBuilder:
         media: list[str] | None = None,
         internal_iq_summaries: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """构建 LLM 调用所需的完整消息列表。
-
-        Args:
-            history: 历史消息列表，每条为 {"role": ..., "content": ...}
-            current_message: 当前用户消息
-            current_emotion: 当前情绪
-            pad_state: PAD 情绪向量
-        """
+        """构建 LLM 调用所需的完整消息列表。"""
         system = self.build_eq_system_prompt(
             query=current_message,
             current_emotion=current_emotion,

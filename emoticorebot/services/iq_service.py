@@ -83,7 +83,7 @@ class IQService:
             intent_params=intent_params,
             media=media,
         )
-
+        print("prompt:",prompt)
         try:
             raw_result = await self._invoke_agent(
                 agent,
@@ -125,7 +125,6 @@ class IQService:
                 "tools": tools,
                 "system_prompt": self._build_agent_instructions(),
             }
-
             if subagents:
                 kwargs["subagents"] = subagents
             if skills:

@@ -106,7 +106,7 @@ Session history / pending-task metadata
 |------|------|
 | `EQ Node` | Lead layer. Interprets intent, decides whether to consult IQ, tracks task continuity, and produces the final user-facing reply. |
 | `IQ Layer` | Deep Agents-based execution layer. Handles planning, tool use, subagents, and long-running complex tasks. |
-| `Memory Node` | Writes event / episodic / semantic / relational / affective / plan memories and persists PAD state. |
+| `Memory Node` | Writes the event stream and persists PAD state. |
 
 **Routing logic (`FusionRouter`):**
 
@@ -206,14 +206,14 @@ The current implementation no longer uses standalone `SignalExtractor` / `Policy
 - loads EQ execution rules from workspace `AGENTS.md`
 - loads persona anchors from `SOUL.md` and user cognition from `USER.md`
 - loads `current_state.md` for PAD / status grounding
-- retrieves relational / affective / reflective / episodic memory sections
+- retrieves EQ event stream sections
 - asks EQ to decide whether IQ is needed and what internal task should be delegated
 
 **IQ prompt construction (`ContextBuilder.build_iq_system_prompt`)**
 
 - loads workspace `AGENTS.md` and `TOOLS.md` as execution constraints
 - loads `current_state.md`
-- retrieves semantic / plan / reflective memory sections
+- retrieves event stream sections
 - injects active skills summary and skill bodies when configured
 - passes pending-task and missing-parameter hints through `intent_params`
 
@@ -235,15 +235,10 @@ All memory is stored as files under `~/.emoticorebot/data/memory/` (or the confi
 | Store | File | Purpose |
 |-------|------|---------|
 | `EventStore` | `events.jsonl` | Raw event stream for each turn |
-| `EpisodicStore` | `episodic.jsonl` | Conversation episodes distilled from event slices |
-| `SemanticStore` | `semantic.jsonl` | Durable facts with tags and importance scores |
-| `ReflectiveStore` | `reflective.jsonl` | Higher-level insights derived from reflection cycles |
-| `PlanStore` | `plans.jsonl` | Active / blocked / completed task memories |
-| `RelationalStore` | `relational.jsonl` | Preferences, relationships, warm memories |
-| `AffectiveStore` | `affective.jsonl` | PAD (Pleasure / Arousal / Dominance) emotional timeline |
+| `EventStore` | `events.jsonl` | Raw conversation event stream with EQ judgments |
 | `MemoryFacade` | — | Unified read/write API for all stores |
 
-The primary memory flow is now **event stream → episodic / semantic / reflective / plans**, rather than `MEMORY.md` / `HISTORY.md` file summaries.
+The primary memory flow is now simply **event stream**, with higher-level memory intended to be derived later rather than persisted as parallel stores.
 
 In the current implementation, the IQ execution layer only receives the **current internal task delegated by EQ**. It no longer replays user/assistant conversation history; cross-turn continuity stays on the EQ side.
 
@@ -260,7 +255,7 @@ This makes later turns much better at resuming unfinished work and preserving th
 Internal multi-round IQ behavior is also written into structured long-term memory:
 
 - assistant dialogue events now carry the final EQ decision for traceability
-- `ReflectiveStore` now records `iq_process` insights when a turn contains multiple internal rounds or ends in a user-facing clarification
+- Higher-level reflections are intended to be derived from the event stream rather than persisted as a parallel store.
 - later retrieval can reuse not just “what happened”, but also “how the internal process unfolded”
 
 The **PAD model** (Pleasure-Arousal-Dominance) is used to track the bot's continuous emotional state across sessions. It is loaded at startup from `current_state.md` and written back after every turn.
@@ -320,7 +315,7 @@ Three concurrent `asyncio.Task` loops:
 | `_proactive_loop` | 10 min (configurable) | Randomly initiates a message to the user when idle |
 
 #### ReflectionEngine (meta-cognition)
-Reads recent relational memories and calls an LLM to produce structured JSON:
+Reads recent events and calls an LLM to produce structured JSON:
 
 - **`soul_update`** — micro-adjusts `SOUL.md` (persona evolution, anchors preserved)
 - **`user_update`** — appends new user insights to `USER.md`
