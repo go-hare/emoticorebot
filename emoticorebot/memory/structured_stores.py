@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from emoticorebot.memory.jsonl_store import JsonlStore
+from emoticorebot.memory.jsonl_store import JsonlStore, resolve_eq_memory_file
 from emoticorebot.memory.schema import EpisodicMemory, MemoryEvent, PlanMemory, ReflectiveMemory
 
 
 class EventStore(JsonlStore):
     def __init__(self, workspace: Path):
-        super().__init__(workspace / "data" / "memory" / "events.jsonl")
+        super().__init__(resolve_eq_memory_file(workspace, "events.jsonl"))
 
     def save(self, event: MemoryEvent) -> None:
         self.append(event.to_dict())
@@ -44,7 +44,7 @@ class EventStore(JsonlStore):
 
 class EpisodicStore(JsonlStore):
     def __init__(self, workspace: Path):
-        super().__init__(workspace / "data" / "memory" / "episodic.jsonl")
+        super().__init__(resolve_eq_memory_file(workspace, "episodic.jsonl"))
 
     def save(self, memory: EpisodicMemory) -> None:
         self.append(memory.to_dict())
@@ -65,7 +65,7 @@ class EpisodicStore(JsonlStore):
 
 class ReflectiveStore(JsonlStore):
     def __init__(self, workspace: Path):
-        super().__init__(workspace / "data" / "memory" / "reflective.jsonl")
+        super().__init__(resolve_eq_memory_file(workspace, "reflective.jsonl"))
 
     def save(self, memory: ReflectiveMemory) -> None:
         self.append(memory.to_dict())
@@ -100,7 +100,7 @@ class PlanStore(JsonlStore):
     _ACTIVE = {"pending", "active", "blocked"}
 
     def __init__(self, workspace: Path):
-        super().__init__(workspace / "data" / "memory" / "plans.jsonl")
+        super().__init__(resolve_eq_memory_file(workspace, "plans.jsonl"))
 
     def save(self, plan: PlanMemory) -> None:
         self.append(plan.to_dict())

@@ -5,8 +5,40 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
+IQStatus = Literal["idle", "queued", "running", "completed", "needs_input", "uncertain", "failed"]
+IQRecommendedAction = Literal["", "answer", "ask_user", "continue_deliberation"]
+EQFinalDecision = Literal["", "answer", "ask_user", "continue_deliberation"]
+
+
+class IQResultPacket(TypedDict):
+    """Normalized IQ result packet passed from IQService back into the graph."""
+
+    status: Literal["completed", "needs_input", "uncertain", "failed"]
+    analysis: str
+    risks: list[str]
+    missing: list[str]
+    recommended_action: Literal["answer", "ask_user", "continue_deliberation"]
+    confidence: float
+
+
+class EQDeliberationPacket(TypedDict):
+    """Normalized EQ first-pass packet before deciding whether to consult IQ."""
+
+    intent: str
+    working_hypothesis: str
+    need_iq: bool
+    question_to_iq: str
+    final_message: str
+
+
+class EQFinalizePacket(TypedDict):
+    """Normalized EQ final decision after reading the IQ packet."""
+
+    decision: Literal["answer", "ask_user", "continue_deliberation"]
+    message: str
+    question_to_iq: str
 
 # ---------------------------------------------------------------------------
 # IQ / EQ 子状态（dataclass，支持属性访问与就地修改）
@@ -15,22 +47,18 @@ from typing import Any, TypedDict
 @dataclass
 class IQState:
     """IQ 参谋层的运行时状态。"""
-    task: str = ""
-    status: str = "idle"
+    request: str = ""
+    status: IQStatus = "idle"
     analysis: str = ""
-    evidence: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
-    options: list[dict[str, Any]] = field(default_factory=list)
-    recommended_action: str = ""
-    selected_experts: list[str] = field(default_factory=list)
-    expert_packets: list[dict[str, Any]] = field(default_factory=list)
+    recommended_action: IQRecommendedAction = ""
     confidence: float = 0.0
-    rationale_summary: str = ""
     missing_params: list[str] = field(default_factory=list)
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
     attempts: int = 0
-    error: str = ""
-    iterations: int = 0
+    model_name: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 
 @dataclass
@@ -41,19 +69,14 @@ class EQState:
         default_factory=lambda: {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}
     )
     intent: str = ""
-    emotional_goal: str = ""
     working_hypothesis: str = ""
     question_to_iq: str = ""
-    selected_experts: list[str] = field(default_factory=list)
-    expert_questions: dict[str, str] = field(default_factory=dict)
-    accepted_experts: list[str] = field(default_factory=list)
-    rejected_experts: list[str] = field(default_factory=list)
-    arbitration_summary: str = ""
-    task_continuity: str = ""
-    task_label: str = ""
-    final_decision: str = ""
+    final_decision: EQFinalDecision = ""
     final_message: str = ""
-    reason: str = ""
+    model_name: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +93,8 @@ class FusionState(TypedDict, total=False):
     # Internal deliberation history for the EQ↔IQ channel.
     # This is single-turn only and exists only to support retries / follow-up IQ rounds.
     eq_iq_history: list[dict]
+    # Fine-grained DeepAgents streaming trace for the current IQ run only.
+    iq_trace: list[dict]
     iq: IQState
     eq: EQState
     done: bool
@@ -158,6 +183,9 @@ def create_initial_state(
 
 __all__ = [
     "FusionState",
+    "IQResultPacket",
+    "IQRecommendedAction",
+    "IQStatus",
     "IQState",
     "EQState",
     "create_initial_state",

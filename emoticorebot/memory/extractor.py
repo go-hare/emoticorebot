@@ -51,12 +51,10 @@ class MemoryExtractor:
             eq = state.get("eq")
             assistant_metadata = {
                 "emotion_label": emotion_label,
-                "iq_task": getattr(iq, "task", "") if iq is not None else "",
+                "iq_question": getattr(iq, "request", "") if iq is not None else "",
                 "iq_confidence": float(getattr(iq, "confidence", 0.0) or 0.0) if iq is not None else 0.0,
                 "iq_missing_params": list(getattr(iq, "missing_params", []) or []) if iq is not None else [],
-                "eq_accepted_experts": list(getattr(eq, "accepted_experts", []) or []) if eq is not None else [],
-                "eq_rejected_experts": list(getattr(eq, "rejected_experts", []) or []) if eq is not None else [],
-                "eq_arbitration_summary": str(getattr(eq, "arbitration_summary", "") or "") if eq is not None else "",
+                "eq_decision": str(getattr(eq, "final_decision", "") or "") if eq is not None else "",
             }
             source_ids = [events[0].id] if events else []
             assistant_event = MemoryEvent(
@@ -146,18 +144,18 @@ class MemoryExtractor:
         source_event_ids: list[str],
     ) -> PlanMemory | None:
         iq = state.get("iq")
-        task = str(getattr(iq, "task", "") or "").strip() if iq is not None else ""
-        if not task:
+        request = str(getattr(iq, "request", "") or "").strip() if iq is not None else ""
+        if not request:
             return None
         timestamp = datetime.now().isoformat()
-        plan_id = self._build_plan_id(session_id=str(state.get("session_id", "") or ""), task=task)
-        related_subjects = self._extract_tags(task, limit=6)
+        plan_id = self._build_plan_id(session_id=str(state.get("session_id", "") or ""), request=request)
+        related_subjects = self._extract_tags(request, limit=6)
         if getattr(iq, "status", "") == "needs_input":
             return PlanMemory(
                 id=plan_id,
                 created_at=timestamp,
                 updated_at=timestamp,
-                title=task,
+                title=request,
                 status="blocked",
                 kind="followup",
                 owner="shared",
@@ -174,7 +172,7 @@ class MemoryExtractor:
                 id=plan_id,
                 created_at=timestamp,
                 updated_at=timestamp,
-                title=task,
+                title=request,
                 status="done",
                 kind="task",
                 owner="assistant",
@@ -199,30 +197,27 @@ class MemoryExtractor:
         if eq is None or iq is None:
             return None
 
-        accepted = [str(item).strip() for item in (getattr(eq, "accepted_experts", []) or []) if str(item).strip()]
-        rejected = [str(item).strip() for item in (getattr(eq, "rejected_experts", []) or []) if str(item).strip()]
-        summary = str(getattr(eq, "arbitration_summary", "") or "").strip()
-        selected = [str(item).strip() for item in (getattr(iq, "selected_experts", []) or []) if str(item).strip()]
         discussion_count = int(state.get("discussion_count", 0) or 0)
+        final_decision = str(getattr(eq, "final_decision", "") or "").strip()
+        recommended_action = str(getattr(iq, "recommended_action", "") or "").strip()
 
-        should_write = bool(rejected) or len(selected) > 1 or discussion_count > 1
+        should_write = discussion_count > 1 or final_decision == "ask_user"
         if not should_write:
             return None
 
-        task = str(getattr(iq, "task", "") or state.get("user_input", "") or "").strip()
-        task_summary = self._summarize(task, 80)
-        accepted_text = "、".join(accepted[:3]) if accepted else "无"
-        rejected_text = "、".join(rejected[:3]) if rejected else "无"
+        question = str(getattr(iq, "request", "") or state.get("user_input", "") or "").strip()
+        question_summary = self._summarize(question, 80)
+        decision_text = final_decision or recommended_action or "answer"
         insight = (
-            f"在任务“{task_summary}”中，EQ 采纳 {accepted_text}，压过 {rejected_text}。"
-            f"裁决摘要：{summary or '本轮由 EQ 完成专家仲裁。'}"
+            f"围绕“{question_summary}”这条内部问题，IQ 进行了理性分析与执行，"
+            f"经历 {max(1, discussion_count)} 轮内部往返，最终导向 {decision_text}。"
         )
-        memory_importance = max(0.45, min(0.95, importance + (0.1 if rejected else 0.0) + (0.05 if discussion_count > 1 else 0.0)))
+        memory_importance = max(0.45, min(0.95, importance + (0.05 if discussion_count > 1 else 0.0)))
         return ReflectiveMemory(
             id=f"ref_{uuid4().hex}",
             created_at=datetime.now().isoformat(),
             insight=insight,
-            theme="eq_arbitration",
+            theme="iq_process",
             confidence=max(0.6, min(0.95, float(getattr(iq, "confidence", 0.7) or 0.7))),
             importance=memory_importance,
             evidence_event_ids=list(source_event_ids),
@@ -231,9 +226,9 @@ class MemoryExtractor:
         )
 
     @staticmethod
-    def _build_plan_id(*, session_id: str, task: str) -> str:
-        normalized_task = re.sub(r"\s+", " ", task.strip().lower())
-        seed = f"{session_id}::{normalized_task}" if session_id else normalized_task
+    def _build_plan_id(*, session_id: str, request: str) -> str:
+        normalized_request = re.sub(r"\s+", " ", request.strip().lower())
+        seed = f"{session_id}::{normalized_request}" if session_id else normalized_request
         digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
         return f"plan_{digest}"
 

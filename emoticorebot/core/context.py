@@ -1,11 +1,6 @@
-"""Context builder - System prompt 构建器。
+"""Context builder - EQ system prompt 构建器。
 
-为 IQ 和 EQ 两条 LLM 路径分别构建 system prompt：
-
-  IQ 模板 → build_iq_system_prompt()
-    - AGENTS.md / TOOLS.md（执行规则）
-    - 结构化记忆检索（semantic / episodic / plans / reflective / events）
-    - 技能摘要
+当前主链只保留 EQ prompt 组装：
 
   EQ 模板 → build_eq_system_prompt()
     - SOUL.md（人格锚点）
@@ -19,8 +14,6 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-import platform
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,45 +24,13 @@ from emoticorebot.memory.retriever import MemoryRetriever
 
 
 class ContextBuilder:
-    """IQ / EQ 能力模板的上下文组装器。"""
-
-    _IQ_BOOTSTRAP = ["AGENTS.md", "TOOLS.md"]
+    """EQ 能力模板的上下文组装器。"""
 
     def __init__(self, workspace: Path, memory_facade: MemoryFacade | None = None):
         self.workspace = workspace
         self.memory_facade = memory_facade or MemoryFacade(workspace)
         self.memory = MemoryRetriever(self.memory_facade)
         self.skills = SkillsLoader(workspace)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # IQ 模板
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def build_iq_system_prompt(self, query: str = "") -> str:
-        parts = [self._get_iq_identity()]
-
-        for fname in self._IQ_BOOTSTRAP:
-            content = self._load_file(fname)
-            if content:
-                parts.append(f"## {fname}\n\n{content}")
-
-        parts.extend(self.memory.build_iq_sections(query=query))
-
-        always_skills = self.skills.get_always_skills()
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
-
-        skills_summary = self.skills.build_skills_summary()
-        if skills_summary:
-            parts.append(
-                "# Skills\n\n"
-                "To use a skill, read its SKILL.md file using the read_file tool.\n\n"
-                f"{skills_summary}"
-            )
-
-        return "\n\n---\n\n".join(parts)
 
     # ─────────────────────────────────────────────────────────────────────────
     # EQ 模板
@@ -119,44 +80,31 @@ class ContextBuilder:
     # Identity headers
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _get_iq_identity(self) -> str:
-        workspace_path = str(self.workspace.expanduser().resolve())
-        system = platform.system()
-        runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-        return f"""# 🧠 IQ 执行层（System 2 — 慢系统）
-
-你是 IQ 理性参谋，负责"真"——处理事实、逻辑、工具调用，并回答 EQ 的内部问题。
-
-## Runtime
-{runtime}
-
-## Workspace
-{workspace_path}
-
-## 当前时间
-{self._get_datetime_str()}
-
-## 规则
-1. 你只对 EQ 负责，不直接对用户说话
-2. 输出必须优先使用结构化 JSON，包含分析、证据、风险、缺参、建议动作
-3. 工具调用前先分析，工具结果有误时中止并上报
-4. 不直接表达情绪，不负责最终用户措辞
-5. 若信息不足，明确指出缺失参数与风险，不要含糊其辞"""
-
     def _get_eq_identity(self) -> str:
         return f"""# 💛 EQ 情感层（System 1 — 快系统）
 
-你是 EQ 主导层，负责"理解与主导"——陪伴、判断、向 IQ 提问、整合 IQ 结论，并最终对用户表达。
+你是 EQ 主导层，负责理解用户、判断意图、决定是否委托 IQ，并最终对用户表达。
 
 ## 当前时间
 {self._get_datetime_str()}
 
-## 规则
-1. 你拥有最终决策权，IQ 只是内部顾问
-2. 先判断用户真正需要什么，再决定是否征询 IQ
-3. 可以不完全采纳 IQ，但不能虚构事实
+## 职责
+1. 你处理的是 user ↔ EQ 这条对外会话
+2. 你结合 SOUL.md、USER.md、当前状态与 EQ 记忆来理解用户
+3. 你判断当前输入是闲聊、信息请求，还是需要委托 IQ 的复杂问题
+4. 只有在需要事实核查、工具执行、复杂规划时，才委托 IQ
+5. IQ 只是内部执行顾问，你拥有最终对外表达权
+
+## 边界
+1. 不直接输出原始日志、JSON、工具结果或内部分析痕迹
+2. 不把 EQ ↔ IQ 的内部讨论当成对用户说过的话
+3. 不把纯执行层资料当成人格、关系或陪伴记忆
 4. 所有对外表达都必须由你生成，并保持与 SOUL.md 一致
-5. 根据 PAD 情绪状态、关系记忆和用户语境调整语气"""
+
+## EQ 记忆规则
+1. 与用户关系、偏好、情绪连续性有关的信息属于 EQ 记忆（`memory/eq/`）
+2. 与事实执行、资料沉淀、复用知识有关的信息不属于 EQ 记忆范围
+3. 根据 PAD 情绪状态、关系记忆和用户语境调整语气"""
 
     @staticmethod
     def _get_datetime_str() -> str:
@@ -203,7 +151,6 @@ class ContextBuilder:
         self,
         history: list[dict[str, Any]],
         current_message: str,
-        mode: str = "eq",
         current_emotion: str = "平静",
         pad_state: tuple[float, float, float] | None = None,
         media: list[str] | None = None,
@@ -214,19 +161,15 @@ class ContextBuilder:
         Args:
             history: 历史消息列表，每条为 {"role": ..., "content": ...}
             current_message: 当前用户消息
-            mode: "eq" 使用 EQ system prompt，"iq" 使用 IQ system prompt
-            current_emotion: 当前情绪（仅 EQ 模式用）
-            pad_state: PAD 情绪向量（仅 EQ 模式用）
+            current_emotion: 当前情绪
+            pad_state: PAD 情绪向量
         """
-        if mode == "iq":
-            system = self.build_iq_system_prompt(query=current_message)
-        else:
-            system = self.build_eq_system_prompt(
-                query=current_message,
-                current_emotion=current_emotion,
-                pad_state=pad_state,
-                internal_iq_summaries=internal_iq_summaries,
-            )
+        system = self.build_eq_system_prompt(
+            query=current_message,
+            current_emotion=current_emotion,
+            pad_state=pad_state,
+            internal_iq_summaries=internal_iq_summaries,
+        )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
 
         for turn in history:

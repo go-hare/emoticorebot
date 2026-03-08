@@ -4,7 +4,7 @@ import math
 from datetime import datetime
 from pathlib import Path
 
-from emoticorebot.memory.jsonl_store import JsonlStore
+from emoticorebot.memory.jsonl_store import JsonlStore, resolve_eq_memory_file
 
 
 def _pad_cosine(
@@ -28,7 +28,7 @@ class SemanticStore(JsonlStore):
     """Simple semantic memory store for factual notes."""
 
     def __init__(self, workspace: Path):
-        super().__init__(workspace / "data" / "memory" / "semantic.jsonl")
+        super().__init__(resolve_eq_memory_file(workspace, "semantic.jsonl"))
 
     @property
     def available(self) -> bool:
@@ -94,7 +94,7 @@ class RelationalStore(JsonlStore):
     """Relational memory store for user preference and warm interactions."""
 
     def __init__(self, workspace: Path):
-        super().__init__(workspace / "data" / "memory" / "relational.jsonl")
+        super().__init__(resolve_eq_memory_file(workspace, "relational.jsonl"))
 
     def save(
         self,
@@ -153,7 +153,7 @@ class AffectiveStore(JsonlStore):
     """Affective memory store for PAD-based emotional traces."""
 
     def __init__(self, workspace: Path):
-        super().__init__(workspace / "data" / "memory" / "affective.jsonl")
+        super().__init__(resolve_eq_memory_file(workspace, "affective.jsonl"))
 
     @property
     def available(self) -> bool:

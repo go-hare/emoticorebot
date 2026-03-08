@@ -28,7 +28,7 @@ class FusionRouter:
         done: bool = state.get("done", False)
         iq = state.get("iq", {})
 
-        iq_task: str = _get(iq, "task", "")
+        iq_request: str = _get(iq, "request", "")
         iq_status: str = _get(iq, "status", "")
         iq_attempts: int = _get(iq, "attempts", 0)
 
@@ -41,7 +41,7 @@ class FusionRouter:
             return "eq"
 
         # 3. EQ 已发出新的内部问题 → IQ 执行
-        if iq_task and iq_status in {"queued", "running"}:
+        if iq_request and iq_status in {"queued", "running"}:
             return "iq"
 
         # 4. IQ 已完成一次分析包 → 回到 EQ 综合判断

@@ -51,14 +51,6 @@ class SkillsLoader:
                 return builtin_skill.read_text(encoding="utf-8")
         return None
 
-    def load_skills_for_context(self, skill_names: list[str]) -> str:
-        parts = []
-        for name in skill_names:
-            content = self.load_skill(name)
-            if content:
-                parts.append(f"### Skill: {name}\n\n{self._strip_frontmatter(content)}")
-        return "\n\n---\n\n".join(parts) if parts else ""
-
     def build_skills_summary(self) -> str:
         all_skills = self.list_skills(filter_unavailable=False)
         if not all_skills:
@@ -133,15 +125,6 @@ class SkillsLoader:
     def _get_skill_meta(self, name: str) -> dict:
         meta = self.get_skill_metadata(name) or {}
         return self._parse_emoticorebot_metadata(meta.get("metadata", ""))
-
-    def get_always_skills(self) -> list[str]:
-        result = []
-        for s in self.list_skills(filter_unavailable=True):
-            meta = self.get_skill_metadata(s["name"]) or {}
-            skill_meta = self._parse_emoticorebot_metadata(meta.get("metadata", ""))
-            if skill_meta.get("always") or meta.get("always"):
-                result.append(s["name"])
-        return result
 
     def get_skill_metadata(self, name: str) -> dict | None:
         content = self.load_skill(name)

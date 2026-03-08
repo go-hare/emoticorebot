@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from emoticorebot.memory.memory_facade import MemoryFacade
 
 
@@ -10,19 +8,6 @@ class MemoryRetriever:
 
     def __init__(self, memory: MemoryFacade):
         self.memory = memory
-
-    def build_iq_sections(self, query: str = "") -> list[str]:
-        sections: list[str] = []
-        for section in (
-            self.memory.semantic.get_context(query=query),
-            self.memory.episodic.get_context(query=query, k=4),
-            self.memory.plans.get_context(k=5),
-            self.memory.reflective.get_context(query=query, k=2),
-            self.memory.events.get_context(query=query, k=5),
-        ):
-            if section:
-                sections.append(section)
-        return sections
 
     def build_eq_sections(
         self,

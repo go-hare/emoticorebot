@@ -7,11 +7,85 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from loguru import logger
 
 from emoticorebot.session.iq_context import build_iq_context
 from emoticorebot.utils.helpers import ensure_dir, safe_filename
+from emoticorebot.utils.llm_utils import normalize_content_blocks
+
+
+def _new_message_id() -> str:
+    return f"msg_{uuid4().hex[:16]}"
+
+
+def _normalize_tool_calls(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    calls: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        call_id = str(item.get("id", "") or "").strip()
+        name = str(item.get("name", "") or "").strip()
+        args = item.get("args", {})
+        if not call_id and not name:
+            continue
+        payload: dict[str, Any] = {}
+        if call_id:
+            payload["id"] = call_id
+        if name:
+            payload["name"] = name
+        if isinstance(args, dict):
+            payload["args"] = args
+        elif isinstance(item.get("function"), dict):
+            function = item.get("function") or {}
+            payload["name"] = str(function.get("name", "") or payload.get("name", "")).strip()
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    payload["args"] = json.loads(arguments)
+                except Exception:
+                    payload["args"] = {"raw": arguments}
+        calls.append(payload)
+    return calls
+
+
+def normalize_message_payload(message: dict[str, Any], *, default_message_id: str | None = None) -> dict[str, Any]:
+    message_id = str(message.get("message_id", "") or default_message_id or _new_message_id()).strip()
+    role = str(message.get("role", "user") or "user").strip() or "user"
+    payload: dict[str, Any] = {
+        "message_id": message_id,
+        "role": role,
+        "content": normalize_content_blocks(message.get("content", [])),
+    }
+
+    timestamp = str(message.get("timestamp", "") or "").strip()
+    if timestamp:
+        payload["timestamp"] = timestamp
+
+    model_name = str(message.get("model_name", "") or "").strip()
+    if model_name:
+        payload["model_name"] = model_name
+
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = message.get(key)
+        if value not in (None, ""):
+            try:
+                payload[key] = int(value)
+            except Exception:
+                pass
+
+    tool_calls = _normalize_tool_calls(message.get("tool_calls"))
+    if tool_calls:
+        payload["tool_calls"] = tool_calls
+
+    tool_call_id = str(message.get("tool_call_id", "") or "").strip()
+    if tool_call_id:
+        payload["tool_call_id"] = tool_call_id
+
+    return payload
 
 
 @dataclass
@@ -33,14 +107,16 @@ class Session:
     metadata: dict[str, Any] = field(default_factory=dict)
     last_consolidated: int = 0  # Number of messages already consolidated to files
 
-    def add_message(self, role: str, content: str, **kwargs: Any) -> None:
+    def add_message(self, role: str, content: Any, **kwargs: Any) -> None:
         """Add a message to the session."""
-        msg = {
+        msg = normalize_message_payload(
+            {
             "role": role,
             "content": content,
             "timestamp": datetime.now().isoformat(),
             **kwargs,
-        }
+            }
+        )
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
@@ -61,14 +137,14 @@ class Session:
 
         out: list[dict[str, Any]] = []
         for message in sliced:
-            content = message.get("content", "")
+            content = normalize_content_blocks(message.get("content", []))
             if include_iq_context and message.get("role") == "assistant":
                 iq_context = build_iq_context(message)
                 if iq_context:
-                    content = f"{content}\n\n{iq_context}"
+                    content = [*content, {"type": "text", "text": iq_context}]
 
             entry: dict[str, Any] = {"role": message["role"], "content": content}
-            for key in ("tool_calls", "tool_call_id", "name"):
+            for key in ("tool_calls", "tool_call_id"):
                 if key in message:
                     entry[key] = message[key]
             out.append(entry)
@@ -106,9 +182,6 @@ class SessionManager:
     def _get_eq_iq_path(self, key: str) -> Path:
         return self._get_session_dir(key) / "eq_iq.jsonl"
 
-    def _get_meta_path(self, key: str) -> Path:
-        return self._get_session_dir(key) / "meta.json"
-
     def _get_session_path(self, key: str) -> Path:
         return self._get_user_eq_path(key)
 
@@ -126,7 +199,7 @@ class SessionManager:
         path = self._get_eq_iq_path(key)
         with open(path, "a", encoding="utf-8") as f:
             for message in messages:
-                payload = dict(message)
+                payload = normalize_message_payload(message)
                 payload.setdefault("timestamp", datetime.now().isoformat())
                 f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
@@ -141,9 +214,8 @@ class SessionManager:
         key: str,
         *,
         max_messages: int | None = None,
-        task_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Load persisted internal EQ↔IQ messages, optionally filtered by task."""
+        """Load persisted internal EQ↔IQ messages."""
         path = self._get_eq_iq_path(key)
         if not path.exists():
             return []
@@ -157,9 +229,7 @@ class SessionManager:
                     data = json.loads(line)
                     if not isinstance(data, dict):
                         continue
-                    if task_id and str(data.get("task_id", "") or "") != task_id:
-                        continue
-                    messages.append(data)
+                    messages.append(normalize_message_payload(data))
             if max_messages is not None:
                 return messages[-max_messages:]
             return messages
@@ -188,38 +258,23 @@ class SessionManager:
         return session
 
     def _load(self, key: str) -> Session | None:
-        meta_path = self._get_meta_path(key)
         user_eq_path = self._get_user_eq_path(key)
 
-        if meta_path.exists() or user_eq_path.exists():
-            return self._load_directory_session(key, meta_path=meta_path, user_eq_path=user_eq_path)
-
-        flat_candidates = [self._get_flat_session_path(key), self._get_legacy_session_path(key)]
-        for legacy_path in flat_candidates:
-            if not legacy_path.exists():
-                continue
-            payload = self._read_flat_session_payload(legacy_path, fallback_key=key)
-            if payload is None:
-                continue
-            payload.pop("loaded_key", None)
-            session = self._session_from_payload(key=key, **payload)
-            self.save(session)
-            logger.info("Migrated session {} from legacy flat file {}", key, legacy_path)
-            return session
+        if user_eq_path.exists():
+            return self._load_directory_session(key, user_eq_path=user_eq_path)
 
         return None
 
-    def _load_directory_session(self, key: str, *, meta_path: Path, user_eq_path: Path) -> Session | None:
+    def _load_directory_session(self, key: str, *, user_eq_path: Path) -> Session | None:
         try:
-            meta = self._read_meta(meta_path)
             messages = self._read_jsonl_messages(user_eq_path)
             return self._session_from_payload(
                 key=key,
                 messages=messages,
-                metadata=meta.get("metadata", {}),
-                created_at=self._parse_datetime(meta.get("created_at")) or self._infer_created_at(messages) or datetime.now(),
-                updated_at=self._parse_datetime(meta.get("updated_at")) or self._infer_updated_at(messages) or datetime.now(),
-                last_consolidated=int(meta.get("last_consolidated", 0) or 0),
+                metadata={},
+                created_at=self._infer_created_at(messages) or datetime.now(),
+                updated_at=self._infer_updated_at(messages) or datetime.now(),
+                last_consolidated=0,
             )
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
@@ -244,44 +299,6 @@ class SessionManager:
             last_consolidated=max(0, min(last_consolidated, len(messages))),
         )
 
-    def _read_flat_session_payload(self, path: Path, *, fallback_key: str) -> dict[str, Any] | None:
-        try:
-            messages: list[dict[str, Any]] = []
-            metadata: dict[str, Any] = {}
-            loaded_key = fallback_key
-            created_at: datetime | None = None
-            updated_at: datetime | None = None
-            last_consolidated = 0
-
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    data = json.loads(line)
-                    if not isinstance(data, dict):
-                        continue
-                    if data.get("_type") == "metadata":
-                        loaded_key = str(data.get("key", "") or "").strip() or fallback_key
-                        metadata = data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {}
-                        created_at = self._parse_datetime(data.get("created_at"))
-                        updated_at = self._parse_datetime(data.get("updated_at"))
-                        last_consolidated = int(data.get("last_consolidated", 0) or 0)
-                        continue
-                    messages.append(data)
-
-            return {
-                "messages": messages,
-                "metadata": metadata,
-                "created_at": created_at or self._infer_created_at(messages) or datetime.now(),
-                "updated_at": updated_at or self._infer_updated_at(messages) or datetime.now(),
-                "last_consolidated": last_consolidated,
-                "loaded_key": loaded_key,
-            }
-        except Exception as e:
-            logger.warning("Failed to read legacy session {}: {}", path, e)
-            return None
-
     @staticmethod
     def _read_jsonl_messages(path: Path) -> list[dict[str, Any]]:
         if not path.exists():
@@ -294,18 +311,8 @@ class SessionManager:
                     continue
                 data = json.loads(line)
                 if isinstance(data, dict):
-                    messages.append(data)
+                    messages.append(normalize_message_payload(data))
         return messages
-
-    @staticmethod
-    def _read_meta(path: Path) -> dict[str, Any]:
-        if not path.exists():
-            return {}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
@@ -319,23 +326,13 @@ class SessionManager:
 
     def save(self, session: Session) -> None:
         session_dir = self._ensure_session_dir(session.key)
-        meta_path = session_dir / "meta.json"
         user_eq_path = session_dir / "user_eq.jsonl"
 
         session.updated_at = datetime.now()
 
-        meta_payload = {
-            "key": session.key,
-            "created_at": session.created_at.isoformat(),
-            "updated_at": session.updated_at.isoformat(),
-            "metadata": session.metadata,
-            "last_consolidated": session.last_consolidated,
-        }
-        meta_path.write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
         with open(user_eq_path, "w", encoding="utf-8") as f:
             for message in session.messages:
-                f.write(json.dumps(message, ensure_ascii=False) + "\n")
+                f.write(json.dumps(normalize_message_payload(message), ensure_ascii=False) + "\n")
 
         self._cache[session.key] = session
 
@@ -348,31 +345,16 @@ class SessionManager:
         for path in self.sessions_dir.iterdir():
             if not path.is_dir():
                 continue
-            meta = self._read_meta(path / "meta.json")
-            key = str(meta.get("key", "") or "").strip() or path.name
-            updated_at = str(meta.get("updated_at", "") or "")
-            created_at = str(meta.get("created_at", "") or "")
+            user_eq_path = path / "user_eq.jsonl"
+            messages = self._read_jsonl_messages(user_eq_path)
+            key = path.name
+            created_at = self._infer_created_at(messages)
+            updated_at = self._infer_updated_at(messages)
             sessions_by_key[key] = {
                 "key": key,
-                "created_at": created_at,
-                "updated_at": updated_at,
-                "path": str(path / "user_eq.jsonl"),
-            }
-
-        for legacy_path in list(self.sessions_dir.glob("*.jsonl")) + list(self.legacy_sessions_dir.glob("*.jsonl")):
-            payload = self._read_flat_session_payload(legacy_path, fallback_key=legacy_path.stem)
-            if payload is None:
-                continue
-            key = str(payload.get("loaded_key", "") or legacy_path.stem)
-            if key in sessions_by_key:
-                continue
-            created_at = payload["created_at"].isoformat() if isinstance(payload.get("created_at"), datetime) else ""
-            updated_at = payload["updated_at"].isoformat() if isinstance(payload.get("updated_at"), datetime) else ""
-            sessions_by_key[key] = {
-                "key": key,
-                "created_at": created_at,
-                "updated_at": updated_at,
-                "path": str(legacy_path),
+                "created_at": created_at.isoformat() if created_at else "",
+                "updated_at": updated_at.isoformat() if updated_at else "",
+                "path": str(user_eq_path),
             }
 
         return sorted(sessions_by_key.values(), key=lambda item: item.get("updated_at", ""), reverse=True)

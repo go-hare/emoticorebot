@@ -4,7 +4,7 @@ emoticorebot - A lightweight AI agent framework
 
 import sys
 
-__version__ = "0.1.4.post2"
+__version__ = "0.0.2"
 
 
 def _pick_logo() -> str:

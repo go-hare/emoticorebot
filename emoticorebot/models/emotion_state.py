@@ -165,7 +165,7 @@ class DriveState:
     """驱动欲望指数（ai.md §1.2），取值范围 [0, 100]。"""
 
     social: float = 50.0   # 社交渴望：低→主动找人聊，高→话痨模式
-    energy: float = 100.0  # 精力值：仅影响表达节奏与主动性，不影响任务执行
+    energy: float = 100.0  # 精力值：仅影响表达节奏与主动性，不影响实际执行
     social_decay_per_hour: float = 0.5
     energy_decay_per_hour: float = 1.0
     threshold_social_low: float = 20.0

@@ -25,7 +25,6 @@ class MemoryService:
 
     职责：
     - 写入单轮记忆（PAD状态、关系记忆、情绪记忆）
-    - 自动生成技能
     - 后台记忆压缩（结构化 semantic consolidation）
     """
 
@@ -174,36 +173,13 @@ class MemoryService:
             )
             logger.debug("Affective memory written: trigger={}", emotion_event.trigger)
 
-        # 4. 自动技能生成（当 IQ 成功执行且工具调用 >= 2 次）
-        iq = state.get("iq")
-        if iq is not None and getattr(iq, "status", "") == "completed" and len(getattr(iq, "tool_calls", [])) >= 2:
-            self.generate_skill_from_tool_path(state)
-
-        # 5. 语义记忆压缩（异步后台任务）
+        # 4. 语义记忆压缩（异步后台任务）
         session_id = state.get("session_id", "")
         if session_id:
             asyncio.create_task(self.consolidate_background(session_id))
 
-    def generate_skill_from_tool_path(self, state: dict[str, Any]) -> None:
-        """自动生成技能（当工具调用路径有价值时）"""
-        task = (state.get("user_input", "") or "auto task").strip()
-        skill_name = "_".join(re.findall(r"[\u4e00-\u9fa5a-zA-Z]+", task)[:2]).lower() or "auto_skill"
-        skills_dir = self.workspace / "skills" / skill_name
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        skill_file = skills_dir / "SKILL.md"
-        if skill_file.exists():
-            return
-
-        iq = state.get("iq")
-        calls = getattr(iq, "tool_calls", []) if iq is not None else []
-        lines = [f"# {task}", "", f"> 自动生成 Skill：{task}", "", "## 工具调用路径"]
-        for c in calls:
-            lines.append(f"- {c.get('tool', 'unknown')}")
-        skill_file.write_text("\n".join(lines), encoding="utf-8")
-        logger.info("Auto-generated skill: {}", skill_name)
-
     async def consolidate_background(self, session_id: str) -> None:
-        """异步后台任务：语义记忆压缩
+        """异步后台作业：语义记忆压缩
 
         只有当消息数超过 memory_window 时才压缩。
         需要 iq_llm 已注入（在 __init__ 中通过 iq_llm 参数传入）。

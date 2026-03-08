@@ -6,7 +6,7 @@
 
 服务列表：
 - EQService:    EQ 情感响应（LLM 调用 + 情绪上下文注入）
-- IQService:    IQ 任务执行（工具调用循环）
+- IQService:    IQ 复杂问题执行（Deep Agents + subagents）
 - MemoryService:记忆管理（写入 / 压缩 / 技能生成）
 - ToolManager:  工具管理（注册 / 上下文 / MCP 连接）
 """

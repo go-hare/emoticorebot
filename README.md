@@ -6,7 +6,7 @@
 
 **emoticorebot** is an ultra-lightweight personal AI assistant with an **EQ-led fusion architecture (EQ + IQ Layer)**, built on [LangGraph](https://github.com/langchain-ai/langgraph) and derived from the original Nanobot project.
 
-It perceives emotional context in every conversation turn, lets **EQ act as the lead layer**, routes work into a lightweight **sparse MoE IQ layer** when needed, and continuously evolves its persona through background reflection.
+It perceives emotional context in every conversation turn, lets **EQ act as the lead layer**, routes complex work into a **Deep Agents-based IQ layer** when needed, and continuously evolves its persona through background reflection.
 
 ---
 
@@ -76,7 +76,7 @@ emoticorebot gateway
 
 ### EQ-led Fusion Graph (LangGraph)
 
-emoticorebot uses a **LangGraph state machine** to execute each conversation turn. The external graph remains simple, but the internal semantics are now **EQ-led deliberation + lightweight sparse MoE**:
+emoticorebot uses a **LangGraph state machine** to execute each conversation turn. The external graph remains simple, but the internal semantics are now **EQ-led deliberation + Deep Agents execution**:
 
 ```
 User Input
@@ -104,57 +104,58 @@ Session history / pending-task metadata
 
 | Node | Role |
 |------|------|
-| `EQ Node` | Lead layer. Interprets intent, sets emotional goal, decides whether to consult IQ, chooses experts, reviews expert disagreement, and produces the final user-facing reply. |
-| `IQ Layer` | Lightweight sparse MoE. Runs `ActionExpert` by default, and conditionally adds `MemoryOverlay` and `RiskOverlay`. |
+| `EQ Node` | Lead layer. Interprets intent, decides whether to consult IQ, tracks task continuity, and produces the final user-facing reply. |
+| `IQ Layer` | Deep Agents-based execution layer. Handles planning, tool use, subagents, and long-running complex tasks. |
 | `Memory Node` | Writes event / episodic / semantic / relational / affective / plan memories and persists PAD state. |
 
 **Routing logic (`FusionRouter`):**
 
 - `EQ → IQ`: EQ decides the current turn needs internal rational work.
-- `IQ → EQ`: IQ returns a merged packet plus expert packets / disagreement summary.
+- `IQ → EQ`: IQ returns task analysis, evidence, risks, missing params, and a recommended next action.
 - `EQ → Memory`: EQ has decided to answer the user or ask the user for missing info.
 - `* → Memory`: `done=True`; write-back and exit.
 
-### Lightweight Sparse MoE in IQ Layer
+### Deep Agents in IQ Layer
 
-The current IQ layer is intentionally lightweight instead of a heavy all-experts MoE.
+The current IQ layer no longer uses the older expert-overlay pipeline. Instead, it is powered by Deep Agents while preserving the same compact EQ↔IQ contract.
 
-| Expert | Default | Role |
+| Component | Role |
 |---|---|---|
-| `ActionExpert` | Yes | Main expert for factual analysis, tools, missing params, and next-step recommendation |
-| `MemoryOverlay` | Conditional | Injects historical task / plan / episodic context when the turn looks like a resume / follow-up |
-| `RiskOverlay` | Conditional | Adds cheap risk checks when confidence is low, tools are used, or the action is sensitive |
+| Planner | Breaks down the internal task and decides how to proceed |
+| Tools | Executes registered capabilities such as web search, fetch, messaging, and cron |
+| Subagents | Offloads focused work such as research or workspace-side operations |
+| Skills | Reuses local workflow instructions from the workspace `skills/` directory |
 
-Selection is **EQ-led**:
+The contract remains **EQ-led**:
 
-- default to `ActionExpert`
-- add `MemoryOverlay` only for history continuation / pending-task recovery
-- add `RiskOverlay` only for uncertainty, sensitive actions, or lower confidence
-- cap the active set to **at most 2 experts** for latency and token control
+- EQ decides whether IQ is needed and what internal task should be delegated
+- IQ plans and executes using tools, subagents, and skills
+- IQ returns a normalized packet with `status`, `analysis`, `evidence`, `risks`, `missing`, and `recommended_action`
+- EQ decides whether to answer, ask the user, or continue internal deliberation
 
-Each IQ round returns both a **merged packet** and the underlying **expert packets**, so EQ can see internal disagreement instead of only a flattened result.
+This keeps the outer loop stable while allowing the inner IQ engine to become more capable over time.
 
 ### Typical Workflows
 
-#### 1. Normal request → `ActionExpert`
+#### 1. Normal request → direct IQ execution
 
 Example: “Help me summarize this file.”
 
 ```text
 User
   → EQ judges this is a normal task
-  → EQ selects: [ActionExpert]
-  → IQ Layer runs ActionExpert
+  → EQ delegates a concrete internal task to IQ
+  → IQ plans and executes it
   → EQ finalizes user-facing reply
 ```
 
 Properties:
 
-- lowest cost path
-- no extra memory lookup
-- no extra risk overlay unless confidence drops
+- simple handoff from EQ to IQ
+- no raw tool output is exposed directly to the user
+- EQ still controls the final wording
 
-#### 2. Resume / follow-up request → `ActionExpert + MemoryOverlay`
+#### 2. Resume / follow-up request → EQ continuity + IQ execution
 
 Example:
 
@@ -165,36 +166,34 @@ Example:
 ```text
 User follow-up
   → EQ detects likely pending-task recovery
-  → EQ selects: [ActionExpert, MemoryOverlay]
-  → MemoryOverlay checks pending task / plans / episodic memory
-  → ActionExpert continues the task with overlay context
+  → EQ reconstructs continuity from session and memory
+  → IQ continues the delegated task with the recovered context
   → EQ reviews merged result and answers naturally
 ```
 
 Properties:
 
 - optimized for unfinished-task recovery
-- preserves `resume_task` and overlay hit type in session metadata
+- keeps cross-turn continuity on the EQ side
 - avoids asking the same missing question again when enough context exists
 
-#### 3. Sensitive / low-confidence request → `ActionExpert + RiskOverlay`
+#### 3. Sensitive / low-confidence request → IQ analysis + EQ safeguard
 
 Example: “Run this command and delete the old files.”
 
 ```text
 User request
   → EQ detects possible external action / higher risk
-  → EQ selects: [ActionExpert, RiskOverlay]
-  → ActionExpert evaluates feasibility and tools
-  → RiskOverlay points out dangers / uncertainty / missing safeguards
-  → EQ sees disagreement, then either answers conservatively or asks user first
+  → EQ delegates a cautious internal task
+  → IQ evaluates feasibility, evidence, and missing safeguards
+  → EQ either answers conservatively, asks the user first, or continues internal deliberation
 ```
 
 Properties:
 
 - optimized for safety and overconfidence control
 - useful when tools are involved or confidence is low
-- keeps the system lightweight by adding only one overlay
+- keeps the user-facing voice unified through EQ
 
 ---
 
@@ -208,24 +207,24 @@ The current implementation no longer uses standalone `SignalExtractor` / `Policy
 - loads persona anchors from `SOUL.md` and user cognition from `USER.md`
 - loads `current_state.md` for PAD / status grounding
 - retrieves relational / affective / reflective / episodic memory sections
-- asks EQ to decide whether IQ is needed, which experts to activate, and what each expert should focus on
+- asks EQ to decide whether IQ is needed and what internal task should be delegated
 
 **IQ prompt construction (`ContextBuilder.build_iq_system_prompt`)**
 
 - loads workspace `AGENTS.md` and `TOOLS.md` as execution constraints
 - loads `current_state.md`
-- retrieves semantic / episodic / plan / reflective / event memory sections
+- retrieves semantic / plan / reflective memory sections
 - injects active skills summary and skill bodies when configured
-- passes EQ-selected experts and expert-specific questions through `intent_params`
+- passes pending-task and missing-parameter hints through `intent_params`
 
 **Session and continuation inputs**
 
 - pending task metadata is injected before EQ deliberation and follow-up IQ rounds
-- assistant-side metadata persists selected experts, expert packets, disagreement summary, and memory overlay anchors
-- EQ arbitration now persists accepted experts, rejected experts, and a short arbitration summary
-- `MemoryOverlay` can recover `resume_task` and hit type so EQ avoids re-asking the same missing question when enough context exists
+- assistant-side metadata persists task continuity, task labels, and compact IQ summaries
+- lightweight IQ state such as `iq_status`, `iq_confidence`, and `iq_missing_params` is preserved for continuation
+- `resume_task` recovery helps EQ avoid re-asking the same missing question when enough context exists
 
-In short, the working decision loop is now: **history + memory + pending task → EQ planning → sparse expert execution in IQ → EQ finalization**.
+In short, the working decision loop is now: **history + memory + pending task → EQ planning → IQ execution → EQ finalization**.
 
 ---
 
@@ -251,18 +250,18 @@ In the current implementation, the IQ execution layer only receives the **curren
 In addition, assistant-side session history now persists a lightweight record:
 
 - compact `iq_summary` for future turn recovery
-- selected experts and EQ arbitration result (`accepted_experts` / `rejected_experts` / `arbitration_summary`)
-- an `iq_audit_id` / `iq_audit_path` pointer to the full turn-level IQ audit payload
+- `iq_status`, `iq_confidence`, and `iq_missing_params` for lightweight continuation
+- task continuity metadata such as `task_label` and pending-task state
 
-The complete internal IQ payload (expert packets, tool calls, disagreement details, overlay anchors, etc.) is preserved separately under `session_audits/` so the hot `sessions/*.jsonl` path stays small.
+The hot `sessions/*.jsonl` path stays intentionally small, so later turns can recover context without replaying every internal IQ detail.
 
 This makes later turns much better at resuming unfinished work and preserving the shape of past internal deliberation.
 
-EQ arbitration is also written into structured long-term memory:
+Internal multi-round IQ behavior is also written into structured long-term memory:
 
-- assistant dialogue events now carry arbitration metadata for traceability
-- `ReflectiveStore` now records `eq_arbitration` insights when a turn contains real expert selection, rejection, or multiple internal rounds
-- later retrieval can reuse not just “what happened”, but also “how EQ chose between experts”
+- assistant dialogue events now carry the final EQ decision for traceability
+- `ReflectiveStore` now records `iq_process` insights when a turn contains multiple internal rounds or ends in a user-facing clarification
+- later retrieval can reuse not just “what happened”, but also “how the internal process unfolded”
 
 The **PAD model** (Pleasure-Arousal-Dominance) is used to track the bot's continuous emotional state across sessions. It is loaded at startup from `current_state.md` and written back after every turn.
 
@@ -272,38 +271,38 @@ The **PAD model** (Pleasure-Arousal-Dominance) is used to track the bot's contin
 
 The current architecture is already usable, but it is intentionally still conservative in a few places:
 
-- `MemoryOverlay` is currently **rule-first** rather than a fully semantic planner; this keeps it cheap and fast, but it may miss more implicit follow-up turns.
-- `RiskOverlay` is currently a **cheap heuristic overlay**, not yet a small-model specialist; it is good at lightweight guarding, but not yet a deep adversarial critic.
-- IQ-layer merging is still **ActionExpert-centered**; overlay experts mainly refine or constrain the primary result rather than participate in a more advanced arbitration pipeline.
-- EQ arbitration is now persisted, but reflective memory currently stores only a compact arbitration insight rather than a richer multi-step debate trace.
-- The outer LangGraph remains intentionally simple; the system behaves like an EQ-led sparse MoE, but the graph itself is not yet a dedicated multi-expert state machine.
+- Deep Agents output still needs normalization into the compact EQ↔IQ packet, so richer intermediate traces are not yet fully preserved.
+- The current tool set is intentionally narrow; broader workspace and research coverage can still be added.
+- Cross-turn continuity is still EQ-centric and conservative; implicit follow-up recovery can become stronger.
+- Reflective memory stores compact process summaries rather than full internal execution traces.
+- The outer LangGraph remains intentionally simple; most sophistication still lives inside the IQ engine.
 
 ### Roadmap
 
 Recommended next steps for this architecture:
 
-1. **Upgrade `RiskOverlay` to a small-model expert**
-   - make risk review more precise
-   - keep the main path fast by only enabling it when needed
+1. **Improve Deep Agents observability**
+   - preserve richer execution traces without bloating session history
+   - expose better debugging hooks for internal planning and subagents
 
-2. **Strengthen `MemoryOverlay` recovery quality**
+2. **Strengthen continuity recovery**
    - improve implicit follow-up detection
-   - better reconcile pending-task / plan / episodic signals
+   - better reconcile pending-task / plan / memory signals
 
-3. **Deepen EQ arbitration memory**
-   - enrich `eq_arbitration` reflections with stronger causal tags
-   - let future turns retrieve not only the verdict but also the failure mode that triggered it
+3. **Deepen process memory**
+   - enrich `iq_process` reflections with stronger causal tags
+   - let future turns retrieve not only the outcome but also the failure mode that triggered it
    - prepare for richer agent-memory behavior later
 
 4. **Refactor the IQ layer internally**
    - split planning / execution / merging more clearly
    - preserve the current lightweight behavior while making extension easier
 
-5. **Optionally add more experts later**
-   - only after `ActionExpert`, `MemoryOverlay`, and `RiskOverlay` are stable
-   - examples: fact specialist, social-memory specialist, deeper planning specialist
+5. **Expand tools, skills, and subagents carefully**
+   - only after the current Deep Agents workflow is stable
+   - examples: stronger research workers, richer workspace helpers, domain-specific skills
 
-In short: the current version optimizes for **clarity, controllable cost, and recoverable history**, and future work should improve expert quality without giving up the lightweight design.
+In short: the current version optimizes for **clarity, controllable cost, and recoverable history**, and future work should improve IQ execution quality without giving up the lightweight outer design.
 
 ---
 
@@ -512,15 +511,9 @@ emoticorebot/
 │   ├── mcp.py            #   MCP client integration
 │   ├── skills.py         #   Skill loader
 │   └── nodes/            #   eq_node / iq_node / memory_node
-├── experts/              # Lightweight sparse MoE experts for the IQ layer
-│   ├── base.py
-│   ├── registry.py
-│   ├── action_expert.py
-│   ├── memory_overlay.py
-│   └── risk_overlay.py
 ├── services/             # Service layer
-│   ├── eq_service.py     #   EQ lead service (deliberate / finalize / expert planning)
-│   ├── iq_service.py     #   IQ Layer coordinator (sparse MoE + tool reasoning)
+│   ├── eq_service.py     #   EQ lead service (deliberate / finalize)
+│   ├── iq_service.py     #   IQ execution layer (Deep Agents + subagents)
 │   ├── memory_service.py #   Memory read/write service
 │   └── tool_manager.py   #   Tool registry & execution
 ├── memory/               # Layered memory implementation

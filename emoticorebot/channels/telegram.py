@@ -111,7 +111,7 @@ class TelegramChannel(BaseChannel):
     BOT_COMMANDS = [
         BotCommand("start", "Start the bot"),
         BotCommand("new", "Start a new conversation"),
-        BotCommand("stop", "Stop the current task"),
+        BotCommand("stop", "Stop the current request"),
         BotCommand("help", "Show available commands"),
     ]
     
@@ -300,7 +300,7 @@ class TelegramChannel(BaseChannel):
         await update.message.reply_text(
             "🐾 emoticorebot commands:\n"
             "/new — Start a new conversation\n"
-            "/stop — Stop the current task\n"
+            "/stop — Stop the current request\n"
             "/help — Show available commands"
         )
 

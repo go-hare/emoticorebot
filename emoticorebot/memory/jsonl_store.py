@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+
+
+def resolve_eq_memory_file(workspace: Path, filename: str) -> Path:
+    new_path = workspace / "memory" / "eq" / filename
+    legacy_path = workspace / "data" / "memory" / filename
+
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    if not new_path.exists() and legacy_path.exists():
+        try:
+            legacy_path.replace(new_path)
+        except OSError:
+            shutil.copy2(legacy_path, new_path)
+    return new_path
 
 
 class JsonlStore:
@@ -89,4 +103,4 @@ class JsonlStore:
         return [entry for _, entry in ranked[:limit]]
 
 
-__all__ = ["JsonlStore"]
+__all__ = ["JsonlStore", "resolve_eq_memory_file"]
