@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from loguru import logger
 
@@ -372,6 +372,59 @@ class EmotionStateManager:
         if self.state_file.exists():
             return self.state_file.read_text(encoding="utf-8")
         return self._render_md()
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a structured snapshot of the current live state."""
+        with self._lock:
+            return self._snapshot_unlocked()
+
+    def apply_reflection_state_update(
+        self,
+        *,
+        pad_delta: dict[str, float] | None = None,
+        drive_delta: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Apply bounded per-turn reflection updates through the state manager."""
+        with self._lock:
+            for attr in ("pleasure", "arousal", "dominance"):
+                if attr not in (pad_delta or {}):
+                    continue
+                try:
+                    delta = float((pad_delta or {}).get(attr, 0.0) or 0.0)
+                except Exception:
+                    continue
+                delta = max(-0.3, min(0.3, delta))
+                setattr(self.pad, attr, getattr(self.pad, attr) + delta)
+
+            for attr in ("social", "energy"):
+                if attr not in (drive_delta or {}):
+                    continue
+                try:
+                    delta = float((drive_delta or {}).get(attr, 0.0) or 0.0)
+                except Exception:
+                    continue
+                delta = max(-20.0, min(20.0, delta))
+                setattr(self.drive, attr, getattr(self.drive, attr) + delta)
+
+            self.pad.clamp()
+            self.drive.clamp()
+            self._save()
+            return self._snapshot_unlocked()
+
+    def _snapshot_unlocked(self) -> dict[str, Any]:
+        return {
+            "pad": {
+                "pleasure": round(float(self.pad.pleasure), 3),
+                "arousal": round(float(self.pad.arousal), 3),
+                "dominance": round(float(self.pad.dominance), 3),
+            },
+            "drives": {
+                "social": round(float(self.drive.social), 2),
+                "energy": round(float(self.drive.energy), 2),
+            },
+            "emotion_label": self.pad.get_emotion_label(),
+            "emotion_prompt": self.pad.get_emotion_prompt(),
+        }
 
     def update_from_conversation(self, user_msg: str, ai_msg: str) -> "EmotionEvent | None":
         """

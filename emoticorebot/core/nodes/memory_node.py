@@ -1,9 +1,9 @@
-"""Memory Node - 写入记忆与状态文件（收尾节点）。"""
+"""Memory node for orchestration finalization."""
 
-from emoticorebot.core.state import FusionState
+from emoticorebot.core.state import OrchestrationState
 
 
-async def memory_node(state: FusionState, runtime) -> FusionState:
-    """将本轮对话写入记忆，更新情绪状态文件。"""
+async def memory_node(state: OrchestrationState, runtime) -> OrchestrationState:
+    """Persist memory and state updates for the current turn."""
     await runtime.write_memory(state)
     return state

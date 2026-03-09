@@ -1,4 +1,4 @@
-"""IQ Service backed by Deep Agents."""
+"""Executor service backed by Deep Agents."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any, Awaitable, Callable
 
 from emoticorebot.core.context import ContextBuilder
 from emoticorebot.core.skills import BUILTIN_SKILLS_DIR
-from emoticorebot.core.state import IQRecommendedAction, IQResultPacket, IQStatus
+from emoticorebot.core.state import ExecutorRecommendedAction, ExecutorResultPacket, ExecutorStatus
 from emoticorebot.tools import ToolRegistry
 from emoticorebot.utils.llm_utils import normalize_content_blocks
 from emoticorebot.utils.llm_utils import extract_message_metrics
@@ -22,8 +22,8 @@ except Exception:
     create_deep_agent = None
 
 
-class IQService:
-    """IQ execution layer for complex tasks.
+class ExecutorService:
+    """Executor layer for complex tasks.
 
     The outer EQ↔IQ contract stays minimal.
     The inner execution model is Deep Agents-based:
@@ -33,8 +33,8 @@ class IQService:
     - long-running complex tasks
     """
 
-    _VALID_STATUS: set[IQStatus] = {"completed", "needs_input", "uncertain", "failed"}
-    _VALID_ACTIONS: set[IQRecommendedAction] = {"answer", "ask_user", "continue_deliberation"}
+    _VALID_STATUS: set[ExecutorStatus] = {"completed", "needs_input", "uncertain", "failed"}
+    _VALID_ACTIONS: set[ExecutorRecommendedAction] = {"answer", "ask_user", "continue_deliberation"}
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class IQService:
         media: list[str] | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
-    ) -> IQResultPacket:
+    ) -> ExecutorResultPacket:
         del emotion, pad
 
         if create_deep_agent is None:
@@ -138,15 +138,15 @@ class IQService:
     def _build_agent_instructions(self) -> str:
         workspace = Path(self.context.workspace).expanduser().resolve()
         base = (
-            "你是 IQ 理性执行层，负责复杂问题的规划、执行、核查与结果收口。\n"
-            "你处理的是 EQ ↔ IQ 这条内部执行链路，不负责 user ↔ EQ 的对外表达。\n\n"
+            "你是 executor，负责复杂问题的规划、执行、核查与结果收口。\n"
+            "你处理的是 main_brain -> executor 这条内部执行链路，不负责对用户做最终表达。\n\n"
             f"当前工作区目录是 `{workspace}`。\n"
             f"长期记忆目录是 `{workspace / 'memory' / 'iq'}`。\n\n"
             "## 职责\n"
-            "1. 接收 EQ 委托的问题并转成可执行步骤。\n"
+            "1. 接收 main_brain 委托的问题并转成可执行步骤。\n"
             "2. 必要时拆分步骤、调用工具、使用 skills、委派子代理。\n"
             "3. 给出清晰结论、风险、缺失信息和下一步建议。\n"
-            "4. 只关注把事情做对，不模仿 EQ 的语气。\n\n"
+            "4. 只关注把事情做对，不模仿主脑的陪伴语气。\n\n"
             "## 边界\n"
             "1. 不负责最终对用户表达。\n"
             "2. 不把内部分析伪装成用户可见对话。\n"
@@ -155,7 +155,7 @@ class IQService:
             "## 长期记忆规则\n"
             "1. 长期记忆目录固定为工作区 `memory/iq/`。\n"
             "2. 只允许写入以下长期记忆文件：`memory/iq/preferences.md`、`memory/iq/constraints.md`、`memory/iq/knowledge.md`、`memory/iq/projects.md`。\n"
-            "3. 允许写入的不仅包括稳定偏好、长期约束、项目事实、可复用知识，也包括跨轮仍需继续的任务压缩摘要、阻塞原因、已验证方法、下一步计划。\n"
+            "3. 允许写入稳定偏好、长期约束、项目事实、可复用知识，以及跨轮仍需继续的任务压缩摘要、阻塞原因、已验证方法、下一步计划。\n"
             "4. 原始工具输出、临时草稿、一次性中间过程不得直接写入 `memory/iq/`；但可以先压缩成最小可续接摘要后再写入。\n"
             "5. 写入前先判断：这条信息是否能帮助下次更快续做、避免重复试错、减少再次回放长会话；若能，就应写入合适的 `memory/iq/` 文件。\n"
             "6. 当前问题明显依赖既有资料时，先检查 `memory/iq/` 下已有内容。\n"
@@ -497,7 +497,7 @@ class IQService:
 
         base: dict[str, Any] = {
             "role": "assistant",
-            "phase": "iq_trace",
+            "phase": "executor_trace",
             "stream_mode": mode,
             "timestamp": datetime.now().isoformat(),
         }
@@ -732,7 +732,7 @@ class IQService:
         *,
         request: str,
         intent_params: dict[str, Any] | None,
-    ) -> IQResultPacket:
+    ) -> ExecutorResultPacket:
         del request
         text = self._extract_text(raw_result).strip()
         metrics = self._extract_result_metrics(raw_result)
@@ -856,7 +856,7 @@ class IQService:
         cls,
         analysis: str,
         missing: list[str] | None = None,
-    ) -> IQResultPacket:
+    ) -> ExecutorResultPacket:
         return {
             "status": "failed",
             "analysis": str(analysis or "").strip(),
@@ -867,4 +867,4 @@ class IQService:
         }
 
 
-__all__ = ["IQService"]
+__all__ = ["ExecutorService"]

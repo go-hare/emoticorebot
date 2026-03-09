@@ -23,16 +23,20 @@ from emoticorebot.bus.events import InboundMessage, OutboundMessage
 from emoticorebot.bus.queue import MessageBus
 from emoticorebot.config.schema import ModelModeConfig, ProvidersConfig
 from emoticorebot.core.context import ContextBuilder
-from emoticorebot.core.graph import run_fusion_agent
+from emoticorebot.core.graph import run_orchestration_agent
 from emoticorebot.core.model import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
-from emoticorebot.services import EQService, IQService, MemoryService, ToolManager
-from emoticorebot.session.iq_context import build_iq_context
+from emoticorebot.services import ExecutorService, MainBrainService, MemoryService, ToolManager
+from emoticorebot.session.executor_context import build_executor_context
 from emoticorebot.session.manager import SessionManager
 
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
-    from emoticorebot.core.state import EQDeliberationPacket, EQFinalizePacket, IQResultPacket
+    from emoticorebot.core.state import (
+        ExecutorResultPacket,
+        MainBrainDeliberationPacket,
+        MainBrainFinalizePacket,
+    )
     from emoticorebot.cron.service import CronService
 
 
@@ -81,8 +85,8 @@ class FusionRuntime:
         self.eq_llm = _factory.get_eq()
 
         # 服务类（单一职责）
-        self.eq_service = EQService(self.eq_llm, self.context)
-        self.iq_service = IQService(self.iq_llm, None, self.context)  # registry 稍后注入
+        self.main_brain_service = MainBrainService(self.eq_llm, self.context)
+        self.executor_service = ExecutorService(self.iq_llm, None, self.context)  # registry injected later
         self.memory_service = MemoryService(
             workspace, self.emotion_mgr, self.sessions, iq_mode.memory_window,
             iq_llm=self.iq_llm,
@@ -96,9 +100,9 @@ class FusionRuntime:
             restrict_to_workspace,
         )
 
-        # 注册默认工具，注入 registry 到 IQ Service
+        # Register default tools and inject the registry into the executor service.
         self.tool_manager.register_default_tools()
-        self.iq_service.tools = self.tool_manager.get_registry()
+        self.executor_service.tools = self.tool_manager.get_registry()
 
         # SubagentManager（初始化后注册 spawn 工具）
         self.subagents = None
@@ -108,8 +112,8 @@ class FusionRuntime:
         self._mcp_servers = mcp_servers or {}
 
         # 预编译 LangGraph agent（每个 Runtime 实例只编译一次）
-        from emoticorebot.core.graph import create_fusion_agent
-        self._compiled_agent = create_fusion_agent(self.workspace, runtime=self)
+        from emoticorebot.core.graph import create_orchestration_agent
+        self._compiled_agent = create_orchestration_agent(self.workspace, runtime=self)
 
         # 运行状态
         self._running = False
@@ -212,10 +216,10 @@ class FusionRuntime:
         # 内置命令处理
         if cmd == "/new":
             session.clear()
-            self.sessions.clear_eq_iq_messages(session.key)
+            self.sessions.clear_internal_messages(session.key)
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="New session started. ✨")
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="New session started.")
         if cmd == "/help":
             return OutboundMessage(
                 channel=msg.channel,
@@ -228,21 +232,19 @@ class FusionRuntime:
             msg.channel, msg.chat_id, msg.metadata.get("message_id"), key
         )
 
-        # 加载两条历史：
-        # - `user_eq_history`：按 session 持久的用户↔EQ 外部会话
-        # - `eq_iq_history`：按 session 持久的 EQ↔IQ 内部会话
-        user_eq_history = session.get_history(max_messages=self.memory_window, include_iq_context=False)
-        eq_iq_history = self.sessions.get_eq_iq_messages(key, max_messages=self.memory_window)
+        # Load persisted dialogue history plus internal deliberation history.
+        dialogue_history = session.get_history(max_messages=self.memory_window, include_executor_context=False)
+        internal_history = self.sessions.get_internal_messages(key, max_messages=self.memory_window)
         message_id = str(msg.metadata.get("message_id", "") or "").strip() or self._new_message_id()
         msg.metadata["message_id"] = message_id
         turn_metadata = {"message_id": message_id}
 
-        content, final_state = await run_fusion_agent(
+        content, final_state = await run_orchestration_agent(
             user_input=msg.content,
             workspace=self.workspace,
             runtime=self,
-            user_eq_history=user_eq_history,
-            eq_iq_history=eq_iq_history,
+            dialogue_history=dialogue_history,
+            internal_history=internal_history,
             metadata=turn_metadata,
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -253,13 +255,13 @@ class FusionRuntime:
 
         # 保存对话到 session
         assistant_timestamp = datetime.now().isoformat()
-        self.sessions.append_eq_iq_messages(
+        self.sessions.append_internal_messages(
             key,
-            self._build_eq_iq_turn_records(
+            self._build_internal_turn_records(
                 final_state,
                 assistant_timestamp=assistant_timestamp,
                 message_id=message_id,
-                existing_eq_iq_count=len(eq_iq_history),
+                existing_internal_count=len(internal_history),
             ),
         )
 
@@ -300,18 +302,18 @@ class FusionRuntime:
         """停止 Runtime"""
         self._running = False
 
-    def _build_iq_summary(self, final_state: dict[str, Any]) -> str:
-        """Build a compact persisted summary from the current turn's IQ execution."""
-        iq = final_state.get("iq")
-        if iq is None:
+    def _build_executor_summary(self, final_state: dict[str, Any]) -> str:
+        """Build a compact persisted summary from the current turn's executor execution."""
+        executor = final_state.get("executor")
+        if executor is None:
             return ""
-        return build_iq_context(
+        return build_executor_context(
             {
-                "iq_status": getattr(iq, "status", ""),
-                "iq_analysis": getattr(iq, "analysis", ""),
-                "iq_recommended_action": getattr(iq, "recommended_action", ""),
-                "iq_confidence": float(getattr(iq, "confidence", 0.0) or 0.0),
-                "iq_missing_params": list(getattr(iq, "missing_params", []) or []),
+                "executor_status": getattr(executor, "status", ""),
+                "executor_analysis": getattr(executor, "analysis", ""),
+                "executor_recommended_action": getattr(executor, "recommended_action", ""),
+                "executor_confidence": float(getattr(executor, "confidence", 0.0) or 0.0),
+                "executor_missing_params": list(getattr(executor, "missing_params", []) or []),
             }
         )
 
@@ -319,39 +321,59 @@ class FusionRuntime:
         self,
         final_state: dict[str, Any],
     ) -> dict[str, Any]:
-        eq = final_state.get("eq")
-        if eq is None:
+        main_brain = final_state.get("main_brain")
+        executor = final_state.get("executor")
+        if main_brain is None:
             return {}
+        executor_summary = self._build_executor_summary(final_state)
         return {
             **{
                 key: value
                 for key, value in {
-                    "model_name": str(getattr(eq, "model_name", "") or ""),
-                    "prompt_tokens": int(getattr(eq, "prompt_tokens", 0) or 0),
-                    "completion_tokens": int(getattr(eq, "completion_tokens", 0) or 0),
-                    "total_tokens": int(getattr(eq, "total_tokens", 0) or 0),
+                    "model_name": str(getattr(main_brain, "model_name", "") or ""),
+                    "prompt_tokens": int(getattr(main_brain, "prompt_tokens", 0) or 0),
+                    "completion_tokens": int(getattr(main_brain, "completion_tokens", 0) or 0),
+                    "total_tokens": int(getattr(main_brain, "total_tokens", 0) or 0),
                 }.items()
                 if value not in ("", 0)
             },
+            **{
+                key: value
+                for key, value in {
+                    "executor_summary": executor_summary,
+                    "executor_status": str(getattr(executor, "status", "") or "") if executor is not None else "",
+                    "executor_analysis": str(getattr(executor, "analysis", "") or "") if executor is not None else "",
+                    "executor_recommended_action": (
+                        str(getattr(executor, "recommended_action", "") or "") if executor is not None else ""
+                    ),
+                    "executor_confidence": float(getattr(executor, "confidence", 0.0) or 0.0)
+                    if executor is not None
+                    else 0.0,
+                    "executor_missing_params": list(getattr(executor, "missing_params", []) or [])
+                    if executor is not None
+                    else [],
+                }.items()
+                if value not in ("", 0, [], None)
+            },
         }
 
-    def _build_eq_iq_turn_records(
+    def _build_internal_turn_records(
         self,
         final_state: dict[str, Any],
         *,
         assistant_timestamp: str,
         message_id: str,
-        existing_eq_iq_count: int = 0,
+        existing_internal_count: int = 0,
     ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         seen_signatures: set[str] = set()
-        eq_iq_history = (final_state.get("eq_iq_history", []) or [])[max(0, existing_eq_iq_count):]
-        iq_trace = final_state.get("iq_trace", []) or []
-        for source_name, source in (("eq_iq_history", eq_iq_history), ("iq_trace", iq_trace)):
+        internal_history = (final_state.get("internal_history", []) or [])[max(0, existing_internal_count):]
+        executor_trace = final_state.get("executor_trace", []) or []
+        for source_name, source in (("internal_history", internal_history), ("executor_trace", executor_trace)):
             for item in source:
                 if not isinstance(item, dict):
                     continue
-                if source_name == "iq_trace" and item.get("phase"):
+                if source_name == "executor_trace" and item.get("phase"):
                     continue
                 payload = dict(item)
                 payload.setdefault("message_id", message_id)
@@ -387,26 +409,32 @@ class FusionRuntime:
 
     # ── EQ 主导接口 ────────────────────────────────────────────
 
-    async def eq_deliberate(
+    async def main_brain_deliberate(
         self,
         *,
         user_input: str,
-        user_eq_history: list[dict[str, Any]],
+        dialogue_history: list[dict[str, Any]],
         emotion: str,
         pad: dict[str, float],
-    ) -> "EQDeliberationPacket":
-        return await self.eq_service.deliberate(
+        channel: str = "",
+        chat_id: str = "",
+        session_id: str = "",
+    ) -> "MainBrainDeliberationPacket":
+        return await self.main_brain_service.deliberate(
             user_input=user_input,
-            history=user_eq_history,
+            history=dialogue_history,
             emotion=emotion,
             pad=pad,
+            channel=channel,
+            chat_id=chat_id,
+            session_id=session_id,
         )
 
-    async def eq_finalize(self, **kwargs) -> "EQFinalizePacket":
-        return await self.eq_service.finalize(**kwargs)
+    async def main_brain_finalize(self, **kwargs) -> "MainBrainFinalizePacket":
+        return await self.main_brain_service.finalize(**kwargs)
 
-    async def run_iq_request(self, **kwargs) -> "IQResultPacket":
-        return await self.iq_service.run_request(**kwargs)
+    async def run_executor_request(self, **kwargs) -> "ExecutorResultPacket":
+        return await self.executor_service.run_request(**kwargs)
 
     async def write_memory(self, state: dict) -> None:
         await self.memory_service.write_turn_memory(state)

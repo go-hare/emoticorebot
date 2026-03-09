@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from loguru import logger
 
-from emoticorebot.session.iq_context import build_iq_context
+from emoticorebot.session.executor_context import build_executor_context
 from emoticorebot.utils.helpers import ensure_dir, safe_filename
 from emoticorebot.utils.llm_utils import normalize_content_blocks
 
@@ -124,7 +124,7 @@ class Session:
         self,
         max_messages: int = 500,
         *,
-        include_iq_context: bool = True,
+        include_executor_context: bool = True,
     ) -> list[dict[str, Any]]:
         """Return unconsolidated messages for LLM input, aligned to a user turn."""
         unconsolidated = self.messages[self.last_consolidated:]
@@ -138,10 +138,10 @@ class Session:
         out: list[dict[str, Any]] = []
         for message in sliced:
             content = normalize_content_blocks(message.get("content", []))
-            if include_iq_context and message.get("role") == "assistant":
-                iq_context = build_iq_context(message)
-                if iq_context:
-                    content = [*content, {"type": "text", "text": iq_context}]
+            if include_executor_context and message.get("role") == "assistant":
+                executor_context = build_executor_context(message)
+                if executor_context:
+                    content = [*content, {"type": "text", "text": executor_context}]
 
             entry: dict[str, Any] = {"role": message["role"], "content": content}
             for key in ("tool_calls", "tool_call_id"):
@@ -158,7 +158,7 @@ class Session:
 
 
 class SessionManager:
-    """Manage persistent `user_eq` and `eq_iq` histories."""
+    """Manage persistent dialogue and internal histories."""
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -176,14 +176,14 @@ class SessionManager:
     def _ensure_session_dir(self, key: str) -> Path:
         return ensure_dir(self._get_session_dir(key))
 
-    def _get_user_eq_path(self, key: str) -> Path:
-        return self._get_session_dir(key) / "user_eq.jsonl"
+    def _get_dialogue_path(self, key: str) -> Path:
+        return self._get_session_dir(key) / "dialogue.jsonl"
 
-    def _get_eq_iq_path(self, key: str) -> Path:
-        return self._get_session_dir(key) / "eq_iq.jsonl"
+    def _get_internal_path(self, key: str) -> Path:
+        return self._get_session_dir(key) / "internal.jsonl"
 
     def _get_session_path(self, key: str) -> Path:
-        return self._get_user_eq_path(key)
+        return self._get_dialogue_path(key)
 
     def _get_flat_session_path(self, key: str) -> Path:
         return self.sessions_dir / f"{self._safe_key(key)}.jsonl"
@@ -191,32 +191,32 @@ class SessionManager:
     def _get_legacy_session_path(self, key: str) -> Path:
         return self.legacy_sessions_dir / f"{self._safe_key(key)}.jsonl"
 
-    def append_eq_iq_messages(self, key: str, messages: list[dict[str, Any]]) -> None:
-        """Append internal EQ↔IQ messages for the current turn."""
+    def append_internal_messages(self, key: str, messages: list[dict[str, Any]]) -> None:
+        """Append internal deliberation messages for the current turn."""
         if not messages:
             return
         self._ensure_session_dir(key)
-        path = self._get_eq_iq_path(key)
+        path = self._get_internal_path(key)
         with open(path, "a", encoding="utf-8") as f:
             for message in messages:
                 payload = normalize_message_payload(message)
                 payload.setdefault("timestamp", datetime.now().isoformat())
                 f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    def clear_eq_iq_messages(self, key: str) -> None:
-        """Clear persisted internal EQ↔IQ history for `/new`."""
-        path = self._get_eq_iq_path(key)
+    def clear_internal_messages(self, key: str) -> None:
+        """Clear persisted internal deliberation history for `/new`."""
+        path = self._get_internal_path(key)
         if path.exists():
             path.write_text("", encoding="utf-8")
 
-    def get_eq_iq_messages(
+    def get_internal_messages(
         self,
         key: str,
         *,
         max_messages: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Load persisted internal EQ↔IQ messages."""
-        path = self._get_eq_iq_path(key)
+        """Load persisted internal deliberation messages."""
+        path = self._get_internal_path(key)
         if not path.exists():
             return []
         try:
@@ -234,7 +234,7 @@ class SessionManager:
                 return messages[-max_messages:]
             return messages
         except Exception as e:
-            logger.warning("Failed to load eq_iq messages for session {}: {}", key, e)
+            logger.warning("Failed to load internal messages for session {}: {}", key, e)
             return []
 
     def get_or_create(self, key: str) -> Session:
@@ -258,16 +258,16 @@ class SessionManager:
         return session
 
     def _load(self, key: str) -> Session | None:
-        user_eq_path = self._get_user_eq_path(key)
+        dialogue_path = self._get_dialogue_path(key)
 
-        if user_eq_path.exists():
-            return self._load_directory_session(key, user_eq_path=user_eq_path)
+        if dialogue_path.exists():
+            return self._load_directory_session(key, dialogue_path=dialogue_path)
 
         return None
 
-    def _load_directory_session(self, key: str, *, user_eq_path: Path) -> Session | None:
+    def _load_directory_session(self, key: str, *, dialogue_path: Path) -> Session | None:
         try:
-            messages = self._read_jsonl_messages(user_eq_path)
+            messages = self._read_jsonl_messages(dialogue_path)
             return self._session_from_payload(
                 key=key,
                 messages=messages,
@@ -326,11 +326,11 @@ class SessionManager:
 
     def save(self, session: Session) -> None:
         session_dir = self._ensure_session_dir(session.key)
-        user_eq_path = session_dir / "user_eq.jsonl"
+        dialogue_path = session_dir / "dialogue.jsonl"
 
         session.updated_at = datetime.now()
 
-        with open(user_eq_path, "w", encoding="utf-8") as f:
+        with open(dialogue_path, "w", encoding="utf-8") as f:
             for message in session.messages:
                 f.write(json.dumps(normalize_message_payload(message), ensure_ascii=False) + "\n")
 
@@ -345,8 +345,8 @@ class SessionManager:
         for path in self.sessions_dir.iterdir():
             if not path.is_dir():
                 continue
-            user_eq_path = path / "user_eq.jsonl"
-            messages = self._read_jsonl_messages(user_eq_path)
+            dialogue_path = path / "dialogue.jsonl"
+            messages = self._read_jsonl_messages(dialogue_path)
             key = path.name
             created_at = self._infer_created_at(messages)
             updated_at = self._infer_updated_at(messages)
@@ -354,7 +354,7 @@ class SessionManager:
                 "key": key,
                 "created_at": created_at.isoformat() if created_at else "",
                 "updated_at": updated_at.isoformat() if updated_at else "",
-                "path": str(user_eq_path),
+                "path": str(dialogue_path),
             }
 
         return sorted(sessions_by_key.values(), key=lambda item: item.get("updated_at", ""), reverse=True)

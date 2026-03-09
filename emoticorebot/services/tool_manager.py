@@ -1,8 +1,8 @@
 """ToolManager - 工具管理服务。
 
-职责（单一）：注册 / 配置 / 连接 / 释放所有工具，向 IQService 提供 ToolRegistry。
+职责（单一）：注册 / 配置 / 连接 / 释放所有工具，向 ExecutorService 提供 ToolRegistry。
 
-工具注册逻辑集中在此，避免分散到 Runtime 或 IQService 内部。
+工具注册逻辑集中在此，避免分散到 Runtime 或 ExecutorService 内部。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from emoticorebot.services.tool_reflection import ToolLightReflectionService
 from emoticorebot.tools import (
     CronTool,
     EditFileTool,
@@ -62,6 +63,8 @@ class ToolManager:
         self.restrict_to_workspace = restrict_to_workspace
 
         self.registry = ToolRegistry()
+        self.tool_reflection = ToolLightReflectionService(workspace)
+        self.registry.set_execution_observer(self.tool_reflection.record_execution)
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
@@ -111,6 +114,13 @@ class ToolManager:
         session_key: str | None = None,
     ) -> None:
         """每次请求前注入当前对话上下文（channel / chat_id）。"""
+        self.registry.set_execution_context(
+            channel=channel,
+            chat_id=chat_id,
+            message_id=message_id,
+            session_key=session_key,
+            source="executor",
+        )
         for name in ("message", "cron", "spawn"):
             if tool := self.registry.get(name):
                 if hasattr(tool, "set_context"):
@@ -158,7 +168,7 @@ class ToolManager:
             logger.info("MCP servers closed")
 
     def get_registry(self) -> ToolRegistry:
-        """获取工具注册表（供 IQService 使用）。"""
+        """获取工具注册表（供 ExecutorService 使用）。"""
         return self.registry
 
 

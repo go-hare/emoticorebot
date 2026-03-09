@@ -1,5 +1,5 @@
-"""Core nodes package - LangGraph 图节点。"""
+"""Core nodes package."""
 
-from emoticorebot.core.state import FusionState
+from emoticorebot.core.state import OrchestrationState
 
-__all__ = ["FusionState"]
+__all__ = ["OrchestrationState"]

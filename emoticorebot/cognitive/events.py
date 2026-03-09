@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
-import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from math import fabs
@@ -14,27 +12,26 @@ from uuid import uuid4
 @dataclass
 class CognitiveEvent:
     id: str
+    version: str
     timestamp: str
     session_id: str
+    turn_id: str
     actor: str
+    event_type: str
     content: str
-    eq: dict[str, Any] = field(default_factory=dict)
-    iq: dict[str, Any] = field(default_factory=dict)
+    state: dict[str, Any] = field(default_factory=dict)
+    execution: dict[str, Any] = field(default_factory=dict)
+    light_insight: dict[str, Any] = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def storage_path(cls, workspace: Path) -> Path:
-        new_path = workspace / "memory" / "eq" / "events.jsonl"
-        legacy_path = workspace / "data" / "memory" / "events.jsonl"
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        if not new_path.exists() and legacy_path.exists():
-            try:
-                legacy_path.replace(new_path)
-            except OSError:
-                shutil.copy2(legacy_path, new_path)
-        return new_path
+        primary_path = workspace / "memory" / "cognitive_events.jsonl"
+        primary_path.parent.mkdir(parents=True, exist_ok=True)
+        return primary_path
 
     @classmethod
     def append(cls, workspace: Path, event: "CognitiveEvent") -> None:
@@ -77,153 +74,281 @@ class CognitiveEvent:
         return cls._rank_entries(entries, query=query, limit=k)
 
     @classmethod
-    def get_eq_context(cls, workspace: Path, query: str = "", *, k: int = 6) -> str:
+    def get_cognitive_context(cls, workspace: Path, query: str = "", *, k: int = 6) -> str:
         rows = cls.retrieve(workspace, query=query, actors=["user", "assistant"], k=max(k * 2, 8))
         if not rows:
             return ""
 
         lines: list[str] = []
         for row in rows:
-            eq = row.get("eq") or {}
-            if not isinstance(eq, dict):
-                continue
-            emotion = str(eq.get("emotion", "") or "").strip()
-            if not emotion:
-                continue
-            intensity = float(eq.get("intensity", 0.0) or 0.0)
-            relation = str(eq.get("relation", "") or "").strip()
             actor = str(row.get("actor", "event") or "event")
             summary = cls._normalize_text(str(row.get("content", "")), limit=120)
-            if relation:
-                lines.append(f"- [{actor}|{emotion}|{relation}|{intensity:.2f}] {summary}")
+            if not summary:
+                continue
+
+            state = row.get("state") or {}
+            self_state = state.get("self_state") if isinstance(state, dict) else {}
+            relation_state = state.get("relation_state") if isinstance(state, dict) else {}
+            mood = str((self_state or {}).get("mood", "") or "stable")
+            relation = cls._extract_relation_label(relation_state)
+            importance = float((row.get("meta") or {}).get("importance", 0.5) or 0.5)
+            pad_text = cls._format_pad((self_state or {}).get("pad"))
+            if pad_text:
+                lines.append(f"- [{actor}|{mood}|{relation}|{importance:.2f}] {summary} {pad_text}")
             else:
-                lines.append(f"- [{actor}|{emotion}|{intensity:.2f}] {summary}")
+                lines.append(f"- [{actor}|{mood}|{relation}|{importance:.2f}] {summary}")
+
             if len(lines) >= k:
                 break
 
         if not lines:
             return ""
-        return "## EQ 流\n" + "\n".join(lines)
+        return "## Cognitive Events\n" + "\n".join(lines)
 
     @classmethod
-    def build_eq_sections(
+    def build_cognitive_sections(
         cls,
         workspace: Path,
         *,
         query: str = "",
-        current_emotion: str = "平静",
+        current_emotion: str = "stable",
         pad_state: tuple[float, float, float] | None = None,
     ) -> list[str]:
         del current_emotion, pad_state
-        eq_flow = cls.get_eq_context(workspace, query=query, k=4)
-        if not eq_flow:
+        cognitive_flow = cls.get_cognitive_context(workspace, query=query, k=4)
+        if not cognitive_flow:
             return []
-        return [cls._compact_section(eq_flow, 480)]
+        return [cls._compact_section(cognitive_flow, 480)]
 
     @classmethod
     def build_turn_events(
         cls,
         *,
-        state: dict,
+        state: dict[str, Any],
         emotion_label: str,
-        emotion_event,
+        emotion_event: Any,
         pad: dict[str, float],
+        drives: dict[str, float],
         importance: float,
+        light_insight: dict[str, Any] | None = None,
     ) -> list["CognitiveEvent"]:
-        timestamp = datetime.now().isoformat()
-        session_id = str(state.get("session_id", ""))
+        timestamp = datetime.now().astimezone().isoformat()
+        session_id = str(state.get("session_id", "") or "")
+        turn_id = cls._extract_turn_id(state)
         user_input = str(state.get("user_input", "") or "").strip()
         output = str(state.get("output", "") or "").strip()
-        iq = state.get("iq")
+        executor = state.get("executor")
+        execution = cls._build_execution(state=state, executor=executor)
+        insight_payload = dict(light_insight or cls._build_light_insight())
+
+        relation_signal = cls._infer_relation(user_input=user_input, emotion_event=emotion_event)
+        relation_state = cls._build_relation_state(relation_signal)
+        context_state = cls._build_context_state(
+            user_input=user_input,
+            output=output,
+            light_insight=insight_payload,
+            execution=execution,
+        )
+        growth_state = cls._build_growth_state(light_insight=insight_payload)
+        channel = str(state.get("channel", "") or "")
 
         events: list[CognitiveEvent] = []
         if user_input:
             user_emotion = cls._infer_user_emotion(user_input=user_input, emotion_event=emotion_event)
-            user_eq = {
-                "emotion": user_emotion["label"],
-                "intensity": user_emotion["intensity"],
-                "relation": cls._infer_relation(user_input=user_input, emotion_event=emotion_event),
-                "importance": round(float(importance), 2),
-            }
+            self_state = cls._build_self_state(
+                pad=pad,
+                drives=drives,
+                mood=str(user_emotion["label"]),
+                tone="attentive",
+                companionship_tension=cls._infer_companionship_tension(relation_signal),
+            )
             events.append(
                 cls(
                     id=f"evt_{uuid4().hex}",
+                    version="2",
                     timestamp=timestamp,
                     session_id=session_id,
+                    turn_id=turn_id,
                     actor="user",
+                    event_type="user_input",
                     content=user_input,
-                    eq=user_eq,
+                    state={
+                        "self_state": self_state,
+                        "relation_state": relation_state,
+                        "context_state": context_state,
+                        "growth_state": growth_state,
+                    },
+                    execution=cls._empty_execution(),
+                    light_insight=insight_payload,
+                    meta={
+                        "importance": round(float(importance), 2),
+                        "confidence": 1.0,
+                        "channel": channel,
+                        "source": "turn_memory",
+                        "tags": ["session", "user_input"],
+                    },
                 )
             )
 
         if output:
-            eq = state.get("eq")
-            assistant_relation = "谨慎" if cls._infer_relation(user_input=user_input, emotion_event=emotion_event) == "对抗" else "稳定"
-            assistant_eq = {
-                "emotion": emotion_label,
-                "intensity": cls._assistant_intensity_from_pad(pad),
-                "relation": assistant_relation,
-                "importance": round(float(importance), 2),
-            }
+            assistant_tone = "gentle" if relation_signal != "antagonistic" else "contained"
+            self_state = cls._build_self_state(
+                pad=pad,
+                drives=drives,
+                mood=emotion_label,
+                tone=assistant_tone,
+                companionship_tension=cls._infer_companionship_tension(relation_signal),
+            )
             events.append(
                 cls(
                     id=f"evt_{uuid4().hex}",
+                    version="2",
                     timestamp=timestamp,
                     session_id=session_id,
+                    turn_id=turn_id,
                     actor="assistant",
+                    event_type="assistant_output",
                     content=output,
-                    eq=assistant_eq,
-                    iq={
-                        "question": getattr(iq, "request", "") if iq is not None else "",
-                        "confidence": float(getattr(iq, "confidence", 0.0) or 0.0) if iq is not None else 0.0,
-                        "missing_params": list(getattr(iq, "missing_params", []) or []) if iq is not None else [],
-                        "decision": str(getattr(eq, "final_decision", "") or "") if eq is not None else "",
+                    state={
+                        "self_state": self_state,
+                        "relation_state": relation_state,
+                        "context_state": context_state,
+                        "growth_state": growth_state,
+                    },
+                    execution=execution,
+                    light_insight=insight_payload,
+                    meta={
+                        "importance": round(float(importance), 2),
+                        "confidence": cls._extract_executor_confidence(executor),
+                        "channel": channel,
+                        "source": "turn_memory",
+                        "tags": cls._build_meta_tags(relation_signal, execution),
                     },
                 )
             )
+
         return events
 
     @staticmethod
     def estimate_importance(user_input: str, output: str) -> float:
         text = f"{user_input} {output}"
         score = 0.45
-        if any(token in text for token in ["失恋", "难过", "焦虑", "崩溃", "喜欢", "谢谢", "约会"]):
+        if any(
+            token in text
+            for token in [
+                "\u5931\u604b",
+                "\u96be\u8fc7",
+                "\u7126\u8651",
+                "\u5d29\u6e83",
+                "\u559c\u6b22",
+                "\u8c22\u8c22",
+                "\u7ea6\u4f1a",
+            ]
+        ):
             score += 0.2
-        if any(token in text for token in ["明天", "下周", "提醒", "计划", "安排", "待办"]):
+        if any(
+            token in text
+            for token in [
+                "\u660e\u5929",
+                "\u4e0b\u5468",
+                "\u63d0\u9192",
+                "\u8ba1\u5212",
+                "\u5b89\u6392",
+                "\u5f85\u529e",
+            ]
+        ):
             score += 0.15
-        if "?" in text or "？" in text:
+        if "?" in text or "\uff1f" in text:
             score += 0.05
         return max(0.1, min(0.95, score))
 
     @staticmethod
-    def _infer_user_emotion(*, user_input: str, emotion_event) -> dict[str, float | str]:
+    def _infer_user_emotion(*, user_input: str, emotion_event: Any) -> dict[str, float | str]:
         text = (user_input or "").strip().lower()
         if not text:
-            return {"label": "平静", "intensity": 0.3}
+            return {"label": "calm", "intensity": 0.3}
         behavior = str(getattr(emotion_event, "behavior", "") or "")
-        if "开心" in behavior:
-            return {"label": "开心", "intensity": 0.75}
-        if "生气" in behavior:
-            return {"label": "愤怒", "intensity": 0.82}
-        if any(token in text for token in ["焦虑", "着急", "崩溃", "烦", "烦死了"]):
-            return {"label": "焦虑", "intensity": 0.72}
-        if any(token in text for token in ["我觉得", "设计", "架构", "方案", "记忆", "是不是", "要不要"]):
-            return {"label": "专注", "intensity": 0.62}
-        if any(token in text for token in ["？", "?", "不懂", "什么意思", "干嘛"]):
-            return {"label": "困惑", "intensity": 0.58}
-        return {"label": "平静", "intensity": 0.4}
+        if "\u5f00\u5fc3" in behavior:
+            return {"label": "happy", "intensity": 0.75}
+        if "\u751f\u6c14" in behavior:
+            return {"label": "angry", "intensity": 0.82}
+        if any(
+            token in text
+            for token in [
+                "\u7126\u8651",
+                "\u7740\u6025",
+                "\u5d29\u6e83",
+                "\u70e6",
+                "\u70e6\u6b7b\u4e86",
+            ]
+        ):
+            return {"label": "anxious", "intensity": 0.72}
+        if any(
+            token in text
+            for token in [
+                "\u6211\u89c9\u5f97",
+                "\u8bbe\u8ba1",
+                "\u67b6\u6784",
+                "\u65b9\u6848",
+                "\u8bb0\u5fc6",
+                "\u662f\u4e0d\u662f",
+                "\u8981\u4e0d\u8981",
+            ]
+        ):
+            return {"label": "focused", "intensity": 0.62}
+        if any(
+            token in text
+            for token in [
+                "\uff1f",
+                "?",
+                "\u4e0d\u61c2",
+                "\u4ec0\u4e48\u610f\u601d",
+                "\u5e72\u5565",
+            ]
+        ):
+            return {"label": "confused", "intensity": 0.58}
+        return {"label": "calm", "intensity": 0.4}
 
     @staticmethod
-    def _infer_relation(*, user_input: str, emotion_event) -> str:
+    def _infer_relation(*, user_input: str, emotion_event: Any) -> str:
         text = (user_input or "").strip().lower()
         behavior = str(getattr(emotion_event, "behavior", "") or "")
-        if "生气" in behavior or any(token in text for token in ["滚", "闭嘴", "垃圾", "讨厌你", "烦死了"]):
-            return "对抗"
-        if "开心" in behavior or any(token in text for token in ["谢谢", "喜欢你", "爱你", "棒", "厉害"]):
-            return "亲近"
-        if any(token in text for token in ["我觉得", "设计", "架构", "方案", "一起", "先", "怎么做"]):
-            return "合作"
-        return "稳定"
+        if "\u751f\u6c14" in behavior or any(
+            token in text
+            for token in [
+                "\u6eda",
+                "\u95ed\u5634",
+                "\u5783\u573e",
+                "\u8ba8\u538c\u4f60",
+                "\u70e6\u6b7b\u4e86",
+            ]
+        ):
+            return "antagonistic"
+        if "\u5f00\u5fc3" in behavior or any(
+            token in text
+            for token in [
+                "\u8c22\u8c22",
+                "\u559c\u6b22\u4f60",
+                "\u7231\u4f60",
+                "\u68d2",
+                "\u9760\u8c31",
+            ]
+        ):
+            return "close"
+        if any(
+            token in text
+            for token in [
+                "\u6211\u89c9\u5f97",
+                "\u8bbe\u8ba1",
+                "\u67b6\u6784",
+                "\u65b9\u6848",
+                "\u4e00\u8d77",
+                "\u4f60\u770b",
+                "\u600e\u4e48\u505a",
+            ]
+        ):
+            return "collaborative"
+        return "stable"
 
     @staticmethod
     def _assistant_intensity_from_pad(pad: dict[str, float]) -> float:
@@ -241,14 +366,14 @@ class CognitiveEvent:
         text = " ".join((value or "").split())
         if len(text) <= limit:
             return text
-        return text[: limit - 1] + "…"
+        return text[: limit - 3] + "..."
 
     @staticmethod
     def _compact_section(text: str, limit: int) -> str:
         compact = " ".join((text or "").split())
         if len(compact) <= limit:
             return compact
-        return compact[: limit - 1] + "…"
+        return compact[: limit - 3] + "..."
 
     @staticmethod
     def _token_overlap(query: str, values: Iterable[str]) -> float:
@@ -266,7 +391,9 @@ class CognitiveEvent:
         if not timestamp:
             return 0.3
         try:
-            age_hours = (datetime.now() - datetime.fromisoformat(timestamp)).total_seconds() / 3600
+            parsed = datetime.fromisoformat(timestamp)
+            now = datetime.now(parsed.tzinfo) if parsed.tzinfo is not None else datetime.now()
+            age_hours = (now - parsed).total_seconds() / 3600
         except Exception:
             return 0.3
         return max(0.05, min(1.0, 0.995 ** max(age_hours, 0)))
@@ -281,16 +408,355 @@ class CognitiveEvent:
     ) -> list[dict[str, Any]]:
         ranked: list[tuple[float, dict[str, Any]]] = []
         for entry in entries:
-            relevance = cls._token_overlap(query, [str(entry.get("content", ""))])
+            topic = cls._extract_topic(entry)
+            relevance = cls._token_overlap(query, [str(entry.get("content", "")), topic])
             recency = cls._recency_score(str(entry.get("timestamp", "") or ""))
-            eq = entry.get("eq") or {}
-            iq = entry.get("iq") or {}
-            importance = float(eq.get("importance", 0.5) or 0.5) if isinstance(eq, dict) else 0.5
-            confidence = float(iq.get("confidence", 1.0 if entry.get("actor") == "user" else 0.8) or 0.8) if isinstance(iq, dict) else 0.8
+            importance = cls._extract_importance(entry)
+            confidence = cls._extract_confidence(entry)
             score = 0.4 * relevance + 0.25 * recency + 0.2 * importance + 0.15 * confidence
             ranked.append((score, entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
         return [entry for _, entry in ranked[:limit]]
+
+    @staticmethod
+    def _extract_turn_id(state: dict[str, Any]) -> str:
+        metadata = state.get("metadata")
+        if isinstance(metadata, dict):
+            message_id = str(metadata.get("message_id", "") or "").strip()
+            if message_id:
+                return message_id
+        for key in ("turn_id", "message_id"):
+            value = str(state.get(key, "") or "").strip()
+            if value:
+                return value
+        return f"turn_{uuid4().hex[:12]}"
+
+    @classmethod
+    def _build_self_state(
+        cls,
+        *,
+        pad: dict[str, float],
+        drives: dict[str, float],
+        mood: str,
+        tone: str,
+        companionship_tension: float,
+    ) -> dict[str, Any]:
+        return {
+            "pad": {
+                "pleasure": round(float(pad.get("pleasure", 0.0) or 0.0), 3),
+                "arousal": round(float(pad.get("arousal", 0.0) or 0.0), 3),
+                "dominance": round(float(pad.get("dominance", 0.0) or 0.0), 3),
+            },
+            "drives": {
+                "social": round(float(drives.get("social", 0.0) or 0.0), 2),
+                "energy": round(float(drives.get("energy", 0.0) or 0.0), 2),
+            },
+            "mood": mood or "stable",
+            "tone": tone or "gentle",
+            "companionship_tension": round(float(companionship_tension), 2),
+        }
+
+    @staticmethod
+    def _build_relation_state(signal: str) -> dict[str, Any]:
+        if signal == "close":
+            return {
+                "stage": "building_trust",
+                "trust": 0.78,
+                "familiarity": 0.72,
+                "closeness": 0.76,
+            }
+        if signal == "collaborative":
+            return {
+                "stage": "working_together",
+                "trust": 0.7,
+                "familiarity": 0.62,
+                "closeness": 0.64,
+            }
+        if signal == "antagonistic":
+            return {
+                "stage": "strained",
+                "trust": 0.28,
+                "familiarity": 0.35,
+                "closeness": 0.22,
+            }
+        return {
+            "stage": "stable",
+            "trust": 0.55,
+            "familiarity": 0.5,
+            "closeness": 0.5,
+        }
+
+    @classmethod
+    def _build_context_state(
+        cls,
+        *,
+        user_input: str,
+        output: str,
+        light_insight: dict[str, Any] | None = None,
+        execution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        primary = user_input or output
+        topic = cls._normalize_text(primary, limit=48)
+        recent_focus: list[str] = []
+        if user_input:
+            recent_focus.append(cls._normalize_text(user_input, limit=48))
+        if output:
+            recent_focus.append(cls._normalize_text(output, limit=48))
+        unfinished_threads = cls._build_unfinished_threads(
+            light_insight=light_insight,
+            execution=execution,
+        )
+        return {
+            "topic": topic,
+            "intent": cls._infer_intent(user_input=user_input, output=output, execution=execution),
+            "recent_focus": recent_focus[:2],
+            "unfinished_threads": unfinished_threads,
+        }
+
+    @classmethod
+    def _build_growth_state(cls, *, light_insight: dict[str, Any] | None = None) -> dict[str, Any]:
+        insight = light_insight if isinstance(light_insight, dict) else {}
+        direct_updates = insight.get("direct_updates") if isinstance(insight.get("direct_updates"), dict) else {}
+        stable_preferences = cls._normalize_string_items(direct_updates.get("user_profile"))
+        stable_preferences.extend(cls._normalize_string_items(direct_updates.get("soul_preferences")))
+        recent_insights = []
+        summary = str(insight.get("summary", "") or "").strip()
+        context_update = str(insight.get("context_update", "") or "").strip()
+        if summary:
+            recent_insights.append(summary)
+        if context_update and context_update != summary:
+            recent_insights.append(context_update)
+        return {
+            "recent_insights": recent_insights[:2],
+            "stable_preferences": stable_preferences[:4],
+            "pending_corrections": [],
+        }
+
+    @staticmethod
+    def _build_light_insight() -> dict[str, Any]:
+        return {
+            "summary": "",
+            "relation_shift": "stable",
+            "context_update": "",
+            "next_hint": "",
+            "direct_updates": {
+                "user_profile": [],
+                "soul_preferences": [],
+                "current_state_updates": {
+                    "pad": None,
+                    "drives": None,
+                },
+                "applied": {
+                    "user": False,
+                    "soul": False,
+                    "state": False,
+                },
+                "applied_state_snapshot": {},
+            },
+        }
+
+    @staticmethod
+    def _build_execution(*, state: dict[str, Any], executor: Any) -> dict[str, Any]:
+        invoked = executor is not None
+        if not invoked:
+            return CognitiveEvent._empty_execution()
+
+        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+        summary = str(getattr(executor, "analysis", "") or "").strip()
+        if not summary:
+            summary = str(getattr(executor, "request", "") or "").strip()
+        return {
+            "invoked": True,
+            "control_state": CognitiveEvent._map_control_state(executor),
+            "status": CognitiveEvent._map_execution_status(executor),
+            "thread_id": str(
+                state.get("executor_thread_id", "")
+                or metadata.get("executor_thread_id", "")
+                or metadata.get("thread_id", "")
+                or ""
+            ).strip(),
+            "run_id": str(
+                state.get("executor_run_id", "")
+                or metadata.get("executor_run_id", "")
+                or metadata.get("run_id", "")
+                or ""
+            ).strip(),
+            "summary": CognitiveEvent._normalize_text(summary, limit=180),
+            "missing": [
+                str(item).strip()
+                for item in list(getattr(executor, "missing_params", []) or [])
+                if str(item).strip()
+            ],
+        }
+
+    @staticmethod
+    def _extract_executor_confidence(executor: Any) -> float:
+        if executor is None:
+            return 0.8
+        return round(float(getattr(executor, "confidence", 0.0) or 0.0), 2)
+
+    @staticmethod
+    def _build_meta_tags(relation_signal: str, execution: dict[str, Any]) -> list[str]:
+        tags = ["session", "assistant_output", relation_signal or "stable"]
+        if execution.get("invoked"):
+            tags.append("executor_used")
+        return tags
+
+    @staticmethod
+    def _extract_relation_label(relation_state: Any) -> str:
+        if not isinstance(relation_state, dict):
+            return "stable"
+        return str(
+            relation_state.get("signal", "")
+            or relation_state.get("stage", "")
+            or "stable"
+        ).strip()
+
+    @staticmethod
+    def _infer_intent(*, user_input: str, output: str, execution: dict[str, Any] | None = None) -> str:
+        text = (user_input or output or "").strip().lower()
+        if not text:
+            return "dialogue"
+        if execution and execution.get("invoked"):
+            return "execution"
+        if any(
+            token in text
+            for token in [
+                "\u8bbe\u8ba1",
+                "\u67b6\u6784",
+                "\u65b9\u6848",
+                "\u600e\u4e48\u505a",
+                "\u5b9e\u73b0",
+            ]
+        ):
+            return "discussion"
+        if any(
+            token in text
+            for token in [
+                "\u559c\u6b22",
+                "\u5e0c\u671b",
+                "\u60f3\u8981",
+                "\u6211\u662f",
+            ]
+        ):
+            return "self_disclosure"
+        if "?" in text or "\uff1f" in text:
+            return "question"
+        return "dialogue"
+
+    @classmethod
+    def _build_unfinished_threads(
+        cls,
+        *,
+        light_insight: dict[str, Any] | None = None,
+        execution: dict[str, Any] | None = None,
+    ) -> list[str]:
+        unfinished: list[str] = []
+        if isinstance(light_insight, dict):
+            next_hint = str(light_insight.get("next_hint", "") or "").strip()
+            if next_hint:
+                unfinished.append(cls._normalize_text(next_hint, limit=80))
+        if isinstance(execution, dict) and str(execution.get("status", "") or "") == "need_more":
+            missing = execution.get("missing") if isinstance(execution.get("missing"), list) else []
+            if missing:
+                unfinished.append(
+                    "Need user input: " + ", ".join(str(item).strip() for item in missing if str(item).strip())
+                )
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in unfinished:
+            if item and item not in seen:
+                deduped.append(item)
+                seen.add(item)
+        return deduped[:3]
+
+    @staticmethod
+    def _normalize_string_items(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @staticmethod
+    def _empty_execution() -> dict[str, Any]:
+        return {
+            "invoked": False,
+            "control_state": "idle",
+            "status": "none",
+            "thread_id": "",
+            "run_id": "",
+            "summary": "",
+            "missing": [],
+        }
+
+    @staticmethod
+    def _map_control_state(executor: Any) -> str:
+        status = str(getattr(executor, "status", "") or "").strip().lower()
+        if status in {"queued", "running"}:
+            return "running"
+        if status == "needs_input":
+            return "paused"
+        if status == "failed":
+            return "stopped"
+        return "completed"
+
+    @staticmethod
+    def _map_execution_status(executor: Any) -> str:
+        status = str(getattr(executor, "status", "") or "").strip().lower()
+        if status == "failed":
+            return "failed"
+        if status in {"needs_input", "uncertain"}:
+            return "need_more"
+        if status in {"queued", "running"}:
+            return "need_more"
+        return "done"
+
+    @staticmethod
+    def _infer_companionship_tension(relation_signal: str) -> float:
+        mapping = {
+            "close": 0.72,
+            "collaborative": 0.6,
+            "stable": 0.5,
+            "antagonistic": 0.32,
+        }
+        return mapping.get(relation_signal, 0.5)
+
+    @classmethod
+    def _extract_topic(cls, entry: dict[str, Any]) -> str:
+        state = entry.get("state") or {}
+        if isinstance(state, dict):
+            context_state = state.get("context_state") or {}
+            if isinstance(context_state, dict):
+                return str(context_state.get("topic", "") or "")
+        return ""
+
+    @staticmethod
+    def _extract_importance(entry: dict[str, Any]) -> float:
+        meta = entry.get("meta") or {}
+        if isinstance(meta, dict) and meta.get("importance") is not None:
+            return float(meta.get("importance", 0.5) or 0.5)
+        return 0.5
+
+    @staticmethod
+    def _extract_confidence(entry: dict[str, Any]) -> float:
+        meta = entry.get("meta") or {}
+        if isinstance(meta, dict) and meta.get("confidence") is not None:
+            return float(meta.get("confidence", 0.8) or 0.8)
+        execution = entry.get("execution") or {}
+        if isinstance(execution, dict) and execution.get("confidence") is not None:
+            return float(execution.get("confidence", 0.8) or 0.8)
+        return 0.8
+
+    @staticmethod
+    def _format_pad(pad: Any) -> str:
+        if not isinstance(pad, dict):
+            return ""
+        try:
+            pleasure = float(pad.get("pleasure", 0.0) or 0.0)
+            arousal = float(pad.get("arousal", 0.0) or 0.0)
+            dominance = float(pad.get("dominance", 0.0) or 0.0)
+        except Exception:
+            return ""
+        return f"(PAD {pleasure:.2f}/{arousal:.2f}/{dominance:.2f})"
 
 
 __all__ = ["CognitiveEvent"]

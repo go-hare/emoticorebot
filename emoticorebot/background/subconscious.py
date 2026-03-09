@@ -119,7 +119,7 @@ class SubconsciousDaemon:
     async def _do_reflect(self) -> None:
         logger.info("Subconscious reflection started")
         result = await self.reflection.run_cycle(warm_limit=15)
-        if not any((result.persona_delta, result.user_insight)):
+        if not any((result.persona_delta, result.user_insight, result.memory_updates)):
             logger.debug("Subconscious reflection: no updates generated")
 
     async def _do_proactive_check(self) -> None:
@@ -155,8 +155,8 @@ class SubconsciousDaemon:
         emotion_prompt = self.emotion_mgr.get_emotion_prompt()
         prompt = self._PROACTIVE_PROMPT.format(emotion_prompt=emotion_prompt)
         try:
-            # 通过 EQService 生成主动消息（遵守封装原则）
-            content = await self.runtime.eq_service.generate_proactive(prompt)
+            # 通过 MainBrainService 生成主动消息
+            content = await self.runtime.main_brain_service.generate_proactive(prompt)
             if not content:
                 return
 

@@ -1,17 +1,17 @@
-"""IQ Node - 执行 EQ 发起的内部理性分析。"""
+"""Executor node for orchestration."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from emoticorebot.core.state import EQState, FusionState, IQResultPacket, IQState
+from emoticorebot.core.state import ExecutorResultPacket, ExecutorState, MainBrainState, OrchestrationState
 from emoticorebot.utils.llm_utils import json_text_block
 
 
-async def iq_node(state: FusionState, runtime) -> FusionState:
-    iq: IQState = state["iq"]
-    eq: EQState = state["eq"]
-    question = str(iq.request or "").strip()
+async def executor_node(state: OrchestrationState, runtime) -> OrchestrationState:
+    executor: ExecutorState = state["executor"]
+    main_brain: MainBrainState = state["main_brain"]
+    question = str(executor.request or "").strip()
     if not question:
         state["done"] = True
         return state
@@ -21,19 +21,19 @@ async def iq_node(state: FusionState, runtime) -> FusionState:
     intent_params = metadata.get("intent_params") if isinstance(metadata.get("intent_params"), dict) else None
     message_id = str(metadata.get("message_id", "") or "").strip()
 
-    iq.status = "running"
-    iq_trace: list[dict] = []
+    executor.status = "running"
+    executor_trace: list[dict] = []
     request_timestamp = datetime.now().isoformat()
 
     async def _on_trace(event: dict) -> None:
         if isinstance(event, dict):
-            iq_trace.append(dict(event))
+            executor_trace.append(dict(event))
 
-    result: IQResultPacket = await runtime.run_iq_request(
+    result: ExecutorResultPacket = await runtime.run_executor_request(
         request=question,
-        history=state.get("eq_iq_history", []),
-        emotion=eq.emotion,
-        pad=eq.pad,
+        history=state.get("internal_history", []),
+        emotion=main_brain.emotion,
+        pad=main_brain.pad,
         channel=state.get("channel", ""),
         chat_id=state.get("chat_id", ""),
         session_id=state.get("session_id", ""),
@@ -43,24 +43,21 @@ async def iq_node(state: FusionState, runtime) -> FusionState:
         on_trace=_on_trace,
     )
 
-    iq.attempts = iq.attempts + 1
-    iq.status = str(result.get("status", "uncertain") or "uncertain")
-    iq.analysis = str(result.get("analysis", "") or "")
-    iq.risks = list(result.get("risks", []) or [])
-    iq.recommended_action = str(result.get("recommended_action", "") or "")
-    iq.confidence = float(result.get("confidence", 0.0) or 0.0)
-    iq.missing_params = list(result.get("missing", []) or [])
-    iq.model_name = str(result.get("model_name", "") or "")
-    iq.prompt_tokens = int(result.get("prompt_tokens", 0) or 0)
-    iq.completion_tokens = int(result.get("completion_tokens", 0) or 0)
-    iq.total_tokens = int(result.get("total_tokens", 0) or 0)
+    executor.attempts = executor.attempts + 1
+    executor.status = str(result.get("status", "uncertain") or "uncertain")
+    executor.analysis = str(result.get("analysis", "") or "")
+    executor.risks = list(result.get("risks", []) or [])
+    executor.recommended_action = str(result.get("recommended_action", "") or "")
+    executor.confidence = float(result.get("confidence", 0.0) or 0.0)
+    executor.missing_params = list(result.get("missing", []) or [])
+    executor.model_name = str(result.get("model_name", "") or "")
+    executor.prompt_tokens = int(result.get("prompt_tokens", 0) or 0)
+    executor.completion_tokens = int(result.get("completion_tokens", 0) or 0)
+    executor.total_tokens = int(result.get("total_tokens", 0) or 0)
     result_timestamp = datetime.now().isoformat()
 
-    # `eq_iq_history` is single-turn internal deliberation only.
-    # We append the current EQ->IQ question and IQ->EQ result so later internal
-    # rounds in the same turn can see prior failures / summaries.
-    eq_iq_history = list(state.get("eq_iq_history", []) or [])
-    eq_iq_history.extend(
+    internal_history = list(state.get("internal_history", []) or [])
+    internal_history.extend(
         [
             {
                 "message_id": message_id,
@@ -95,7 +92,7 @@ async def iq_node(state: FusionState, runtime) -> FusionState:
             },
         ]
     )
-    state["eq_iq_history"] = eq_iq_history
-    state["iq_trace"] = iq_trace
+    state["internal_history"] = internal_history
+    state["executor_trace"] = executor_trace
 
     return state

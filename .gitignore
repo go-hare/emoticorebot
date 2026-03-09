@@ -4,6 +4,9 @@
 dist/
 build/
 docs/
+!docs/
+!docs/ARCHITECTURE.md
+!docs/ARCHITECTURE.zh-CN.md
 *.egg-info/
 *.egg
 *.pyc

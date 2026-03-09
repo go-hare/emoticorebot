@@ -12,6 +12,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from emoticorebot.services.tool_reflection import ToolLightReflectionService
 from emoticorebot.bus.events import InboundMessage
 from emoticorebot.bus.queue import MessageBus
 from emoticorebot.utils.llm_utils import extract_message_text
@@ -49,6 +50,7 @@ class SubagentManager:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self.tool_reflection = ToolLightReflectionService(workspace)
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._session_tasks: dict[str, set[str]] = {}
 
@@ -66,7 +68,7 @@ class SubagentManager:
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
 
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, session_key=session_key)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -89,11 +91,19 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        session_key: str | None = None,
     ) -> None:
         """执行子任务（后台运行）。"""
         logger.info("🔧 Subagent [{}] starting task: {}", task_id, label)
         try:
             tools = self._build_tools()
+            tools.set_execution_context(
+                channel=origin["channel"],
+                chat_id=origin["chat_id"],
+                message_id=task_id,
+                session_key=session_key,
+                source="subagent",
+            )
             system_prompt = self._build_prompt()
 
             from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -142,6 +152,7 @@ class SubagentManager:
     def _build_tools(self) -> ToolRegistry:
         """构建子任务专用工具集。"""
         tools = ToolRegistry()
+        tools.set_execution_observer(self.tool_reflection.record_execution)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
 
         for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):

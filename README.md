@@ -8,6 +8,10 @@
 
 It perceives emotional context in every conversation turn, lets **EQ act as the lead layer**, routes complex work into a **Deep Agents-based IQ layer** when needed, and continuously evolves its persona through background reflection.
 
+Detailed architecture design:
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
 ---
 
 ## Install

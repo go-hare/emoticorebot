@@ -1,57 +1,61 @@
-"""Fusion graph - LangGraph 图定义与编译。
+"""Orchestration graph definition and execution helpers."""
 
-define + compile LangGraph:
-  entry → eq_node
-  eq_node →（路由）→ iq_node | memory_node
-  iq_node →（路由）→ eq_node | memory_node
-  memory_node → END
-"""
+from __future__ import annotations
 
 from pathlib import Path
-from langgraph.graph import StateGraph, END
+
+from langgraph.graph import END, StateGraph
 from loguru import logger
 
-from emoticorebot.core.state import FusionState, create_initial_state
-from emoticorebot.core.nodes.eq_node import eq_node
-from emoticorebot.core.nodes.iq_node import iq_node
+from emoticorebot.core.nodes.executor_node import executor_node
+from emoticorebot.core.nodes.main_brain_node import main_brain_node
 from emoticorebot.core.nodes.memory_node import memory_node
-from emoticorebot.core.router import FusionRouter
+from emoticorebot.core.router import OrchestrationRouter
+from emoticorebot.core.state import OrchestrationState, create_initial_state
 
 
-def create_fusion_agent(workspace: Path, runtime):
-    """编译 LangGraph fusion 图（一次性，结果应被 runtime 缓存）。"""
-    router = FusionRouter(max_iq_attempts=3)
-    graph = StateGraph(FusionState)
+def create_orchestration_agent(workspace: Path, runtime):
+    """Compile the orchestration graph once per runtime."""
+    router = OrchestrationRouter(max_executor_attempts=3)
+    graph = StateGraph(OrchestrationState)
 
-    async def _eq(s: FusionState) -> FusionState:
-        return await eq_node(s, runtime)
+    async def _main_brain(state: OrchestrationState) -> OrchestrationState:
+        return await main_brain_node(state, runtime)
 
-    async def _iq(s: FusionState) -> FusionState:
-        return await iq_node(s, runtime)
+    async def _executor(state: OrchestrationState) -> OrchestrationState:
+        return await executor_node(state, runtime)
 
-    async def _memory(s: FusionState) -> FusionState:
-        return await memory_node(s, runtime)
+    async def _memory(state: OrchestrationState) -> OrchestrationState:
+        return await memory_node(state, runtime)
 
-    graph.add_node("eq", _eq)
-    graph.add_node("iq", _iq)
+    graph.add_node("main_brain", _main_brain)
+    graph.add_node("executor", _executor)
     graph.add_node("memory", _memory)
-    graph.set_entry_point("eq")
+    graph.set_entry_point("main_brain")
 
-    def route_next(state: FusionState) -> str:
+    def route_next(state: OrchestrationState) -> str:
         return router.route_next(state)
 
-    graph.add_conditional_edges("eq", route_next, {"iq": "iq", "eq": "eq", "memory": "memory"})
-    graph.add_conditional_edges("iq", route_next, {"eq": "eq", "iq": "iq", "memory": "memory"})
+    graph.add_conditional_edges(
+        "main_brain",
+        route_next,
+        {"main_brain": "main_brain", "executor": "executor", "memory": "memory"},
+    )
+    graph.add_conditional_edges(
+        "executor",
+        route_next,
+        {"main_brain": "main_brain", "executor": "executor", "memory": "memory"},
+    )
     graph.add_edge("memory", END)
     return graph.compile()
 
 
-async def run_fusion_agent(
+async def run_orchestration_agent(
     user_input: str,
     workspace: Path,
     runtime,
-    user_eq_history: list[dict] | None = None,
-    eq_iq_history: list[dict] | None = None,
+    dialogue_history: list[dict] | None = None,
+    internal_history: list[dict] | None = None,
     metadata: dict | None = None,
     channel: str = "",
     chat_id: str = "",
@@ -59,19 +63,15 @@ async def run_fusion_agent(
     on_progress=None,
     agent=None,
 ) -> tuple[str, dict]:
-    """运行一轮 fusion 对话。
-
-    :param agent: 预编译的 LangGraph agent（建议由 runtime 注入，避免重复编译）
-    :return: (output_text, final_state)
-    """
+    """Run one orchestration turn and return output plus final state."""
     if agent is None:
-        agent = create_fusion_agent(workspace, runtime=runtime)
+        agent = create_orchestration_agent(workspace, runtime=runtime)
 
     initial_state = create_initial_state(
         user_input=user_input,
         workspace=workspace,
-        user_eq_history=user_eq_history or [],
-        eq_iq_history=eq_iq_history or [],
+        dialogue_history=dialogue_history or [],
+        internal_history=internal_history or [],
         channel=channel,
         chat_id=chat_id,
         session_id=session_id,
@@ -85,9 +85,9 @@ async def run_fusion_agent(
     try:
         result = await agent.ainvoke(initial_state)
         return result.get("output", ""), result
-    except Exception as e:
-        logger.error("Fusion agent error: {}", e)
-        return f"抱歉，出了点问题: {e}", initial_state
+    except Exception as exc:
+        logger.error("Orchestration agent error: {}", exc)
+        return f"Sorry, something went wrong: {exc}", initial_state
 
 
-__all__ = ["create_fusion_agent", "run_fusion_agent"]
+__all__ = ["create_orchestration_agent", "run_orchestration_agent"]

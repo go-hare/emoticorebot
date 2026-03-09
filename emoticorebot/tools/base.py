@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 
 class Tool(ABC):
@@ -101,6 +101,8 @@ class ToolRegistry:
     
     def __init__(self):
         self._tools: dict[str, Tool] = {}
+        self._execution_observer: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self._execution_context: dict[str, Any] = {}
     
     def register(self, tool: Tool) -> None:
         """注册工具"""
@@ -114,22 +116,105 @@ class ToolRegistry:
         """获取所有工具的定义"""
         return [tool.to_schema() for tool in self._tools.values()]
     
+    def set_execution_observer(
+        self,
+        observer: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    ) -> None:
+        self._execution_observer = observer
+
+    def set_execution_context(
+        self,
+        *,
+        channel: str = "",
+        chat_id: str = "",
+        message_id: str | None = None,
+        session_key: str | None = None,
+        source: str = "executor",
+    ) -> None:
+        self._execution_context = {
+            "channel": str(channel or ""),
+            "chat_id": str(chat_id or ""),
+            "message_id": str(message_id or ""),
+            "session_key": str(session_key or ""),
+            "source": str(source or "executor"),
+        }
+
     async def execute(self, name: str, params: dict[str, Any]) -> str:
         """执行工具"""
         hint = "\n\n[Analyze the error above and try a different approach.]"
         tool = self._tools.get(name)
         if not tool:
-            return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
+            result = f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
+            await self._notify_execution(name=name, params=params, raw_result=result, final_result=result, success=False)
+            return result
         try:
             errors = tool.validate_params(params)
             if errors:
-                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + hint
+                raw_result = f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors)
+                final_result = raw_result + hint
+                await self._notify_execution(
+                    name=name,
+                    params=params,
+                    raw_result=raw_result,
+                    final_result=final_result,
+                    success=False,
+                )
+                return final_result
             result = await tool.execute(**params)
             if isinstance(result, str) and result.startswith("Error"):
-                return result + hint
+                final_result = result + hint
+                await self._notify_execution(
+                    name=name,
+                    params=params,
+                    raw_result=result,
+                    final_result=final_result,
+                    success=False,
+                )
+                return final_result
+            await self._notify_execution(
+                name=name,
+                params=params,
+                raw_result=result,
+                final_result=str(result),
+                success=True,
+            )
             return result
         except Exception as e:
-            return f"Error executing {name}: {e}" + hint
+            raw_result = f"Error executing {name}: {e}"
+            final_result = raw_result + hint
+            await self._notify_execution(
+                name=name,
+                params=params,
+                raw_result=raw_result,
+                final_result=final_result,
+                success=False,
+            )
+            return final_result
+
+    async def _notify_execution(
+        self,
+        *,
+        name: str,
+        params: dict[str, Any],
+        raw_result: Any,
+        final_result: str,
+        success: bool,
+    ) -> None:
+        if self._execution_observer is None:
+            return
+        try:
+            await self._execution_observer(
+                {
+                    "tool_name": name,
+                    "params": dict(params or {}),
+                    "raw_result": str(raw_result or ""),
+                    "final_result": final_result,
+                    "success": success,
+                    "context": dict(self._execution_context),
+                }
+            )
+        except Exception:
+            pass
     
     @property
     def tool_names(self) -> list[str]:
