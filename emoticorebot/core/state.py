@@ -1,4 +1,4 @@
-"""Orchestration state definitions."""
+"""Turn-graph state definitions."""
 
 from __future__ import annotations
 
@@ -7,23 +7,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-ExecutorStatus = Literal["idle", "queued", "running", "completed", "needs_input", "uncertain", "failed"]
-ExecutorRecommendedAction = Literal["", "answer", "ask_user", "continue_deliberation"]
-MainBrainFinalDecision = Literal["", "answer", "ask_user", "continue_deliberation"]
+ExecutionControlState = Literal["idle", "running", "paused", "stopped", "completed"]
+ExecutionStatus = Literal["none", "done", "need_more", "failed"]
+ExecutorPacketStatus = Literal["completed", "needs_input", "uncertain", "failed"]
+ExecutorRecommendedAction = Literal["", "answer", "ask_user", "continue"]
+MainBrainFinalDecision = Literal["", "answer", "ask_user", "continue"]
+MainBrainExecutionAction = Literal["", "start", "continue", "pause", "stop", "resume", "answer"]
 
 
-class ExecutorResultPacket(TypedDict):
-    """Normalized executor result packet returned into the orchestration graph."""
+class ExecutorResultPacket(TypedDict, total=False):
+    """Normalized executor result packet returned into the turn graph."""
 
-    status: Literal["completed", "needs_input", "uncertain", "failed"]
+    control_state: ExecutionControlState
+    status: ExecutionStatus
     analysis: str
     risks: list[str]
     missing: list[str]
-    recommended_action: Literal["answer", "ask_user", "continue_deliberation"]
+    recommended_action: Literal["answer", "ask_user", "continue"]
     confidence: float
+    pending_review: dict[str, Any]
+    thread_id: str
+    run_id: str
+    model_name: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
 
 
-class MainBrainDeliberationPacket(TypedDict):
+class MainBrainDeliberationPacket(TypedDict, total=False):
     """Main-brain first-pass packet before deciding whether to use the executor."""
 
     intent: str
@@ -31,14 +42,33 @@ class MainBrainDeliberationPacket(TypedDict):
     need_executor: bool
     question_to_executor: str
     final_message: str
+    model_name: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
 
 
-class MainBrainFinalizePacket(TypedDict):
+class MainBrainFinalizePacket(TypedDict, total=False):
     """Main-brain final decision after reading the executor packet."""
 
-    decision: Literal["answer", "ask_user", "continue_deliberation"]
+    decision: Literal["answer", "ask_user", "continue"]
     message: str
     question_to_executor: str
+    model_name: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class MainBrainControlPacket(TypedDict, total=False):
+    """Explicit main-brain control decision for executor orchestration."""
+
+    action: MainBrainExecutionAction
+    reason: str
+    final_decision: MainBrainFinalDecision
+    message: str
+    question_to_executor: str
+    execution: dict[str, Any]
 
 
 @dataclass
@@ -46,12 +76,16 @@ class ExecutorState:
     """Runtime state for the subordinate execution layer."""
 
     request: str = ""
-    status: ExecutorStatus = "idle"
+    thread_id: str = ""
+    run_id: str = ""
+    control_state: ExecutionControlState = "idle"
+    status: ExecutionStatus = "none"
     analysis: str = ""
     risks: list[str] = field(default_factory=list)
     recommended_action: ExecutorRecommendedAction = ""
     confidence: float = 0.0
-    missing_params: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    pending_review: dict[str, Any] = field(default_factory=dict)
     attempts: int = 0
     model_name: str = ""
     prompt_tokens: int = 0
@@ -72,14 +106,16 @@ class MainBrainState:
     question_to_executor: str = ""
     final_decision: MainBrainFinalDecision = ""
     final_message: str = ""
+    execution_action: MainBrainExecutionAction = ""
+    execution_reason: str = ""
     model_name: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
 
 
-class OrchestrationState(TypedDict, total=False):
-    """Runtime state for the orchestration graph."""
+class TurnState(TypedDict, total=False):
+    """Runtime state for the turn graph."""
 
     user_input: str
     dialogue_history: list[dict]
@@ -133,7 +169,7 @@ def get_emotion_label(pad: dict[str, float]) -> str:
     return "平静"
 
 
-def create_initial_state(
+def create_turn_state(
     user_input: str,
     workspace: Path,
     dialogue_history: list[dict] | None = None,
@@ -141,8 +177,8 @@ def create_initial_state(
     channel: str = "",
     chat_id: str = "",
     session_id: str = "",
-) -> OrchestrationState:
-    """Build the initial orchestration state."""
+) -> TurnState:
+    """Build the initial turn state."""
     pad = load_pad_from_workspace(workspace)
     return {
         "user_input": user_input,
@@ -164,15 +200,19 @@ def create_initial_state(
 
 
 __all__ = [
+    "ExecutionControlState",
+    "ExecutionStatus",
+    "ExecutorPacketStatus",
     "ExecutorRecommendedAction",
     "ExecutorResultPacket",
     "ExecutorState",
-    "ExecutorStatus",
     "MainBrainDeliberationPacket",
+    "MainBrainControlPacket",
+    "MainBrainExecutionAction",
     "MainBrainFinalizePacket",
     "MainBrainState",
-    "OrchestrationState",
-    "create_initial_state",
+    "TurnState",
+    "create_turn_state",
     "get_emotion_label",
     "load_pad_from_workspace",
 ]

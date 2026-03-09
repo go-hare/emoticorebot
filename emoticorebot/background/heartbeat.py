@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from loguru import logger
 
 if TYPE_CHECKING:
-    from emoticorebot.runtime.runtime import FusionRuntime
+    from emoticorebot.runtime.runtime import EmoticoreRuntime
 
 _HEARTBEAT_TOOL = {
     "type": "function",
@@ -46,7 +46,7 @@ class HeartbeatService:
     def __init__(
         self,
         workspace: Path,
-        runtime: "FusionRuntime",
+        runtime: "EmoticoreRuntime",
         on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         interval_s: int = 30 * 60,
@@ -74,10 +74,10 @@ class HeartbeatService:
         return None
 
     async def _decide(self, content: str) -> tuple[str, str]:
-        """Phase 1：使用 IQ LLM 工具调用判断 skip/run。"""
+        """Phase 1：使用 executor 模型工具调用判断 skip/run。"""
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        resp = await self.runtime.iq_llm.ainvoke(
+        resp = await self.runtime.executor_llm.ainvoke(
             [
                 SystemMessage(
                     content="You are a heartbeat agent. Call the heartbeat tool to report your decision."

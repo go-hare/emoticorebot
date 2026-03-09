@@ -11,33 +11,34 @@ def compact_text(text: str, limit: int = 400) -> str:
 
 
 def build_executor_context(message: dict[str, object], *, summary_limit: int = 500) -> str:
-    summary = compact_text(str(message.get("executor_summary", "")).strip(), limit=summary_limit)
+    execution = message.get("execution") if isinstance(message.get("execution"), dict) else {}
+    summary = compact_text(str((execution or {}).get("summary", "")).strip(), limit=summary_limit)
     if summary:
         return summary
 
-    status = compact_text(str(message.get("executor_status", "")).strip(), limit=24)
-    analysis = compact_text(str(message.get("executor_analysis", "")).strip(), limit=160)
-    confidence = float(message.get("executor_confidence", 0.0) or 0.0)
-    recommended_action = compact_text(str(message.get("executor_recommended_action", "")).strip(), limit=36)
+    control_state = compact_text(str((execution or {}).get("control_state", "")).strip(), limit=24)
+    status = compact_text(str((execution or {}).get("status", "")).strip(), limit=24)
+    confidence = float((execution or {}).get("confidence", 0.0) or 0.0)
+    recommended_action = compact_text(str((execution or {}).get("recommended_action", "")).strip(), limit=36)
     missing = [
         str(item).strip()
-        for item in message.get("executor_missing_params", [])
+        for item in ((execution or {}).get("missing", []) if isinstance((execution or {}).get("missing", []), list) else [])
         if str(item).strip()
     ]
 
     parts: list[str] = []
+    state_label = control_state or "idle"
+    status_label = status or "none"
     label = (
-        f"[Executor|{status or 'unknown'}|{confidence:.2f}]"
+        f"[Executor|{state_label}|{status_label}|{confidence:.2f}]"
         if confidence > 0
-        else f"[Executor|{status or 'unknown'}]"
+        else f"[Executor|{state_label}|{status_label}]"
     )
     parts.append(label)
-    if analysis:
-        parts.append(f"分析: {analysis}")
     if recommended_action:
         parts.append(f"建议动作: {recommended_action}")
     if missing:
-        parts.append(f"缺失参数: {', '.join(missing[:5])}")
+        parts.append(f"缺失信息: {', '.join(missing[:5])}")
     return "；".join(parts)
 
 

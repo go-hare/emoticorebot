@@ -241,7 +241,7 @@ def gateway(
     """Start the emoticorebot gateway."""
     from emoticorebot.config.loader import load_config, get_data_dir
     from emoticorebot.bus.queue import MessageBus
-    from emoticorebot.runtime.runtime import FusionRuntime
+    from emoticorebot.runtime.runtime import EmoticoreRuntime
     from emoticorebot.channels.manager import ChannelManager
     from emoticorebot.session.manager import SessionManager
     from emoticorebot.cron.service import CronService
@@ -262,11 +262,11 @@ def gateway(
     cron = CronService(cron_store_path)
     
     # Create agent with cron service
-    agent = FusionRuntime(
+    agent = EmoticoreRuntime(
         bus=bus,
         workspace=config.workspace_path,
-        iq_mode=config.agents.defaults.iq_mode,
-        eq_mode=config.agents.defaults.eq_mode,
+        executor_mode=config.agents.defaults.executor_mode,
+        main_brain_mode=config.agents.defaults.main_brain_mode,
         providers_config=config.providers,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
@@ -296,7 +296,7 @@ def gateway(
         return response
     cron.on_job = on_cron_job
     
-    # Initialize subconscious daemon and heartbeat service (integrated in FusionRuntime)
+    # Initialize subconscious daemon and heartbeat service (integrated in EmoticoreRuntime)
     hb_cfg = config.gateway.heartbeat
     agent.initialize_subconscious(
         enable_reflection=True,  # 启用反思和主动对话
@@ -358,7 +358,7 @@ def agent(
     """Interact with the agent directly."""
     from emoticorebot.config.loader import load_config, get_data_dir
     from emoticorebot.bus.queue import MessageBus
-    from emoticorebot.runtime.runtime import FusionRuntime
+    from emoticorebot.runtime.runtime import EmoticoreRuntime
     from emoticorebot.cron.service import CronService
     from loguru import logger
     
@@ -374,11 +374,11 @@ def agent(
     else:
         logger.disable("emoticorebot")
     
-    agent_loop = FusionRuntime(
+    agent_loop = EmoticoreRuntime(
         bus=bus,
         workspace=config.workspace_path,
-        iq_mode=config.agents.defaults.iq_mode,
-        eq_mode=config.agents.defaults.eq_mode,
+        executor_mode=config.agents.defaults.executor_mode,
+        main_brain_mode=config.agents.defaults.main_brain_mode,
         providers_config=config.providers,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
@@ -858,16 +858,16 @@ def cron_run(
     from emoticorebot.cron.service import CronService
     from emoticorebot.cron.types import CronJob
     from emoticorebot.bus.queue import MessageBus
-    from emoticorebot.runtime.runtime import FusionRuntime
+    from emoticorebot.runtime.runtime import EmoticoreRuntime
     logger.disable("emoticorebot")
 
     config = load_config()
     bus = MessageBus()
-    agent_loop = FusionRuntime(
+    agent_loop = EmoticoreRuntime(
         bus=bus,
         workspace=config.workspace_path,
-        iq_mode=config.agents.defaults.iq_mode,
-        eq_mode=config.agents.defaults.eq_mode,
+        executor_mode=config.agents.defaults.executor_mode,
+        main_brain_mode=config.agents.defaults.main_brain_mode,
         providers_config=config.providers,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,

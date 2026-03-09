@@ -6,6 +6,7 @@ from emoticorebot.services.light_reflection import LightReflectionService
 from emoticorebot.services.main_brain_service import MainBrainService
 from emoticorebot.services.memory_service import MemoryService
 from emoticorebot.services.tool_manager import ToolManager
+from emoticorebot.services.tool_deep_reflection import ToolDeepReflectionService
 from emoticorebot.services.tool_reflection import ToolLightReflectionService
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "LightReflectionService",
     "MainBrainService",
     "MemoryService",
+    "ToolDeepReflectionService",
     "ToolLightReflectionService",
     "ToolManager",
 ]

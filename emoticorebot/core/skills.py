@@ -1,7 +1,7 @@
 """Skills loader - 技能（Skill）文件加载器。
 
 从 workspace/skills/ 或内置 skills/ 目录加载 SKILL.md 技能文件，
-供 ContextBuilder 注入到 IQ system prompt。
+供 ContextBuilder 注入到 executor system prompt。
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Orchestration graph definition and execution helpers."""
+"""Turn-graph definition and execution helpers."""
 
 from __future__ import annotations
 
@@ -10,22 +10,22 @@ from loguru import logger
 from emoticorebot.core.nodes.executor_node import executor_node
 from emoticorebot.core.nodes.main_brain_node import main_brain_node
 from emoticorebot.core.nodes.memory_node import memory_node
-from emoticorebot.core.router import OrchestrationRouter
-from emoticorebot.core.state import OrchestrationState, create_initial_state
+from emoticorebot.core.router import TurnRouter
+from emoticorebot.core.state import TurnState, create_turn_state
 
 
-def create_orchestration_agent(workspace: Path, runtime):
-    """Compile the orchestration graph once per runtime."""
-    router = OrchestrationRouter(max_executor_attempts=3)
-    graph = StateGraph(OrchestrationState)
+def create_turn_graph(workspace: Path, runtime):
+    """Compile the turn graph once per runtime."""
+    router = TurnRouter(max_executor_attempts=3)
+    graph = StateGraph(TurnState)
 
-    async def _main_brain(state: OrchestrationState) -> OrchestrationState:
+    async def _main_brain(state: TurnState) -> TurnState:
         return await main_brain_node(state, runtime)
 
-    async def _executor(state: OrchestrationState) -> OrchestrationState:
+    async def _executor(state: TurnState) -> TurnState:
         return await executor_node(state, runtime)
 
-    async def _memory(state: OrchestrationState) -> OrchestrationState:
+    async def _memory(state: TurnState) -> TurnState:
         return await memory_node(state, runtime)
 
     graph.add_node("main_brain", _main_brain)
@@ -33,7 +33,7 @@ def create_orchestration_agent(workspace: Path, runtime):
     graph.add_node("memory", _memory)
     graph.set_entry_point("main_brain")
 
-    def route_next(state: OrchestrationState) -> str:
+    def route_next(state: TurnState) -> str:
         return router.route_next(state)
 
     graph.add_conditional_edges(
@@ -50,7 +50,7 @@ def create_orchestration_agent(workspace: Path, runtime):
     return graph.compile()
 
 
-async def run_orchestration_agent(
+async def run_turn_graph(
     user_input: str,
     workspace: Path,
     runtime,
@@ -63,11 +63,11 @@ async def run_orchestration_agent(
     on_progress=None,
     agent=None,
 ) -> tuple[str, dict]:
-    """Run one orchestration turn and return output plus final state."""
+    """Run one turn graph pass and return output plus final state."""
     if agent is None:
-        agent = create_orchestration_agent(workspace, runtime=runtime)
+        agent = create_turn_graph(workspace, runtime=runtime)
 
-    initial_state = create_initial_state(
+    initial_state = create_turn_state(
         user_input=user_input,
         workspace=workspace,
         dialogue_history=dialogue_history or [],
@@ -86,8 +86,8 @@ async def run_orchestration_agent(
         result = await agent.ainvoke(initial_state)
         return result.get("output", ""), result
     except Exception as exc:
-        logger.error("Orchestration agent error: {}", exc)
+        logger.error("Turn graph error: {}", exc)
         return f"Sorry, something went wrong: {exc}", initial_state
 
 
-__all__ = ["create_orchestration_agent", "run_orchestration_agent"]
+__all__ = ["create_turn_graph", "run_turn_graph"]

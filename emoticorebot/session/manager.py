@@ -85,6 +85,27 @@ def normalize_message_payload(message: dict[str, Any], *, default_message_id: st
     if tool_call_id:
         payload["tool_call_id"] = tool_call_id
 
+    execution = message.get("execution")
+    if isinstance(execution, dict):
+        payload["execution"] = execution
+
+    for key in ("phase", "event", "source", "node"):
+        value = str(message.get(key, "") or "").strip()
+        if value:
+            payload[key] = value
+
+    namespace = message.get("namespace")
+    if isinstance(namespace, list) and namespace:
+        payload["namespace"] = [str(item).strip() for item in namespace if str(item).strip()]
+
+    main_brain = message.get("main_brain")
+    if isinstance(main_brain, dict) and main_brain:
+        payload["main_brain"] = main_brain
+
+    meta = message.get("meta")
+    if isinstance(meta, dict) and meta:
+        payload["meta"] = meta
+
     return payload
 
 

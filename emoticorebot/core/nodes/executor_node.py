@@ -1,27 +1,28 @@
-"""Executor node for orchestration."""
+"""Executor node for the turn graph."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from emoticorebot.core.state import ExecutorResultPacket, ExecutorState, MainBrainState, OrchestrationState
+from emoticorebot.core.state import ExecutorResultPacket, ExecutorState, MainBrainState, TurnState
 from emoticorebot.utils.llm_utils import json_text_block
 
 
-async def executor_node(state: OrchestrationState, runtime) -> OrchestrationState:
+async def executor_node(state: TurnState, runtime) -> TurnState:
     executor: ExecutorState = state["executor"]
     main_brain: MainBrainState = state["main_brain"]
     question = str(executor.request or "").strip()
-    if not question:
+    metadata = state.get("metadata", {}) or {}
+    execution_context = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else None
+    if not question and not execution_context:
         state["done"] = True
         return state
 
-    metadata = state.get("metadata", {}) or {}
     on_progress = state.get("on_progress")
-    intent_params = metadata.get("intent_params") if isinstance(metadata.get("intent_params"), dict) else None
     message_id = str(metadata.get("message_id", "") or "").strip()
 
-    executor.status = "running"
+    executor.control_state = "running"
+    executor.status = "none"
     executor_trace: list[dict] = []
     request_timestamp = datetime.now().isoformat()
 
@@ -37,24 +38,30 @@ async def executor_node(state: OrchestrationState, runtime) -> OrchestrationStat
         channel=state.get("channel", ""),
         chat_id=state.get("chat_id", ""),
         session_id=state.get("session_id", ""),
-        intent_params=intent_params,
+        execution_context=execution_context,
         media=state.get("media"),
         on_progress=on_progress,
         on_trace=_on_trace,
     )
 
     executor.attempts = executor.attempts + 1
-    executor.status = str(result.get("status", "uncertain") or "uncertain")
+    executor.thread_id = str(result.get("thread_id", "") or executor.thread_id or "")
+    executor.run_id = str(result.get("run_id", "") or executor.run_id or "")
+    executor.control_state = str(result.get("control_state", "completed") or "completed")
+    executor.status = str(result.get("status", "done") or "done")
     executor.analysis = str(result.get("analysis", "") or "")
     executor.risks = list(result.get("risks", []) or [])
     executor.recommended_action = str(result.get("recommended_action", "") or "")
     executor.confidence = float(result.get("confidence", 0.0) or 0.0)
-    executor.missing_params = list(result.get("missing", []) or [])
+    executor.missing = list(result.get("missing", []) or [])
+    executor.pending_review = dict(result.get("pending_review", {}) or {})
     executor.model_name = str(result.get("model_name", "") or "")
     executor.prompt_tokens = int(result.get("prompt_tokens", 0) or 0)
     executor.completion_tokens = int(result.get("completion_tokens", 0) or 0)
     executor.total_tokens = int(result.get("total_tokens", 0) or 0)
     result_timestamp = datetime.now().isoformat()
+    state["executor_thread_id"] = executor.thread_id
+    state["executor_run_id"] = executor.run_id
 
     internal_history = list(state.get("internal_history", []) or [])
     internal_history.extend(
@@ -70,6 +77,7 @@ async def executor_node(state: OrchestrationState, runtime) -> OrchestrationStat
                 "role": "assistant",
                 "content": json_text_block(
                     {
+                        "control_state": str(result.get("control_state", "") or ""),
                         "status": str(result.get("status", "") or ""),
                         "analysis": str(result.get("analysis", "") or ""),
                         "risks": list(result.get("risks", []) or []),

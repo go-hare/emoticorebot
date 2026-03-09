@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from typing import Any
 
 from emoticorebot.core.context import ContextBuilder
 from emoticorebot.core.reply_utils import build_companion_prompt, build_missing_info_prompt
-from emoticorebot.core.state import MainBrainDeliberationPacket, MainBrainFinalizePacket
+from emoticorebot.core.state import MainBrainControlPacket, MainBrainDeliberationPacket, MainBrainFinalizePacket
 from emoticorebot.utils.llm_utils import extract_message_metrics, extract_message_text
 
 try:
@@ -138,7 +137,7 @@ class MainBrainService:
         main_brain_working_hypothesis: str,
         executor_summary: str,
         executor_status: str,
-        executor_missing_params: list[str],
+        executor_missing: list[str],
         executor_recommended_action: str,
         loop_count: int,
         channel: str = "",
@@ -148,10 +147,10 @@ class MainBrainService:
         prompt = (
             "You are doing the second internal main-brain pass.\n"
             "Combine your first judgment with the executor result.\n"
-            "Choose one decision: answer, ask_user, or continue_deliberation.\n"
+            "Choose one decision: answer, ask_user, or continue.\n"
             "If you write message, use the same language as the user.\n"
             "Return only one JSON object.\n"
-            '{"decision":"answer|ask_user|continue_deliberation","message":"...",'
+            '{"decision":"answer|ask_user|continue","message":"...",'
             '"question_to_executor":"if continuing, provide the next internal question; otherwise empty"}\n\n'
             f"User input: {user_input}\n"
             f"Main brain intent: {main_brain_intent or '(empty)'}\n"
@@ -180,7 +179,7 @@ class MainBrainService:
             fallback = self._fallback_finalize(
                 executor_status=executor_status,
                 executor_analysis=executor_summary,
-                executor_missing_params=executor_missing_params,
+                executor_missing=executor_missing,
                 executor_recommended_action=executor_recommended_action,
             )
             fallback.update(metrics)
@@ -191,13 +190,147 @@ class MainBrainService:
             fallback = self._fallback_finalize(
                 executor_status=executor_status,
                 executor_analysis=executor_summary,
-                executor_missing_params=executor_missing_params,
+                executor_missing=executor_missing,
                 executor_recommended_action=executor_recommended_action,
             )
             fallback.update(metrics)
             return fallback
         normalized.update(metrics)
         return normalized
+
+    def decide_paused_execution(
+        self,
+        *,
+        user_input: str,
+        execution: dict[str, Any],
+        emotion: str,
+    ) -> MainBrainControlPacket:
+        action, reason = self._decide_paused_execution_action(
+            user_input=user_input,
+            execution=execution,
+            emotion=emotion,
+        )
+        if action == "resume":
+            return {
+                "action": "resume",
+                "reason": reason,
+                "execution": dict(execution or {}),
+            }
+        return {
+            "action": "pause",
+            "reason": reason,
+            "final_decision": "answer",
+            "message": self._build_paused_execution_hold_message(
+                user_input=user_input,
+                execution=execution,
+                reason=reason,
+                emotion=emotion,
+            ),
+            "execution": self._strip_resume_payload(execution),
+        }
+
+    def control_after_deliberation(
+        self,
+        *,
+        deliberation: MainBrainDeliberationPacket,
+        emotion: str,
+    ) -> MainBrainControlPacket:
+        if deliberation.get("need_executor"):
+            return {
+                "action": "start",
+                "reason": "main_brain_requested_executor",
+                "question_to_executor": str(
+                    deliberation.get("question_to_executor", "")
+                    or self._build_default_executor_question(
+                        working_hypothesis=str(deliberation.get("working_hypothesis", "") or ""),
+                        intent=str(deliberation.get("intent", "") or ""),
+                    )
+                ).strip(),
+            }
+        return {
+            "action": "answer",
+            "reason": "main_brain_answered_directly",
+            "final_decision": "answer",
+            "message": str(deliberation.get("final_message", "") or "").strip() or build_companion_prompt(emotion),
+        }
+
+    def control_after_finalize(
+        self,
+        *,
+        finalize: MainBrainFinalizePacket,
+        loop_count: int,
+        max_loop_rounds: int,
+        executor_control_state: str,
+        executor_status: str,
+        executor_missing: list[str],
+        executor_analysis: str,
+        executor_risks: list[str],
+    ) -> MainBrainControlPacket:
+        decision = str(finalize.get("decision", "") or "answer").strip().lower()
+        message = str(finalize.get("message", "") or "").strip()
+        question_to_executor = str(finalize.get("question_to_executor", "") or "").strip()
+
+        if decision == "continue":
+            if loop_count >= max_loop_rounds:
+                forced_decision, forced_message = self._force_complete(
+                    executor_status=executor_status,
+                    executor_missing=executor_missing,
+                    executor_analysis=executor_analysis,
+                )
+                return {
+                    "action": "pause" if executor_control_state == "paused" else "answer",
+                    "reason": "loop_limit_reached",
+                    "final_decision": forced_decision,
+                    "message": forced_message,
+                }
+            return {
+                "action": "continue",
+                "reason": "main_brain_requested_executor_followup",
+                "final_decision": "continue",
+                "question_to_executor": question_to_executor
+                or self._build_followup_executor_question(
+                    executor_risks=executor_risks,
+                    executor_analysis=executor_analysis,
+                ),
+            }
+
+        if decision == "ask_user":
+            return {
+                "action": "pause" if executor_control_state == "paused" else "answer",
+                "reason": "executor_waiting_for_user_input"
+                if executor_control_state == "paused"
+                else "main_brain_requested_user_input",
+                "final_decision": "ask_user",
+                "message": message or build_missing_info_prompt(executor_missing),
+            }
+
+        return {
+            "action": "answer",
+            "reason": "executor_result_finalized"
+            if executor_control_state == "completed"
+            else "main_brain_answered_from_executor",
+            "final_decision": "answer",
+            "message": message or executor_analysis or "我先给你一个当前能确认的结论，我们可以继续往下推进。",
+        }
+
+    def control_stop_execution(
+        self,
+        *,
+        cancelled_tasks: int,
+        cancelled_subagents: int,
+        execution: dict[str, Any] | None = None,
+    ) -> MainBrainControlPacket:
+        del execution
+        message = f"⏹ 已停止 {max(0, int(cancelled_tasks))} 个主任务"
+        if cancelled_subagents > 0:
+            message += f"，并停止 {int(cancelled_subagents)} 个子任务"
+        message += "。"
+        return {
+            "action": "stop",
+            "reason": "user_requested_stop",
+            "final_decision": "answer",
+            "message": message,
+        }
 
     async def _run_main_brain_task(
         self,
@@ -308,9 +441,8 @@ class MainBrainService:
         if not base:
             channel_text = str(channel or "").strip()
             chat_text = str(chat_id or "").strip()
-            base = f"{channel_text}:{chat_text}" if channel_text or chat_text else "main_brain"
-        digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
-        return f"main_brain_{digest}"
+            base = f"{channel_text}:{chat_text}" if channel_text or chat_text else "default"
+        return f"brain:{base}"
 
     @staticmethod
     def _extract_result_metrics(raw_result: Any) -> dict[str, Any]:
@@ -389,14 +521,14 @@ class MainBrainService:
             return None
 
         decision = str(parsed.get("decision", "") or "").strip().lower()
-        if decision not in {"answer", "ask_user", "continue_deliberation"}:
+        if decision not in {"answer", "ask_user", "continue"}:
             return None
 
         message = str(parsed.get("message", "") or "").strip()
         question_to_executor = str(parsed.get("question_to_executor", "") or "").strip()
-        if decision == "continue_deliberation" and not question_to_executor:
+        if decision == "continue" and not question_to_executor:
             question_to_executor = message
-        if decision != "continue_deliberation":
+        if decision != "continue":
             question_to_executor = ""
         if decision in {"answer", "ask_user"} and not message:
             return None
@@ -480,9 +612,9 @@ class MainBrainService:
         decision = cls._extract_json_string_field(cleaned, "decision") or "answer"
         message = cls._extract_json_string_field(cleaned, "message")
         question_to_executor = cls._extract_json_string_field(cleaned, "question_to_executor")
-        if decision not in {"answer", "ask_user", "continue_deliberation"}:
+        if decision not in {"answer", "ask_user", "continue"}:
             decision = "answer"
-        if decision == "continue_deliberation":
+        if decision == "continue":
             if not question_to_executor:
                 return None
             return {
@@ -566,22 +698,22 @@ class MainBrainService:
         *,
         executor_status: str,
         executor_analysis: str,
-        executor_missing_params: list[str],
+        executor_missing: list[str],
         executor_recommended_action: str,
     ) -> MainBrainFinalizePacket:
         if (
-            executor_missing_params
-            or executor_status == "needs_input"
+            executor_missing
+            or executor_status == "need_more"
             or executor_recommended_action == "ask_user"
         ):
             return {
                 "decision": "ask_user",
-                "message": build_missing_info_prompt(executor_missing_params),
+                "message": build_missing_info_prompt(executor_missing),
                 "question_to_executor": "",
             }
-        if executor_status == "uncertain" or executor_recommended_action == "continue_deliberation":
+        if executor_recommended_action == "continue":
             return {
-                "decision": "continue_deliberation",
+                "decision": "continue",
                 "message": "",
                 "question_to_executor": "请补上最关键的证据缺口、主要风险，以及最稳妥的下一步。",
             }
@@ -590,6 +722,171 @@ class MainBrainService:
             "message": executor_analysis or "我已经把当前思路理顺了，我们可以顺着这个继续。",
             "question_to_executor": "",
         }
+
+    @staticmethod
+    def _build_default_executor_question(*, working_hypothesis: str, intent: str) -> str:
+        if working_hypothesis:
+            return (
+                "Analyze the current working hypothesis, identify evidence, risks, "
+                f"and the best next action: {working_hypothesis}"
+            )
+        if intent:
+            return f"Analyze this user intent, identify evidence, risks, and the best next action: {intent}"
+        return "Analyze the current internal question and return evidence, risks, and the best next action."
+
+    @staticmethod
+    def _build_followup_executor_question(*, executor_risks: list[str], executor_analysis: str) -> str:
+        if executor_risks:
+            risk_text = "; ".join(str(item).strip() for item in executor_risks[:2] if str(item).strip())
+            if risk_text:
+                return f"Focus on these key risks and produce a more robust next step: {risk_text}"
+        if executor_analysis:
+            return f"Strengthen the weakest part of this analysis and make the next action clearer: {executor_analysis}"
+        return "Fill the most important evidence gaps and provide the next action."
+
+    @staticmethod
+    def _force_complete(*, executor_status: str, executor_missing: list[str], executor_analysis: str) -> tuple[str, str]:
+        if executor_status == "need_more" or executor_missing:
+            return "ask_user", build_missing_info_prompt(executor_missing)
+        if executor_analysis:
+            return "answer", executor_analysis
+        return "answer", "我先给你一个阶段性结论，不过还需要更多信息才能更稳。"
+
+    @staticmethod
+    def _strip_resume_payload(execution: dict[str, Any]) -> dict[str, Any]:
+        cleaned = dict(execution or {})
+        cleaned.pop("resume_payload", None)
+        return cleaned
+
+    @classmethod
+    def _decide_paused_execution_action(
+        cls,
+        *,
+        user_input: str,
+        execution: dict[str, Any],
+        emotion: str,
+    ) -> tuple[str, str]:
+        text = str(user_input or "").strip()
+        resume_payload = execution.get("resume_payload")
+        pending_review = dict(execution.get("pending_review", {}) or {})
+        missing = [str(item).strip() for item in (execution.get("missing", []) or []) if str(item).strip()]
+
+        if cls._looks_like_pause_request(text):
+            return "pause", "user_requested_pause"
+        if cls._looks_like_companionship_or_explanation(text, emotion=emotion):
+            return "pause", "main_brain_prioritized_companionship_or_explanation"
+        if cls._looks_like_priority_switch(text):
+            return "pause", "user_switched_priority"
+        if resume_payload not in (None, "", [], {}):
+            if pending_review:
+                return "resume", "user_responded_to_pending_review"
+            if missing:
+                return "resume", "user_provided_missing_information"
+            return "resume", "user_requested_resume"
+        return "pause", "paused_execution_waiting"
+
+    @staticmethod
+    def _looks_like_pause_request(text: str) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        exact_matches = {
+            "pause",
+            "wait",
+            "later",
+            "stop for now",
+            "等等",
+            "等下",
+            "等一下",
+            "先停一下",
+            "先暂停",
+            "稍等",
+            "回头再说",
+            "先别继续",
+        }
+        prefixes = ("pause", "wait", "later", "先停", "先暂停", "稍等", "等会", "回头", "先别继续")
+        return lowered in exact_matches or any(lowered.startswith(prefix) for prefix in prefixes)
+
+    @staticmethod
+    def _looks_like_companionship_or_explanation(text: str, *, emotion: str) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        emotion_keywords = (
+            "难受",
+            "崩溃",
+            "想哭",
+            "焦虑",
+            "害怕",
+            "不舒服",
+            "烦",
+            "生气",
+            "委屈",
+            "累",
+            "陪我",
+            "安慰",
+            "救命",
+            "help me calm",
+            "anxious",
+            "overwhelmed",
+        )
+        explanation_keywords = (
+            "什么意思",
+            "为什么",
+            "怎么回事",
+            "解释",
+            "说明一下",
+            "先说清楚",
+            "看不懂",
+            "没懂",
+            "what do you mean",
+            "explain",
+            "why",
+        )
+        if any(keyword in lowered for keyword in emotion_keywords):
+            return True
+        if any(keyword in lowered for keyword in explanation_keywords):
+            return True
+        return emotion not in {"平静", "开心"} and len(text) <= 12 and any(mark in text for mark in ("?", "？"))
+
+    @staticmethod
+    def _looks_like_priority_switch(text: str) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        keywords = (
+            "先处理这个",
+            "先看这个",
+            "还有个更急",
+            "更急",
+            "另外一件",
+            "另一个问题",
+            "换个事情",
+            "换个问题",
+            "新任务",
+            "urgent",
+            "asap",
+        )
+        return any(keyword in lowered for keyword in keywords)
+
+    @staticmethod
+    def _build_paused_execution_hold_message(
+        *,
+        user_input: str,
+        execution: dict[str, Any],
+        reason: str,
+        emotion: str,
+    ) -> str:
+        del execution, emotion
+        if reason == "user_requested_pause":
+            return "好，我先把刚才的执行保持暂停，不继续往下跑。你想恢复时直接跟我说‘继续’就行。"
+        if reason == "main_brain_prioritized_companionship_or_explanation":
+            if any(token in str(user_input or "").lower() for token in ("什么意思", "解释", "为什么", "怎么回事", "explain", "why")):
+                return "好，我先不继续跑刚才的执行。你现在更想让我先解释当前进展，还是你要先补充信息继续？"
+            return "好，我先不继续跑刚才的执行，先陪你把现在这部分理顺。你可以直接告诉我，此刻最想先处理的是哪一点。"
+        if reason == "user_switched_priority":
+            return "好，我先把刚才的执行挂起，不往下推进。你现在更急的这件事，我们先把重点说清楚。"
+        return "好，我先保持当前执行暂停。你想恢复时告诉我‘继续’，或直接补充新的信息也可以。"
 
 
 __all__ = ["MainBrainService"]

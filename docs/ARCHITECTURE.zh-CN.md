@@ -28,15 +28,16 @@ emoticorebot 不是一个任务编排器，也不是多个平级 agent 协商的
 
 推荐技术组合如下：
 
-| 能力 | 技术 |
-| --- | --- |
-| 主脑与执行系统 | `deepagents` |
+
+| 能力             | 技术                           |
+| ---------------- | ------------------------------ |
+| 主脑与执行系统   | `deepagents`                   |
 | 中断、暂停、恢复 | `deepagents human-in-the-loop` |
-| 执行状态恢复 | `checkpointer` |
-| 在线对话持久化 | `JSONL session persistence` |
-| 长期记忆沉淀 | `structured memory stores` |
-| 虚拟路径映射 | `CompositeBackend` |
-| 技能加载 | `skills=["/skills/"]` |
+| 执行状态恢复     | `checkpointer`                 |
+| 在线对话持久化   | `JSONL session persistence`    |
+| 长期记忆沉淀     | `structured memory stores`     |
+| 虚拟路径映射     | `CompositeBackend`             |
+| 技能加载         | `skills=["/skills/"]`          |
 
 说明：
 
@@ -502,16 +503,17 @@ session / cognitive_event
 
 ### 8.1 基础字段
 
-| 字段 | 作用 |
-| --- | --- |
-| `id` | 事件 ID |
-| `version` | 结构版本 |
-| `timestamp` | 时间戳 |
-| `session_id` | 会话 ID |
-| `turn_id` | 轮次 ID |
-| `actor` | 事件来源 |
+
+| 字段         | 作用     |
+| ------------ | -------- |
+| `id`         | 事件 ID  |
+| `version`    | 结构版本 |
+| `timestamp`  | 时间戳   |
+| `session_id` | 会话 ID  |
+| `turn_id`    | 轮次 ID  |
+| `actor`      | 事件来源 |
 | `event_type` | 事件类型 |
-| `content` | 文本内容 |
+| `content`    | 文本内容 |
 
 ### 8.2 `state`
 
@@ -585,36 +587,39 @@ flowchart TD
 
 记录本轮是否激活执行系统，以及执行摘要。
 
-| 字段 | 作用 |
-| --- | --- |
-| `invoked` | 是否激活执行系统 |
-| `control_state` | `idle|running|paused|stopped|completed` |
-| `status` | `none|done|need_more|failed` |
-| `thread_id` | 当前执行线程 ID |
-| `run_id` | 当前执行轮次 ID |
-| `summary` | 执行结果简述 |
-| `missing` | 缺失信息 |
+
+| 字段            | 作用             |
+| --------------- | ---------------- |
+| `invoked`       | 是否激活执行系统 |
+| `control_state` | `idle            |
+| `status`        | `none            |
+| `thread_id`     | 当前执行线程 ID  |
+| `run_id`        | 当前执行轮次 ID  |
+| `summary`       | 执行结果简述     |
+| `missing`       | 缺失信息         |
 
 ### 8.5 `light_insight`
 
 记录每轮实时洞察。
 
-| 字段 | 作用 |
-| --- | --- |
-| `summary` | 本轮即时洞察 |
-| `relation_shift` | 关系变化 |
-| `context_update` | 上下文更新 |
-| `next_hint` | 下一轮主脑提示 |
+
+| 字段             | 作用                           |
+| ---------------- | ------------------------------ |
+| `summary`        | 本轮即时洞察                   |
+| `relation_shift` | 关系变化                       |
+| `context_update` | 上下文更新                     |
+| `next_hint`      | 下一轮主脑提示                 |
 | `direct_updates` | 轻反思下允许快速更新的候选内容 |
 
 ### 8.6 `meta`
 
 附加元信息。
 
-| 字段 | 作用 |
-| --- | --- |
+
+| 字段         | 作用       |
+| ------------ | ---------- |
 | `importance` | 本轮重要性 |
-| `channel` | 来源渠道 |
+| `channel`    | 来源渠道   |
 
 ## 9. 长期记忆设计
 
@@ -880,52 +885,55 @@ def build_agent_backend(rt):
 
 ### 15.1 核心文件应该放哪里
 
-| 类型 | 建议文件 | 说明 |
-| --- | --- | --- |
-| 在线原始流 | `sessions/<session_key>/dialogue.jsonl` | 用户与主脑外部对话 |
-| 在线内部流 | `sessions/<session_key>/internal.jsonl` | 主脑与执行系统内部记录 |
-| 认知事件 | `memory/cognitive_events.jsonl` | 每轮认知提炼结果 |
-| 主脑自我记忆 | `memory/self_memory.jsonl` | 长期自我风格与修正 |
-| 关系记忆 | `memory/relation_memory.jsonl` | 用户偏好、关系变化 |
-| 洞察记忆 | `memory/insight_memory.jsonl` | 深反思高层洞察 |
-| 任务记忆 | `memory/task_memory.jsonl` | 执行状态、阻塞点、待续 |
-| 知识记忆 | `memory/knowledge_memory.jsonl` | 工具经验、约束、方法 |
-| 主脑状态快照 | `current_state.md` | 当前 PAD、drives 与短期状态 |
-| 主脑人格锚点 | `SOUL.md` | 长期人格与风格锚点 |
-| 用户认知锚点 | `USER.md` | 长期用户画像锚点 |
-| 技能 | `emoticorebot/skills/<skill>/SKILL.md` | 高频稳定能力沉淀 |
+
+| 类型         | 建议文件                                | 说明                        |
+| ------------ | --------------------------------------- | --------------------------- |
+| 在线原始流   | `sessions/<session_key>/dialogue.jsonl` | 用户与主脑外部对话          |
+| 在线内部流   | `sessions/<session_key>/internal.jsonl` | 主脑与执行系统内部记录      |
+| 认知事件     | `memory/cognitive_events.jsonl`         | 每轮认知提炼结果            |
+| 主脑自我记忆 | `memory/self_memory.jsonl`              | 长期自我风格与修正          |
+| 关系记忆     | `memory/relation_memory.jsonl`          | 用户偏好、关系变化          |
+| 洞察记忆     | `memory/insight_memory.jsonl`           | 深反思高层洞察              |
+| 任务记忆     | `memory/task_memory.jsonl`              | 执行状态、阻塞点、待续      |
+| 知识记忆     | `memory/knowledge_memory.jsonl`         | 工具经验、约束、方法        |
+| 主脑状态快照 | `current_state.md`                      | 当前 PAD、drives 与短期状态 |
+| 主脑人格锚点 | `SOUL.md`                               | 长期人格与风格锚点          |
+| 用户认知锚点 | `USER.md`                               | 长期用户画像锚点            |
+| 技能         | `emoticorebot/skills/<skill>/SKILL.md`  | 高频稳定能力沉淀            |
 
 ### 15.2 `cognitive_event` 核心字段
 
-| 字段 | 作用 |
-| --- | --- |
-| `id` | 事件 ID |
-| `version` | 结构版本 |
-| `timestamp` | 时间戳 |
-| `session_id` | 会话 ID |
-| `turn_id` | 轮次 ID |
-| `actor` | 事件来源 |
-| `event_type` | 事件类型 |
-| `content` | 文本内容 |
-| `state.self_state` | 主脑当前内部状态 |
-| `state.relation_state` | 当前关系状态 |
-| `state.context_state` | 当前上下文状态 |
-| `state.growth_state` | 当前成长状态 |
-| `execution` | 执行系统状态与摘要 |
-| `light_insight` | 每轮即时洞察 |
-| `meta` | 重要性、渠道等元信息 |
+
+| 字段                   | 作用                 |
+| ---------------------- | -------------------- |
+| `id`                   | 事件 ID              |
+| `version`              | 结构版本             |
+| `timestamp`            | 时间戳               |
+| `session_id`           | 会话 ID              |
+| `turn_id`              | 轮次 ID              |
+| `actor`                | 事件来源             |
+| `event_type`           | 事件类型             |
+| `content`              | 文本内容             |
+| `state.self_state`     | 主脑当前内部状态     |
+| `state.relation_state` | 当前关系状态         |
+| `state.context_state`  | 当前上下文状态       |
+| `state.growth_state`   | 当前成长状态         |
+| `execution`            | 执行系统状态与摘要   |
+| `light_insight`        | 每轮即时洞察         |
+| `meta`                 | 重要性、渠道等元信息 |
 
 ### 15.3 哪些东西由谁维护
 
-| 对象 | 维护者 |
-| --- | --- |
-| `session` | `SessionManager` |
-| `cognitive_event` | 认知事件提炼逻辑 |
-| `memory` | 反思与记忆沉淀逻辑 |
-| `current_state.md` | 主脑状态管理器 |
-| `SOUL.md` | 深反思为主，轻反思可快速更新高置信风格要求 |
-| `USER.md` | 深反思为主，轻反思可快速更新高置信用户信息 |
-| `skills` | 工具深反思筛选后沉淀 |
+
+| 对象               | 维护者                                     |
+| ------------------ | ------------------------------------------ |
+| `session`          | `SessionManager`                           |
+| `cognitive_event`  | 认知事件提炼逻辑                           |
+| `memory`           | 反思与记忆沉淀逻辑                         |
+| `current_state.md` | 主脑状态管理器                             |
+| `SOUL.md`          | 深反思为主，轻反思可快速更新高置信风格要求 |
+| `USER.md`          | 深反思为主，轻反思可快速更新高置信用户信息 |
+| `skills`           | 工具深反思筛选后沉淀                       |
 
 ## 16. 命名约束
 

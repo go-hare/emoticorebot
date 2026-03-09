@@ -1,5 +1,5 @@
 """Core nodes package."""
 
-from emoticorebot.core.state import OrchestrationState
+from emoticorebot.core.state import TurnState
 
-__all__ = ["OrchestrationState"]
+__all__ = ["TurnState"]

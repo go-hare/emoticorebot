@@ -47,38 +47,38 @@ _PROVIDER_BASE_URLS: dict[str, str] = {
 
 
 class LLMFactory:
-    """根据 IQ/EQ 模式配置和 provider 凭证构建 LangChain chat model。
+    """根据主脑 / 执行器模式配置和 provider 凭证构建 LangChain chat model。
 
     Usage::
 
         factory = LLMFactory(
             providers_config=config.providers,
-            iq_mode=config.agents.defaults.iq_mode,
-            eq_mode=config.agents.defaults.eq_mode,
+            executor_mode=config.agents.defaults.executor_mode,
+            main_brain_mode=config.agents.defaults.main_brain_mode,
         )
-        iq_llm = factory.get_iq()
-        eq_llm = factory.get_eq()
+        executor_llm = factory.get_executor()
+        main_brain_llm = factory.get_main_brain()
     """
 
     def __init__(
         self,
         providers_config: "ProvidersConfig",
-        iq_mode: "ModelModeConfig",
-        eq_mode: "ModelModeConfig",
+        executor_mode: "ModelModeConfig",
+        main_brain_mode: "ModelModeConfig",
     ) -> None:
         self._providers = providers_config
-        self._iq = iq_mode
-        self._eq = eq_mode
+        self._executor = executor_mode
+        self._main_brain = main_brain_mode
 
     # ── 公共接口 ──────────────────────────────────────────────────────────────
 
-    def get_iq(self) -> Any:
-        """构建 IQ（智能推理）主力大模型实例。"""
-        return self._build(self._iq)
+    def get_executor(self) -> Any:
+        """构建 executor 主力大模型实例。"""
+        return self._build(self._executor)
 
-    def get_eq(self) -> Any:
-        """构建 EQ（情感智能）模型实例。"""
-        return self._build(self._eq)
+    def get_main_brain(self) -> Any:
+        """构建 main_brain 模型实例。"""
+        return self._build(self._main_brain)
 
     # ── 内部构建逻辑 ──────────────────────────────────────────────────────────
 

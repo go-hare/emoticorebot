@@ -557,26 +557,40 @@ class CognitiveEvent:
 
     @staticmethod
     def _build_execution(*, state: dict[str, Any], executor: Any) -> dict[str, Any]:
-        invoked = executor is not None
+        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+        execution = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
+        invoked = executor is not None or bool(execution)
         if not invoked:
             return CognitiveEvent._empty_execution()
 
-        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
         summary = str(getattr(executor, "analysis", "") or "").strip()
         if not summary:
+            summary = str(execution.get("summary", "") or "").strip()
+        if not summary:
             summary = str(getattr(executor, "request", "") or "").strip()
+        control_state = CognitiveEvent._normalize_execution_control_state(
+            getattr(executor, "control_state", "") if executor is not None else execution.get("control_state", "")
+        )
+        status = CognitiveEvent._normalize_execution_status(
+            getattr(executor, "status", "") if executor is not None else execution.get("status", ""),
+            control_state=control_state,
+        )
         return {
             "invoked": True,
-            "control_state": CognitiveEvent._map_control_state(executor),
-            "status": CognitiveEvent._map_execution_status(executor),
+            "control_state": control_state,
+            "status": status,
             "thread_id": str(
-                state.get("executor_thread_id", "")
+                getattr(executor, "thread_id", "")
+                or state.get("executor_thread_id", "")
+                or execution.get("thread_id", "")
                 or metadata.get("executor_thread_id", "")
                 or metadata.get("thread_id", "")
                 or ""
             ).strip(),
             "run_id": str(
-                state.get("executor_run_id", "")
+                getattr(executor, "run_id", "")
+                or state.get("executor_run_id", "")
+                or execution.get("run_id", "")
                 or metadata.get("executor_run_id", "")
                 or metadata.get("run_id", "")
                 or ""
@@ -584,7 +598,11 @@ class CognitiveEvent:
             "summary": CognitiveEvent._normalize_text(summary, limit=180),
             "missing": [
                 str(item).strip()
-                for item in list(getattr(executor, "missing_params", []) or [])
+                for item in list(
+                    getattr(executor, "missing", [])
+                    or execution.get("missing", [])
+                    or []
+                )
                 if str(item).strip()
             ],
         }
@@ -689,26 +707,28 @@ class CognitiveEvent:
         }
 
     @staticmethod
-    def _map_control_state(executor: Any) -> str:
-        status = str(getattr(executor, "status", "") or "").strip().lower()
-        if status in {"queued", "running"}:
-            return "running"
-        if status == "needs_input":
-            return "paused"
-        if status == "failed":
+    def _normalize_execution_control_state(value: Any) -> str:
+        control_state = str(value or "idle").strip().lower()
+        if control_state in {"idle", "running", "paused", "stopped", "completed"}:
+            return control_state
+        if control_state == "failed":
             return "stopped"
-        return "completed"
+        return "idle"
 
     @staticmethod
-    def _map_execution_status(executor: Any) -> str:
-        status = str(getattr(executor, "status", "") or "").strip().lower()
-        if status == "failed":
+    def _normalize_execution_status(value: Any, *, control_state: str) -> str:
+        status = str(value or "none").strip().lower()
+        if status in {"none", "done", "need_more", "failed"}:
+            return status
+        if status == "needs_input":
+            return "need_more"
+        if control_state == "paused":
+            return "need_more"
+        if control_state == "stopped":
             return "failed"
-        if status in {"needs_input", "uncertain"}:
-            return "need_more"
-        if status in {"queued", "running"}:
-            return "need_more"
-        return "done"
+        if control_state == "completed":
+            return "done"
+        return "none"
 
     @staticmethod
     def _infer_companionship_tension(relation_signal: str) -> float:

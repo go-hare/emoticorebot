@@ -112,6 +112,9 @@ class TelegramChannel(BaseChannel):
         BotCommand("start", "Start the bot"),
         BotCommand("new", "Start a new conversation"),
         BotCommand("stop", "Stop the current request"),
+        BotCommand("pause", "Inspect pause state"),
+        BotCommand("resume", "Resume paused execution"),
+        BotCommand("continue", "Continue paused execution"),
         BotCommand("help", "Show available commands"),
     ]
     
@@ -147,6 +150,13 @@ class TelegramChannel(BaseChannel):
         # Add command handlers
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
+        self._app.add_handler(CommandHandler("stop", self._forward_command))
+        self._app.add_handler(CommandHandler("pause", self._forward_command))
+        self._app.add_handler(CommandHandler("resume", self._forward_command))
+        self._app.add_handler(CommandHandler("continue", self._forward_command))
+        self._app.add_handler(CommandHandler("approve", self._forward_command))
+        self._app.add_handler(CommandHandler("reject", self._forward_command))
+        self._app.add_handler(CommandHandler("edit", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
         
         # Add message handler for text, photos, voice, documents
@@ -301,6 +311,9 @@ class TelegramChannel(BaseChannel):
             "🐾 emoticorebot commands:\n"
             "/new — Start a new conversation\n"
             "/stop — Stop the current request\n"
+            "/pause — Inspect whether current execution can pause\n"
+            "/resume — Resume a paused execution\n"
+            "/continue — Continue a paused execution\n"
             "/help — Show available commands"
         )
 

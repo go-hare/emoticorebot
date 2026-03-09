@@ -1,6 +1,6 @@
 """MCP - MCP 服务器连接与工具适配
 
-适配 MCP 工具到 fusion toolkit.Tool 格式。
+适配 MCP 工具到项目内部 Tool 接口。
 """
 
 import asyncio
@@ -14,7 +14,7 @@ from emoticorebot.tools import Tool, ToolRegistry
 
 
 class MCPToolWrapper(Tool):
-    """将 MCP 服务器工具封装为 fusion toolkit.Tool"""
+    """将 MCP 服务器工具封装为项目内部 Tool。"""
 
     def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
         self._session = session
@@ -63,7 +63,7 @@ async def connect_mcp_servers(
     连接配置的 MCP 服务器并注册工具。
     
     :param mcp_servers: MCP 服务器配置字典 {name: MCPServerConfig}
-    :param registry: fusion ToolRegistry 实例
+    :param registry: ToolRegistry 实例
     :param stack: AsyncExitStack 用于管理连接生命周期
     """
     from mcp import ClientSession, StdioServerParameters

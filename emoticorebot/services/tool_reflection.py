@@ -18,7 +18,7 @@ class ToolLightReflectionService:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.memory_file = workspace / "memory" / "tool_memory.jsonl"
+        self.memory_file = workspace / "memory" / "knowledge_memory.jsonl"
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
 
     async def record_execution(self, event: dict[str, Any]) -> None:
@@ -31,8 +31,6 @@ class ToolLightReflectionService:
 
         raw_result = self._strip_error_hint(str(event.get("raw_result", "") or ""))
         success = bool(event.get("success", False))
-        params = event.get("params") if isinstance(event.get("params"), dict) else {}
-        context = event.get("context") if isinstance(event.get("context"), dict) else {}
         summary = self._build_summary(tool_name=tool_name, success=success, raw_result=raw_result)
         failure_reason = self._extract_failure_reason(raw_result) if not success else ""
         missing_inputs = self._extract_missing_inputs(raw_result)
@@ -42,21 +40,13 @@ class ToolLightReflectionService:
         entry = {
             "timestamp": datetime.now().isoformat(),
             "type": "tool_light_reflection",
-            "tool_name": tool_name,
-            "params": params,
             "summary": summary,
             "effectiveness": effectiveness,
-            "success": success,
             "failure_reason": failure_reason,
             "missing_inputs": missing_inputs,
             "next_hint": next_hint,
-            "result_preview": self._compact(raw_result, limit=280),
-            "context": {
-                "session_key": str(context.get("session_key", "") or ""),
-                "channel": str(context.get("channel", "") or ""),
-                "chat_id": str(context.get("chat_id", "") or ""),
-                "message_id": str(context.get("message_id", "") or ""),
-                "source": str(context.get("source", "") or "executor"),
+            "meta": {
+                "tool_name": tool_name,
             },
         }
 

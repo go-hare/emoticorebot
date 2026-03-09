@@ -18,8 +18,8 @@ def build_companion_prompt(emotion: str = "平静") -> str:
     return variants.get(mood, "嗯，我在。你接着说，我认真听着。")
 
 
-def build_missing_info_prompt(missing_params: list[str]) -> str:
-    items = [str(item).strip() for item in missing_params if str(item).strip()]
+def build_missing_info_prompt(missing: list[str]) -> str:
+    items = [str(item).strip() for item in missing if str(item).strip()]
     if not items:
         return "我这边还差一点点信息，补上我就能继续接着帮你。"
     if len(items) == 1:

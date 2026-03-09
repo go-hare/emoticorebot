@@ -1,4 +1,4 @@
-"""Routing decisions for the orchestration graph."""
+"""Routing decisions for the turn graph."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-class OrchestrationRouter:
+class TurnRouter:
     """Choose the next node for the main-brain/executor loop."""
 
     def __init__(self, max_executor_attempts: int = 3):
@@ -22,6 +22,7 @@ class OrchestrationRouter:
         executor = state.get("executor", {})
 
         executor_request: str = _get(executor, "request", "")
+        executor_control_state: str = _get(executor, "control_state", "")
         executor_status: str = _get(executor, "status", "")
         executor_attempts: int = _get(executor, "attempts", 0)
 
@@ -31,13 +32,13 @@ class OrchestrationRouter:
         if executor_attempts >= self.max_executor_attempts:
             return "main_brain"
 
-        if executor_request and executor_status in {"queued", "running"}:
+        if executor_request and executor_control_state == "running":
             return "executor"
 
-        if executor_status in {"completed", "needs_input", "uncertain", "failed"}:
+        if executor_status in {"done", "need_more", "failed"}:
             return "main_brain"
 
         return "memory"
 
 
-__all__ = ["OrchestrationRouter"]
+__all__ = ["TurnRouter"]

@@ -19,7 +19,7 @@ from loguru import logger
 from emoticorebot.background.reflection import ReflectionEngine
 
 if TYPE_CHECKING:
-    from emoticorebot.runtime.runtime import FusionRuntime
+    from emoticorebot.runtime.runtime import EmoticoreRuntime
     from emoticorebot.cron.service import CronService
 
 
@@ -33,7 +33,7 @@ class SubconsciousDaemon:
 - 不要说"你在吗"，要有性格、有灵魂
 - 符合你目前的情绪状态"""
 
-    def __init__(self, runtime: "FusionRuntime", workspace: Path):
+    def __init__(self, runtime: "EmoticoreRuntime", workspace: Path):
         self.runtime = runtime
         self.workspace = workspace
         self.emotion_mgr = runtime.emotion_mgr

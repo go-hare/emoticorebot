@@ -143,7 +143,7 @@ class PADState:
         return "平静"
 
     def get_emotion_prompt(self) -> str:
-        """自然语言描述，注入 System Prompt（EQ/Hybrid 路径使用）。"""
+        """自然语言描述，注入 system prompt（主脑路径使用）。"""
         label = self.get_emotion_label()
         desc = {
             "悲伤": "有些低落，回复简短，惜字如金",

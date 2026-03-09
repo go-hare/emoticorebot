@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
 import hashlib
+from uuid import uuid4
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from emoticorebot.checkpointing import PersistentMemorySaver
 from emoticorebot.core.context import ContextBuilder
 from emoticorebot.core.skills import BUILTIN_SKILLS_DIR
-from emoticorebot.core.state import ExecutorRecommendedAction, ExecutorResultPacket, ExecutorStatus
+from emoticorebot.core.state import ExecutorPacketStatus, ExecutorRecommendedAction, ExecutorResultPacket
 from emoticorebot.tools import ToolRegistry
+from emoticorebot.utils.helpers import ensure_dir
 from emoticorebot.utils.llm_utils import normalize_content_blocks
 from emoticorebot.utils.llm_utils import extract_message_metrics
 
@@ -21,11 +23,21 @@ try:
 except Exception:
     create_deep_agent = None
 
+try:
+    from langgraph.checkpoint.memory import InMemorySaver
+except Exception:
+    InMemorySaver = None
+
+try:
+    from langgraph.types import Command
+except Exception:
+    Command = None
+
 
 class ExecutorService:
     """Executor layer for complex tasks.
 
-    The outer EQ↔IQ contract stays minimal.
+    The outer main_brain ↔ executor contract stays minimal.
     The inner execution model is Deep Agents-based:
     - planning
     - skills
@@ -33,19 +45,20 @@ class ExecutorService:
     - long-running complex tasks
     """
 
-    _VALID_STATUS: set[ExecutorStatus] = {"completed", "needs_input", "uncertain", "failed"}
-    _VALID_ACTIONS: set[ExecutorRecommendedAction] = {"answer", "ask_user", "continue_deliberation"}
+    _VALID_RAW_STATUS: set[ExecutorPacketStatus] = {"completed", "needs_input", "uncertain", "failed"}
+    _VALID_ACTIONS: set[ExecutorRecommendedAction] = {"answer", "ask_user", "continue"}
 
     def __init__(
         self,
-        iq_llm,
+        executor_llm,
         tool_registry: ToolRegistry | None,
         context_builder: ContextBuilder,
     ):
-        self.iq_llm = iq_llm
+        self.executor_llm = executor_llm
         self.tools = tool_registry
         self.context = context_builder
         self._agent: Any | None = None
+        self._checkpointer: Any | None = None
 
     async def run_request(
         self,
@@ -56,7 +69,7 @@ class ExecutorService:
         channel: str,
         chat_id: str,
         session_id: str = "",
-        intent_params: dict[str, Any] | None = None,
+        execution_context: dict[str, Any] | None = None,
         media: list[str] | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
@@ -65,25 +78,37 @@ class ExecutorService:
 
         if create_deep_agent is None:
             return self._failed_packet(
-                analysis="Deep Agents 依赖尚未安装，IQ 新执行内核当前不可用。",
-                missing=self._extract_missing_params(intent_params),
+                analysis="Deep Agents 依赖尚未安装，executor 新执行内核当前不可用。",
+                missing=self._extract_missing(execution_context),
             )
 
         request = str(request or "").strip()
-        if not request:
-            return self._failed_packet("IQ 未收到有效问题。")
+        resume_value = self._build_resume_value(execution_context)
+        can_resume = resume_value is not None and str((execution_context or {}).get("thread_id", "") or "").strip() != ""
+        if not request and not can_resume:
+            return self._failed_packet("executor 未收到有效问题。")
 
         if on_progress is not None:
-            await on_progress("IQ 正在规划内部问题")
+            await on_progress("executor 正在恢复上次执行" if can_resume else "executor 正在规划内部问题")
 
         agent = self._ensure_agent()
+        run_id = str((execution_context or {}).get("run_id", "") or "").strip() if can_resume else ""
+        if not run_id:
+            run_id = self._new_run_id()
+        thread_id = str((execution_context or {}).get("thread_id", "") or "").strip() if can_resume else ""
+        if not thread_id:
+            thread_id = self._build_thread_id(
+                channel=channel,
+                chat_id=chat_id,
+                session_id=session_id,
+                run_id=run_id,
+            )
         prompt = self._build_request_prompt(
             request=request,
             history=history,
-            intent_params=intent_params,
+            execution_context=execution_context,
             media=media,
         )
-        print("prompt:",prompt)
         try:
             raw_result = await self._invoke_agent(
                 agent,
@@ -91,19 +116,49 @@ class ExecutorService:
                 channel=channel,
                 chat_id=chat_id,
                 session_id=session_id,
+                thread_id=thread_id,
+                run_id=run_id,
                 on_trace=on_trace,
+                resume_value=resume_value if can_resume else None,
             )
         except Exception as exc:
-            return self._failed_packet(
-                analysis=f"Deep Agents 执行失败：{exc}",
-                missing=self._extract_missing_params(intent_params),
-            )
-
-        return self._normalize_result_packet(
+            if can_resume:
+                try:
+                    raw_result = await self._invoke_agent(
+                        agent,
+                        prompt,
+                        channel=channel,
+                        chat_id=chat_id,
+                        session_id=session_id,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        on_trace=on_trace,
+                        resume_value=None,
+                    )
+                except Exception as resume_exc:
+                    packet = self._failed_packet(
+                        analysis=f"Deep Agents 恢复失败：{resume_exc}",
+                        missing=self._extract_missing(execution_context),
+                    )
+                    packet["thread_id"] = thread_id
+                    packet["run_id"] = run_id
+                    return packet
+            else:
+                packet = self._failed_packet(
+                    analysis=f"Deep Agents 执行失败：{exc}",
+                    missing=self._extract_missing(execution_context),
+                )
+                packet["thread_id"] = thread_id
+                packet["run_id"] = run_id
+                return packet
+        packet = self._normalize_result_packet(
             raw_result,
             request=request,
-            intent_params=intent_params,
+            execution_context=execution_context,
         )
+        packet["thread_id"] = thread_id
+        packet["run_id"] = run_id
+        return packet
 
     def _ensure_agent(self) -> Any:
         if self._agent is None:
@@ -118,10 +173,12 @@ class ExecutorService:
         subagents = self._build_subagents()
         skills = self._build_skill_paths()
         backend = self._build_backend()
+        checkpointer = self._ensure_checkpointer()
+        interrupt_on = self._build_interrupt_on()
 
         try:
             kwargs: dict[str, Any] = {
-                "model": self.iq_llm,
+                "model": self.executor_llm,
                 "tools": tools,
                 "system_prompt": self._build_agent_instructions(),
             }
@@ -131,9 +188,40 @@ class ExecutorService:
                 kwargs["skills"] = skills
             if backend is not None:
                 kwargs["backend"] = backend
+            if checkpointer is not None:
+                kwargs["checkpointer"] = checkpointer
+            if interrupt_on:
+                kwargs["interrupt_on"] = interrupt_on
             return create_deep_agent(**kwargs)
         except TypeError as exc:
             raise RuntimeError(f"Deep Agents API mismatch: {exc}") from exc
+
+    def _ensure_checkpointer(self) -> Any | None:
+        if self._checkpointer is not None:
+            return self._checkpointer
+        workspace = Path(self.context.workspace).expanduser().resolve()
+        checkpoint_dir = ensure_dir(workspace / "sessions" / "_checkpoints")
+        checkpoint_file = checkpoint_dir / "executor.pkl"
+        if PersistentMemorySaver is not None:
+            self._checkpointer = PersistentMemorySaver(checkpoint_file)
+            return self._checkpointer
+        if InMemorySaver is None:
+            return None
+        self._checkpointer = InMemorySaver()
+        return self._checkpointer
+
+    @staticmethod
+    def _build_interrupt_on() -> dict[str, Any]:
+        return {
+            "message": {
+                "allowed_decisions": ["approve", "edit", "reject"],
+                "description": "请确认是否允许 executor 发送消息。",
+            },
+            "cron": {
+                "allowed_decisions": ["approve", "reject"],
+                "description": "请确认是否允许 executor 创建或修改定时任务。",
+            },
+        }
 
     def _build_agent_instructions(self) -> str:
         workspace = Path(self.context.workspace).expanduser().resolve()
@@ -141,7 +229,7 @@ class ExecutorService:
             "你是 executor，负责复杂问题的规划、执行、核查与结果收口。\n"
             "你处理的是 main_brain -> executor 这条内部执行链路，不负责对用户做最终表达。\n\n"
             f"当前工作区目录是 `{workspace}`。\n"
-            f"长期记忆目录是 `{workspace / 'memory' / 'iq'}`。\n\n"
+            "工作区虚拟路径通过 `/state/` 暴露，内置技能通过 `/skills/` 暴露。\n\n"
             "## 职责\n"
             "1. 接收 main_brain 委托的问题并转成可执行步骤。\n"
             "2. 必要时拆分步骤、调用工具、使用 skills、委派子代理。\n"
@@ -150,45 +238,19 @@ class ExecutorService:
             "## 边界\n"
             "1. 不负责最终对用户表达。\n"
             "2. 不把内部分析伪装成用户可见对话。\n"
-            "3. 不把情绪陪伴、关系判断、共情表达写进长期记忆。\n"
-            "4. 不保留临时草稿、一次性中间产物、原始噪声输出。\n\n"
-            "## 长期记忆规则\n"
-            "1. 长期记忆目录固定为工作区 `memory/iq/`。\n"
-            "2. 只允许写入以下长期记忆文件：`memory/iq/preferences.md`、`memory/iq/constraints.md`、`memory/iq/knowledge.md`、`memory/iq/projects.md`。\n"
-            "3. 允许写入稳定偏好、长期约束、项目事实、可复用知识，以及跨轮仍需继续的任务压缩摘要、阻塞原因、已验证方法、下一步计划。\n"
-            "4. 原始工具输出、临时草稿、一次性中间过程不得直接写入 `memory/iq/`；但可以先压缩成最小可续接摘要后再写入。\n"
-            "5. 写入前先判断：这条信息是否能帮助下次更快续做、避免重复试错、减少再次回放长会话；若能，就应写入合适的 `memory/iq/` 文件。\n"
-            "6. 当前问题明显依赖既有资料时，先检查 `memory/iq/` 下已有内容。\n"
-            "7. 如果本轮产生了可跨轮复用的结论、约束、失败原因、待续状态或操作计划，请在结束前把它们以短摘要形式写入 `memory/iq/`，再输出最终 JSON。\n\n"
+            "3. 不负责关系判断、人格维护、情绪陪伴和主脑反思。\n"
+            "4. 不更新 `SOUL.md`、`USER.md`，也不负责 `light_insight` / `deep_insight`。\n"
+            "5. 不自行读写长期 `memory` 沉淀文件；工具调用后的即时经验会由外层记录为 `tool_light_reflection`。\n"
+            "6. 不保留临时草稿、一次性中间产物、原始噪声输出。\n\n"
             "## 输出规则\n"
             "1. 最终只输出协议要求的 JSON。\n"
             "2. JSON 只包含 status、analysis、risks、missing、recommended_action、confidence。"
         )
-        memory_context = self._build_iq_memory_context(workspace)
         skills_context = self._build_internal_skill_context()
-        extras = [section for section in (memory_context, skills_context) if section]
+        extras = [section for section in (skills_context,) if section]
         if not extras:
             return base
         return f"{base}\n\n" + "\n\n".join(extras)
-
-    @staticmethod
-    def _build_iq_memory_context(workspace: Path) -> str:
-        memory_dir = workspace / "memory" / "iq"
-        sections: list[str] = []
-        for name in ("preferences.md", "constraints.md", "knowledge.md", "projects.md"):
-            path = memory_dir / name
-            if not path.exists():
-                continue
-            try:
-                text = path.read_text(encoding="utf-8").strip()
-            except Exception:
-                continue
-            if not text:
-                continue
-            sections.append(f"### {name}\n{text}")
-        if not sections:
-            return ""
-        return "## IQ 长期记忆\n\n" + "\n\n".join(sections)
 
     def _build_internal_skill_context(self) -> str:
         skills_loader = getattr(self.context, "skills", None)
@@ -209,23 +271,23 @@ class ExecutorService:
 
     def _build_backend(self) -> Any | None:
         workspace = Path(self.context.workspace).expanduser().resolve()
-        (workspace / "memory" / "iq").mkdir(parents=True, exist_ok=True)
+        builtin_skills_root = BUILTIN_SKILLS_DIR.resolve()
 
         try:
-            from deepagents.backends import LocalShellBackend
+            from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
         except Exception:
             return None
 
-        try:
-            return LocalShellBackend(
-                root_dir=str(workspace),
-                env={"PATH": os.environ.get("PATH", "")},
+        def build_agent_backend(rt: Any) -> Any:
+            return CompositeBackend(
+                default=StateBackend(rt),
+                routes={
+                    "/state/": FilesystemBackend(root_dir=workspace, virtual_mode=True),
+                    "/skills/": FilesystemBackend(root_dir=builtin_skills_root, virtual_mode=True),
+                },
             )
-        except TypeError:
-            try:
-                return LocalShellBackend(str(workspace))
-            except Exception:
-                return None
+
+        return build_agent_backend
 
     def _build_tools(self) -> list[Any]:
         return self._build_registry_tools(["web_search", "web_fetch", "message", "cron"])
@@ -345,17 +407,24 @@ class ExecutorService:
         *,
         request: str,
         history: list[dict[str, Any]],
-        intent_params: dict[str, Any] | None,
+        execution_context: dict[str, Any] | None,
         media: list[str] | None,
     ) -> str:
-        parts = [f"内部问题：{request}"]
+        parts = [f"内部问题：{request}"] if request else []
 
-        params = intent_params or {}
-        resume_request = str(params.get("resume_task", "") or "").strip()
-        missing = self._extract_missing_params(params)
+        execution = execution_context or {}
+        resume_payload = execution.get("resume_payload")
+        missing = self._extract_missing(execution)
+        thread_id = str(execution.get("thread_id", "") or "").strip()
+        run_id = str(execution.get("run_id", "") or "").strip()
 
-        if resume_request:
-            parts.append(f"待续问题：{resume_request}")
+        if thread_id:
+            parts.append(f"当前执行线程：{thread_id}")
+        if run_id:
+            parts.append(f"当前执行轮次：{run_id}")
+        if resume_payload not in (None, "", [], {}):
+            payload_text = resume_payload if isinstance(resume_payload, str) else json.dumps(resume_payload, ensure_ascii=False)
+            parts.append(f"恢复载荷：{payload_text}")
         if missing:
             parts.append(f"需优先确认缺参：{json.dumps(missing, ensure_ascii=False)}")
         if media:
@@ -370,7 +439,7 @@ class ExecutorService:
             "请完成复杂问题的分析与执行。最终请只输出一个 JSON 对象："
             '{"status":"completed|needs_input|uncertain|failed","analysis":"...",'
             '"risks":["..."],"missing":["..."],'
-            '"recommended_action":"answer|ask_user|continue_deliberation","confidence":0.0}'
+            '"recommended_action":"answer|ask_user|continue","confidence":0.0}'
         )
         return "\n".join(parts)
 
@@ -408,16 +477,26 @@ class ExecutorService:
         channel: str,
         chat_id: str,
         session_id: str,
+        thread_id: str,
+        run_id: str,
         on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        resume_value: Any | None = None,
     ) -> Any:
-        payload = {"messages": [{"role": "user", "content": prompt}]}
-        thread_id = self._build_thread_id(channel=channel, chat_id=chat_id, session_id=session_id)
+        payload: Any
+        if resume_value is not None and Command is not None:
+            payload = Command(resume=resume_value)
+        else:
+            payload = {"messages": [{"role": "user", "content": prompt}]}
         config = {
             "configurable": {
                 "thread_id": thread_id,
             },
             "metadata": {
-                "assistant_id": "emoticorebot-iq",
+                "assistant_id": "emoticorebot-executor",
+                "run_id": run_id,
+                "channel": channel,
+                "chat_id": chat_id,
+                "session_id": session_id,
             },
         }
         if hasattr(agent, "astream"):
@@ -429,14 +508,17 @@ class ExecutorService:
         raise RuntimeError("Deep Agent does not expose invoke/ainvoke/astream")
 
     @staticmethod
-    def _build_thread_id(*, channel: str, chat_id: str, session_id: str) -> str:
+    def _build_thread_id(*, channel: str, chat_id: str, session_id: str, run_id: str) -> str:
         base = str(session_id or "").strip()
         if not base:
             channel_text = str(channel or "").strip()
             chat_text = str(chat_id or "").strip()
-            base = f"{channel_text}:{chat_text}" if channel_text or chat_text else "iq"
-        digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
-        return f"iq_{digest}"
+            base = f"{channel_text}:{chat_text}" if channel_text or chat_text else "default"
+        return f"exec:{base}:{run_id}"
+
+    @staticmethod
+    def _new_run_id() -> str:
+        return f"run_{uuid4().hex[:12]}"
 
     async def _stream_agent(
         self,
@@ -731,24 +813,29 @@ class ExecutorService:
         raw_result: Any,
         *,
         request: str,
-        intent_params: dict[str, Any] | None,
+        execution_context: dict[str, Any] | None,
     ) -> ExecutorResultPacket:
         del request
-        text = self._extract_text(raw_result).strip()
         metrics = self._extract_result_metrics(raw_result)
+        if self._is_interrupt_result(raw_result):
+            packet = self._build_paused_packet(raw_result, execution_context=execution_context)
+            packet.update(metrics)
+            return packet
+
+        text = self._extract_text(raw_result).strip()
         if not text:
             packet = self._failed_packet(
                 analysis="Deep Agents 未返回有效内容。",
-                missing=self._extract_missing_params(intent_params),
+                missing=self._extract_missing(execution_context),
             )
             packet.update(metrics)
             return packet
 
         parsed = self._parse_json(text)
         if isinstance(parsed, dict):
-            status = str(parsed.get("status", "completed") or "completed").strip().lower()
-            if status not in self._VALID_STATUS:
-                status = "completed"
+            raw_status = str(parsed.get("status", "completed") or "completed").strip().lower()
+            if raw_status not in self._VALID_RAW_STATUS:
+                raw_status = "completed"
             recommended_action = str(parsed.get("recommended_action", "answer") or "answer").strip().lower()
             if recommended_action not in self._VALID_ACTIONS:
                 recommended_action = "answer"
@@ -760,7 +847,13 @@ class ExecutorService:
             except Exception:
                 confidence_value = 0.0
 
+            control_state, status = self._map_result_status(
+                raw_status=raw_status,
+                missing=missing,
+                recommended_action=recommended_action,
+            )
             packet = {
+                "control_state": control_state,
                 "status": status,
                 "analysis": str(parsed.get("analysis", "") or "").strip() or text,
                 "risks": risks,
@@ -772,10 +865,11 @@ class ExecutorService:
             return packet
 
         packet = {
-            "status": "completed",
+            "control_state": "completed",
+            "status": "done",
             "analysis": text,
             "risks": [],
-            "missing": self._extract_missing_params(intent_params),
+            "missing": self._extract_missing(execution_context),
             "recommended_action": "answer",
             "confidence": 0.72,
         }
@@ -842,14 +936,119 @@ class ExecutorService:
             return None
 
     @staticmethod
-    def _extract_missing_params(intent_params: dict[str, Any] | None) -> list[str]:
-        params = intent_params or {}
+    def _extract_missing(execution_context: dict[str, Any] | None) -> list[str]:
+        params = execution_context or {}
         missing: list[str] = []
-        for item in params.get("missing_params", []) or []:
+        for item in params.get("missing", []) or []:
             text = str(item or "").strip()
             if text and text not in missing:
                 missing.append(text)
         return missing
+
+    @staticmethod
+    def _is_interrupt_result(raw_result: Any) -> bool:
+        return isinstance(raw_result, dict) and bool(raw_result.get("__interrupt__"))
+
+    def _build_paused_packet(
+        self,
+        raw_result: Any,
+        *,
+        execution_context: dict[str, Any] | None,
+    ) -> ExecutorResultPacket:
+        summary = self._summarize_interrupt(raw_result)
+        pending_review = self._extract_pending_review(raw_result)
+        return {
+            "control_state": "paused",
+            "status": "need_more",
+            "analysis": summary or "executor 已暂停，等待恢复输入。",
+            "risks": [],
+            "missing": self._extract_missing(execution_context),
+            "recommended_action": "ask_user",
+            "confidence": 0.0,
+            "pending_review": pending_review,
+        }
+
+    @staticmethod
+    def _map_result_status(*, raw_status: str, missing: list[str], recommended_action: str) -> tuple[str, str]:
+        if raw_status == "failed":
+            return "stopped", "failed"
+        if raw_status == "needs_input" or missing or recommended_action == "ask_user":
+            return "paused", "need_more"
+        if raw_status == "uncertain" or recommended_action == "continue":
+            return "completed", "need_more"
+        return "completed", "done"
+
+    @staticmethod
+    def _summarize_interrupt(raw_result: Any) -> str:
+        interrupts = raw_result.get("__interrupt__") if isinstance(raw_result, dict) else None
+        if not interrupts:
+            return ""
+        parts: list[str] = []
+        for item in interrupts:
+            value = getattr(item, "value", item)
+            if isinstance(value, dict):
+                action_requests = value.get("action_requests")
+                if isinstance(action_requests, list) and action_requests:
+                    names = [
+                        str(action.get("name", "") or "").strip()
+                        for action in action_requests
+                        if isinstance(action, dict) and str(action.get("name", "") or "").strip()
+                    ]
+                    if names:
+                        parts.append(f"等待审批动作：{', '.join(names)}")
+                        continue
+                text = json.dumps(value, ensure_ascii=False, default=str)
+            else:
+                text = str(value or "").strip()
+            text = " ".join(text.split()).strip()
+            if text:
+                parts.append(text)
+        return "；".join(parts[:2])
+
+    @staticmethod
+    def _extract_pending_review(raw_result: Any) -> dict[str, Any]:
+        interrupts = raw_result.get("__interrupt__") if isinstance(raw_result, dict) else None
+        if not interrupts:
+            return {}
+        for item in interrupts:
+            value = getattr(item, "value", item)
+            if not isinstance(value, dict):
+                continue
+            action_requests = value.get("action_requests")
+            if not isinstance(action_requests, list) or not action_requests:
+                continue
+            review_configs = value.get("review_configs")
+            pending_review: dict[str, Any] = {
+                "action_requests": [
+                    dict(action)
+                    for action in action_requests
+                    if isinstance(action, dict)
+                ]
+            }
+            if isinstance(review_configs, list) and review_configs:
+                pending_review["review_configs"] = [
+                    dict(config)
+                    for config in review_configs
+                    if isinstance(config, dict)
+                ]
+            return pending_review
+        return {}
+
+    @staticmethod
+    def _build_resume_value(execution_context: dict[str, Any] | None) -> Any | None:
+        execution = execution_context or {}
+        if "resume_payload" not in execution:
+            return None
+        payload = execution.get("resume_payload")
+        if isinstance(payload, str):
+            raw = payload.strip()
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except Exception:
+                return raw
+        return payload
 
     @classmethod
     def _failed_packet(
@@ -858,6 +1057,7 @@ class ExecutorService:
         missing: list[str] | None = None,
     ) -> ExecutorResultPacket:
         return {
+            "control_state": "stopped",
             "status": "failed",
             "analysis": str(analysis or "").strip(),
             "risks": [],

@@ -61,7 +61,7 @@ Required JSON schema:
   "relation_memories": [
     {{"memory": "stable user or relation pattern", "confidence": 0.0, "evidence": ["evt_x"]}}
   ],
-  "insight_memories": [
+  "deep_insights": [
     {{"memory": "higher-level insight", "confidence": 0.0, "evidence": ["evt_x"]}}
   ],
   "soul_update": {{
@@ -110,13 +110,14 @@ Required JSON schema:
 
             memory_updates: list[str] = []
             insight_count = 0
+            deep_summary = str(parsed.get("summary", "") or "").strip()
 
             self_added = self._append_memories(
                 self.self_memory_file,
-                parsed.get("self_memories"),
+                self._coerce_memory_payload(parsed.get("self_memories")),
                 memory_type="self_memory",
                 source_events=events,
-                summary=str(parsed.get("summary", "") or ""),
+                summary=deep_summary,
             )
             if self_added:
                 memory_updates.append(f"self_memory:{self_added}")
@@ -124,10 +125,10 @@ Required JSON schema:
 
             relation_added = self._append_memories(
                 self.relation_memory_file,
-                parsed.get("relation_memories"),
+                self._coerce_memory_payload(parsed.get("relation_memories")),
                 memory_type="relation_memory",
                 source_events=events,
-                summary=str(parsed.get("summary", "") or ""),
+                summary=deep_summary,
             )
             if relation_added:
                 memory_updates.append(f"relation_memory:{relation_added}")
@@ -135,10 +136,10 @@ Required JSON schema:
 
             insight_added = self._append_memories(
                 self.insight_memory_file,
-                parsed.get("insight_memories"),
-                memory_type="insight_memory",
+                self._coerce_memory_payload(parsed.get("deep_insights")),
+                memory_type="deep_insight",
                 source_events=events,
-                summary=str(parsed.get("summary", "") or ""),
+                summary=deep_summary,
             )
             if insight_added:
                 memory_updates.append(f"insight_memory:{insight_added}")
@@ -230,6 +231,21 @@ Required JSON schema:
                 existing.add(text)
                 added += 1
         return added
+
+    @staticmethod
+    def _coerce_memory_payload(payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in payload:
+            if isinstance(item, dict):
+                normalized.append(item)
+                continue
+            text = str(item or "").strip()
+            if not text:
+                continue
+            normalized.append({"memory": text, "confidence": 0.82, "evidence": []})
+        return normalized
 
     @staticmethod
     def _read_existing_memory_texts(target: Path) -> set[str]:

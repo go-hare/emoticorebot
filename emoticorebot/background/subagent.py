@@ -35,8 +35,7 @@ class SubagentManager:
         self,
         workspace: Path,
         bus: MessageBus,
-        iq_llm,  # LangChain BaseChatModel
-        eq_llm,
+        executor_llm,  # LangChain BaseChatModel
         brave_api_key: str | None = None,
         exec_config=None,
         restrict_to_workspace: bool = False,
@@ -45,8 +44,7 @@ class SubagentManager:
 
         self.workspace = workspace
         self.bus = bus
-        self.iq_llm = iq_llm
-        self.eq_llm = eq_llm
+        self.executor_llm = executor_llm
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
@@ -113,7 +111,7 @@ class SubagentManager:
                 HumanMessage(content=task),
             ]
 
-            llm = self.iq_llm.bind_tools(tools.get_definitions())
+            llm = self.executor_llm.bind_tools(tools.get_definitions())
             max_iterations = 15
             iteration = 0
             final_result: str | None = None
