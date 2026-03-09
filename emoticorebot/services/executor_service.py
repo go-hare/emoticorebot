@@ -734,7 +734,7 @@ class ExecutorService:
             if not tool_name and not args_chunk:
                 continue
             record = dict(record_base)
-            record["event"] = "tool_call"
+            record["event"] = "executor.tool.call"
             if tool_name:
                 record["tool_name"] = tool_name
             record["content"] = args_chunk or tool_name

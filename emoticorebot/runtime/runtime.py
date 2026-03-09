@@ -434,7 +434,7 @@ class EmoticoreRuntime:
     def _execution_event_name(execution: dict[str, Any]) -> str:
         control_state = str(execution.get("control_state", "") or "completed").strip() or "completed"
         status = str(execution.get("status", "") or "none").strip() or "none"
-        return f"execution.{control_state}.{status}"
+        return f"executor.execution.{control_state}.{status}"
 
     @staticmethod
     def _summarize_resume_payload(resume_payload: Any) -> str:
@@ -909,7 +909,7 @@ class EmoticoreRuntime:
                 session_key=msg.session_key,
                 message_id=message_id,
                 execution=execution,
-                event="execution.stopped.failed",
+                event="executor.execution.stopped.failed",
                 content=str(execution.get("summary", "") or "执行已被手动停止。"),
                 timestamp=timestamp,
             )
@@ -919,7 +919,7 @@ class EmoticoreRuntime:
                 execution=execution,
                 channel=msg.channel,
                 source="runtime_control",
-                event="execution.stopped.failed",
+                event="executor.execution.stopped.failed",
                 main_brain=main_brain_payload,
             )
 
