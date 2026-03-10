@@ -50,6 +50,7 @@ async def executor_node(state: TurnState, runtime) -> TurnState:
     executor.control_state = str(result.get("control_state", "completed") or "completed")
     executor.status = str(result.get("status", "done") or "done")
     executor.analysis = str(result.get("analysis", "") or "")
+    executor.final_result = executor.analysis
     executor.risks = list(result.get("risks", []) or [])
     executor.recommended_action = str(result.get("recommended_action", "") or "")
     executor.confidence = float(result.get("confidence", 0.0) or 0.0)

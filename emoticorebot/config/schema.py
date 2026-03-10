@@ -257,6 +257,7 @@ class ProvidersConfig(Base):
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
+    ollama: ProviderConfig = Field(default_factory=ProviderConfig)
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
     deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
     groq: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -271,6 +272,23 @@ class ProvidersConfig(Base):
     volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎) API gateway
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
+
+
+class MemoryVectorConfig(Base):
+    """Long-term memory vector retrieval configuration."""
+
+    backend: str = "chroma"
+    embedding_provider: str = "default"
+    embedding_model: str = ""
+    top_k: int = 24
+    keyword_weight: float = 0.45
+    vector_weight: float = 0.55
+
+
+class MemoryConfig(Base):
+    """Long-term memory configuration."""
+
+    vector: MemoryVectorConfig = Field(default_factory=MemoryVectorConfig)
 
 
 class HeartbeatConfig(Base):
@@ -334,6 +352,7 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
 

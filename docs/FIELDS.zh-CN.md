@@ -1,38 +1,135 @@
 # emoticorebot 字段规范
 
-本文档定义当前架构下的字段与结构约束。
+本文档定义当前目标架构下的字段结构、字段语义与记录边界。
 
-边界、职责、流程请看 `ARCHITECTURE.zh-CN.md`；字段语义与结构以本文为准。
+边界、职责、流程请看 `ARCHITECTURE.zh-CN.md`；字段语义、准入规则与存储边界以本文为准。
+
+---
 
 ## 1. 适用范围
 
-当前只覆盖：
+当前覆盖：
 
+- `session` 原始记录
 - `main_brain` 运行时字段
 - `executor` 运行时字段
-- `light_insight`
-- `deep_insight`
+- `executor_context` 执行上下文包
 - `cognitive_event`
-- 长期 `memory` 记录
+- `turn_reflection`
+- `deep_reflection`
+- 统一长期 `memory`
+- 向量索引层的辅助字段
 
 当前不展开：
 
 - `vision`
 - `voice`
 - 其他未来感知输入
+- 具体 `skills` 文件内部结构
 
-## 2. 总体约束
+---
+
+## 2. 兼容命名
+
+为便于迁移，本文使用以下兼容命名：
+
+- `turn_reflection` == 旧命名 `light_insight`
+- `deep_reflection` == 旧命名 `deep_insight`
+
+说明：
+
+1. `turn_reflection` 与 `deep_reflection` 是反思机制，不是独立长期存储层
+2. 长期沉淀统一进入一个长期 `memory` 存储
+3. `deep_reflection` 可由按需触发或周期信号触发
+
+---
+
+## 3. 总体约束
 
 1. 系统只有一个主体：`main_brain`
 2. `executor` 是执行系统，不是第二主体
-3. 运行时事实与主脑解释必须分开存放
-4. 每轮必须有一次 `light_insight`
-5. `deep_insight` 由 `main_brain` 按需追加，并可被周期信号唤起
-6. 长期 `memory` 只接收 `deep_insight` 之后的稳定结论
+3. `session` 只保存原始运行时材料，不保存长期解释结论
+4. 长期记忆只有一个统一存储：`memory`
+5. 长期 `memory` 的人类可读源为 `memory.jsonl`
+6. 向量库是 `memory.jsonl` 的检索镜像，不是语义源头
+7. `main_brain` 是唯一检索者
+8. `executor` 不直接检索长期 `memory`
+9. `executor` 所需的执行经验、工具记忆、`skill_hint` 由 `main_brain` 检索并打包后传入
+10. 每轮结束都应至少产生一次 `turn_reflection`
+11. `deep_reflection` 负责阶段性归纳、用户整体评估、技能候选沉淀
+12. 长期 `memory` 只保存蒸馏后的稳定价值，不保存原始大段对话或大段工具输出
+13. 已稳定沉淀到 `skills` 的能力，不重复把完整技能内容写入 `memory`，只保存 `skill_hint`
 
-## 3. 运行时状态字段
+---
 
-### 3.1 `main_brain`
+## 4. 分层原则
+
+### 4.1 分层总表
+
+| 层级 | 代表对象 | 生命周期 | 保存内容 | 不保存内容 |
+| --- | --- | --- | --- | --- |
+| 原始层 | `session` / `executor_trace` | 当前轮到若干轮 | 原始对话、原始工具调用、暂停恢复现场 | 长期解释结论 |
+| 认知层 | `cognitive_event` | 持续累积 | 主脑视角下的一轮结构化认知切片 | 大量原始工具日志 |
+| 反思层 | `turn_reflection` / `deep_reflection` | 每轮或按需/周期产生 | 本轮解释、阶段归纳、候选长期结论 | 最终长期存储真身 |
+| 长期层 | `memory` | 长期 | 已蒸馏的稳定事实、经验、模式、提示 | 原始日志、`thread_id`、`run_id`、完整技能正文 |
+| 索引层 | `vector index` | 长期 | 检索辅助字段、向量、访问统计 | 人类可读语义源 |
+
+### 4.2 基本规则
+
+1. 原始层与长期层必须分离
+2. 反思层可以产出候选长期记忆，但不等于长期记忆本身
+3. 长期更新采用追加式写入；若修正旧结论，应新增记录并通过 `links.supersedes` 或 `links.invalidates` 建链
+4. 一条长期记忆只表达一个清晰语义单元，不混写多个不相干结论
+
+---
+
+## 5. `session` 原始记录
+
+定位：运行时原始材料，供回放、恢复、审计与短期上下文使用。
+
+建议结构：
+
+```json
+{
+  "id": "sess_evt_xxx",
+  "timestamp": "2026-03-10T20:10:00+08:00",
+  "session_id": "sess_xxx",
+  "turn_id": "turn_xxx",
+  "actor": "user",
+  "event_type": "message",
+  "content": "帮我看看这个错误",
+  "raw_payload": {},
+  "meta": {}
+}
+```
+
+### 5.1 字段
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 原始事件 ID |
+| `timestamp` | 时间戳 |
+| `session_id` | 会话 ID |
+| `turn_id` | 当前轮次 ID |
+| `actor` | `user / assistant / system / tool` |
+| `event_type` | `message / tool_call / tool_result / control / system_note` |
+| `content` | 原始文本或简要原始内容 |
+| `raw_payload` | 原始结构化载荷 |
+| `meta` | 附加元数据 |
+
+### 5.2 约束
+
+1. `session` 是原始层，不写 `importance / confidence / stability`
+2. `session` 可存原始工具大输出，但长期 `memory` 不应直接复制
+3. `session` 可用于恢复执行现场，但不应被当作长期认知结论
+
+---
+
+## 6. 运行时状态字段
+
+### 6.1 `main_brain`
+
+定位：唯一主体的当前轮运行时状态。
 
 建议结构：
 
@@ -40,20 +137,22 @@
 {
   "emotion": "平静",
   "pad": {
-    "pleasure": 0.0,
-    "arousal": 0.5,
-    "dominance": 0.5
+    "pleasure": 0.10,
+    "arousal": 0.45,
+    "dominance": 0.58
   },
   "intent": "",
   "working_hypothesis": "",
-  "question_to_executor": "",
-  "execution_action": "",
+  "retrieval_query": "",
+  "retrieval_focus": [],
+  "retrieved_memory_ids": [],
+  "execution_request": "",
+  "execution_action": "none",
   "execution_reason": "",
-  "final_decision": "",
+  "final_decision": "answer",
   "final_message": ""
 }
 ```
-
 
 | 字段 | 含义 |
 | --- | --- |
@@ -61,13 +160,18 @@
 | `pad` | 当前主脑 `PAD` 状态 |
 | `intent` | 本轮对用户意图的理解 |
 | `working_hypothesis` | 当前工作性判断 |
-| `question_to_executor` | 发给 `executor` 的内部问题 |
-| `execution_action` | 主脑对执行系统采取的控制动作 |
-| `execution_reason` | 做出该控制动作的原因 |
-| `final_decision` | `answer / ask_user / continue` |
+| `retrieval_query` | 当前检索查询文本 |
+| `retrieval_focus` | 检索关注点，如 `user / tool / relationship / skill` |
+| `retrieved_memory_ids` | 本轮实际命中的长期记忆 ID |
+| `execution_request` | 发给 `executor` 的内部请求 |
+| `execution_action` | 对 `executor` 的控制动作 |
+| `execution_reason` | 采取该控制动作的原因 |
+| `final_decision` | `answer / ask_user / continue_executor / pause_executor / stop_executor` |
 | `final_message` | 最终对外回复 |
 
-### 3.2 `executor`
+### 6.2 `executor`
+
+定位：执行系统的当前轮运行时状态。
 
 建议结构：
 
@@ -79,14 +183,14 @@
   "control_state": "idle",
   "status": "none",
   "analysis": "",
+  "final_result": "",
   "risks": [],
-  "recommended_action": "",
-  "confidence": 0.0,
   "missing": [],
-  "pending_review": {}
+  "pending_review": {},
+  "recommended_action": "answer",
+  "confidence": 0.0
 }
 ```
-
 
 | 字段 | 含义 |
 | --- | --- |
@@ -95,112 +199,56 @@
 | `run_id` | 当前执行轮次 ID |
 | `control_state` | `idle / running / paused / stopped / completed` |
 | `status` | `none / done / need_more / failed` |
-| `analysis` | 执行系统的紧凑结论 |
-| `risks` | 风险与不确定点 |
-| `recommended_action` | 建议主脑选择 `answer / ask_user / continue` |
+| `analysis` | 执行系统的紧凑分析结论 |
+| `final_result` | 面向主脑的最终执行结果 |
+| `risks` | 风险、不确定点、边界提醒 |
+| `missing` | 继续执行所缺少的信息 |
+| `pending_review` | 等待审批、编辑、确认的动作信息 |
+| `recommended_action` | 建议主脑执行的下一控制动作 |
 | `confidence` | 当前结论置信度 |
-| `missing` | 当前缺失信息 |
-| `pending_review` | 审批 / 编辑 / 恢复所需的信息 |
 
-## 4. 反思字段
+---
 
-### 4.1 `light_insight`
+## 7. `executor_context`
 
-定位：每轮必做的主脑轻反思。
+定位：`main_brain` 检索并裁剪后，传给 `executor` 的执行上下文包。
 
 建议结构：
 
 ```json
 {
-  "summary": "",
-  "relation_shift": "stable",
-  "context_update": "",
-  "next_hint": "",
-  "execution_review": {
-    "summary": "",
-    "effectiveness": "none",
-    "failure_reason": "",
-    "missing_inputs": [],
-    "next_execution_hint": ""
-  },
-  "direct_updates": {
-    "user_profile": [],
-    "soul_preferences": [],
-    "current_state_updates": {
-      "pad": null,
-      "drives": null
-    },
-    "applied": {
-      "user": false,
-      "soul": false,
-      "state": false
-    },
-    "applied_state_snapshot": {}
+  "goal": "",
+  "request": "",
+  "constraints": [],
+  "relevant_execution_memories": [],
+  "relevant_tool_memories": [],
+  "skill_hints": [],
+  "success_criteria": [],
+  "return_contract": {
+    "mode": "final_only",
+    "must_not": [
+      "direct_user_reply",
+      "memory_retrieval",
+      "memory_write"
+    ]
   }
 }
 ```
 
-
 | 字段 | 含义 |
 | --- | --- |
-| `summary` | 本轮即时洞察 |
-| `relation_shift` | 关系变化 |
-| `context_update` | 上下文变化 |
-| `next_hint` | 下一轮主脑如何承接 |
-| `execution_review` | 主脑对本轮执行的评价 |
-| `direct_updates` | 允许快速更新的候选内容 |
+| `goal` | 当前执行目标 |
+| `request` | 主脑给执行系统的内部问题 |
+| `constraints` | 用户约束、环境约束、权限约束 |
+| `relevant_execution_memories` | 与当前任务相关的执行经验记忆 |
+| `relevant_tool_memories` | 与当前工具相关的工具经验记忆 |
+| `skill_hints` | 已沉淀技能的触发提示 |
+| `success_criteria` | 成功标准 |
+| `return_contract` | 返回约束与边界说明 |
 
-#### `light_insight.execution_review`
+---
 
-
-| 字段 | 含义 | 边界 |
-| --- | --- | --- |
-| `summary` | 主脑对本轮执行路径的简要评价 | 不是原始执行日志 |
-| `effectiveness` | `high / medium / low / none` | 不是执行状态码 |
-| `failure_reason` | 阻塞或失败的主因标签 | 只保留主脑确认的主因 |
-| `missing_inputs` | 当前继续执行所缺信息 | 面向恢复，不是全部上下文 |
-| `next_execution_hint` | 如果继续执行，下一步怎么走 | 面向执行延续，不是对用户话术 |
-
-#### `light_insight.direct_updates`
-
-
-| 字段 | 含义 |
-| --- | --- |
-| `user_profile` | 本轮可快速吸收的用户稳定事实或偏好 |
-| `soul_preferences` | 本轮可快速吸收的主脑风格要求 |
-| `current_state_updates.pad` | 对 `PAD` 的小幅更新 |
-| `current_state_updates.drives` | 对 `social / energy` 的小幅更新 |
-| `applied` | 哪些更新已经真正落盘 |
-| `applied_state_snapshot` | 更新后状态快照 |
-
-### 4.2 `deep_insight`
-
-定位：由 `main_brain` 按需追加，并可被周期信号唤起的深反思。
-
-建议结构：
-
-```json
-{
-  "summary": "",
-  "self_memories": [],
-  "relation_memories": [],
-  "insight_memories": [],
-  "durable_execution_patterns": [],
-  "skill_candidates": []
-}
-```
-
-
-| 字段 | 含义 |
-| --- | --- |
-| `summary` | 一个阶段的高层总结 |
-| `self_memories` | 主脑长期自我风格与修正 |
-| `relation_memories` | 用户偏好与关系阶段变化 |
-| `insight_memories` | 高层认知洞察 |
-| `durable_execution_patterns` | 稳定执行模式、常见阻塞与有效路径 |
-| `skill_candidates` | 值得升级为 `skills` 的执行模式 |
-
-## 5. `cognitive_event`
+## 8. `cognitive_event`
 
 定位：主脑视角下的一轮结构化认知切片。
 
@@ -209,229 +257,562 @@
 ```json
 {
   "id": "evt_xxx",
-  "version": "2",
-  "timestamp": "2026-03-09T10:30:00+08:00",
+  "version": "3",
+  "timestamp": "2026-03-10T20:10:00+08:00",
   "session_id": "sess_xxx",
   "turn_id": "turn_xxx",
-  "actor": "user|assistant",
-  "event_type": "user_input|assistant_output",
-  "content": "文本内容",
-  "state": {},
-  "execution": {},
-  "light_insight": {},
+  "user_input": "用户原始输入",
+  "main_brain_state": {},
+  "retrieval": {
+    "query": "",
+    "memory_ids": []
+  },
+  "executor": {
+    "used": false,
+    "status": "none",
+    "summary": ""
+  },
+  "assistant_output": "",
+  "turn_reflection": {},
   "meta": {}
 }
 ```
 
-### 5.1 基础字段
-
-
 | 字段 | 含义 |
 | --- | --- |
-| `id` | 事件 ID |
+| `id` | 认知事件 ID |
 | `version` | 结构版本 |
 | `timestamp` | 时间戳 |
 | `session_id` | 会话 ID |
 | `turn_id` | 轮次 ID |
-| `actor` | 事件来源 |
-| `event_type` | 事件类型 |
-| `content` | 文本内容 |
+| `user_input` | 用户本轮输入 |
+| `main_brain_state` | 主脑状态切片 |
+| `retrieval.query` | 主脑检索查询 |
+| `retrieval.memory_ids` | 本轮命中的长期记忆 ID |
+| `executor.used` | 是否调用了执行系统 |
+| `executor.status` | 执行状态摘要 |
+| `executor.summary` | 执行摘要 |
+| `assistant_output` | 主脑最终对外回复 |
+| `turn_reflection` | 本轮轻反思结果 |
+| `meta` | 附加元数据 |
 
-### 5.2 `state`
+---
 
-`state` 是主脑当前轮的认知状态切片。
+## 9. 反思字段
+
+### 9.1 `turn_reflection`
+
+定位：每轮结束后的即时轻反思。
+
+建议结构：
 
 ```json
 {
-  "self_state": {
-    "pad": {
-      "pleasure": 0.12,
-      "arousal": 0.58,
-      "dominance": 0.44
-    },
-    "drives": {
-      "social": 55,
-      "energy": 90
-    },
-    "mood": "stable",
-    "tone": "warm",
-    "companionship_tension": 0.62
-  },
-  "relation_state": {
-    "stage": "building_trust",
-    "trust": 0.58,
-    "familiarity": 0.41,
-    "closeness": 0.46
-  },
-  "context_state": {
-    "topic": "architecture",
-    "intent": "discussion",
-    "recent_focus": [],
-    "unfinished_threads": []
-  },
-  "growth_state": {
-    "recent_insights": [],
-    "stable_preferences": [],
-    "pending_corrections": []
+  "summary": "",
+  "problems": [],
+  "resolution": "",
+  "outcome": "success",
+  "next_hint": "",
+  "user_updates": [],
+  "soul_updates": [],
+  "memory_candidates": [],
+  "execution_review": {
+    "attempt_count": 0,
+    "effectiveness": "medium",
+    "main_failure_reason": "",
+    "missing_inputs": [],
+    "next_execution_hint": ""
   }
 }
 ```
 
-#### `self_state`
-
-
 | 字段 | 含义 |
 | --- | --- |
-| `pad.pleasure` | 愉悦度 |
-| `pad.arousal` | 激活度 |
-| `pad.dominance` | 主导感 |
-| `drives.social` | 社交驱动力 |
-| `drives.energy` | 能量驱动力 |
-| `mood` | 当前情绪标签 |
-| `tone` | 当前主脑语气 |
-| `companionship_tension` | 陪伴张力 |
+| `summary` | 本轮发生了什么的简要洞察 |
+| `problems` | 本轮暴露的问题列表 |
+| `resolution` | 问题最终如何被解决 |
+| `outcome` | `success / partial / failed / no_execution` |
+| `next_hint` | 下一轮主脑如何承接 |
+| `user_updates` | 本轮可沉淀的用户信息候选 |
+| `soul_updates` | 本轮可沉淀的主脑风格候选 |
+| `memory_candidates` | 本轮拟写入长期 `memory` 的候选记录 |
+| `execution_review` | 对本轮执行过程的评价 |
 
-#### `relation_state`
+### 9.2 `deep_reflection`
 
+定位：按需或周期触发的深反思。
 
-| 字段 | 含义 |
-| --- | --- |
-| `stage` | 当前关系阶段 |
-| `trust` | 信任度 |
-| `familiarity` | 熟悉度 |
-| `closeness` | 亲近度 |
-
-#### `context_state`
-
-
-| 字段 | 含义 |
-| --- | --- |
-| `topic` | 当前主题 |
-| `intent` | 当前轮意图判断 |
-| `recent_focus` | 最近关注焦点 |
-| `unfinished_threads` | 当前未完线索 |
-
-#### `growth_state`
-
-
-| 字段 | 含义 |
-| --- | --- |
-| `recent_insights` | 最近洞察 |
-| `stable_preferences` | 当前已识别的稳定偏好 |
-| `pending_corrections` | 待修正认知 |
-
-### 5.3 `execution`
-
-`execution` 记录本轮执行系统客观上发生了什么。
+建议结构：
 
 ```json
 {
-  "invoked": false,
-  "control_state": "idle",
-  "status": "none",
-  "thread_id": "",
-  "run_id": "",
+  "trigger": "periodic",
   "summary": "",
-  "recommended_action": "",
-  "confidence": 0.0,
-  "missing": [],
-  "pending_review": {}
+  "user_model_updates": [],
+  "soul_updates": [],
+  "pattern_candidates": [],
+  "skill_candidates": [],
+  "memory_candidates": []
 }
 ```
 
-
 | 字段 | 含义 |
 | --- | --- |
-| `invoked` | 本轮是否激活执行系统 |
-| `control_state` | 执行控制状态 |
-| `status` | 执行结果状态 |
-| `thread_id` | 当前执行线程 ID |
-| `run_id` | 当前执行轮次 ID |
-| `summary` | 执行事实摘要 |
-| `recommended_action` | 建议主脑下一步选择 |
-| `confidence` | 当前执行结论置信度 |
-| `missing` | 当前缺失信息 |
-| `pending_review` | 等待审批 / 编辑 / 恢复的信息 |
+| `trigger` | `on_demand / periodic` |
+| `summary` | 一个阶段的高层总结 |
+| `user_model_updates` | 对用户整体画像的更新候选 |
+| `soul_updates` | 对主脑稳定风格的更新候选 |
+| `pattern_candidates` | 工具模式、行为模式、工作流模式候选 |
+| `skill_candidates` | 值得上提为 `skills` 的候选 |
+| `memory_candidates` | 拟写入长期 `memory` 的候选记录 |
 
-### 5.4 `light_insight`
+---
 
-`cognitive_event.light_insight` 直接挂载本轮 `light_insight` 结果。
+## 10. 统一长期 `memory`
 
-核心边界：
+定位：统一长期记忆层。
 
-- `execution.summary` 回答“执行做了什么”
-- `light_insight.execution_review.summary` 回答“主脑怎么看这次执行”
-- 两者相关，但不能互相替代
+存储模型：
 
-### 5.5 `meta`
+- `memory.jsonl`：人类可读、可审计、追加式写入的源存储
+- `vector index`：面向检索的镜像层
+- 两者通过同一个 `memory.id` 对齐
+
+### 10.1 记录结构
+
+建议结构：
 
 ```json
 {
-  "importance": 0.72,
-  "channel": "cli"
+  "schema_version": "memory.v1",
+  "id": "mem_xxx",
+  "created_at": "2026-03-10T20:10:00+08:00",
+  "audience": "shared",
+  "kind": "episodic",
+  "type": "turn_insight",
+  "summary": "",
+  "content": "",
+  "importance": 7,
+  "confidence": 0.92,
+  "stability": 0.55,
+  "status": "active",
+  "tags": [],
+  "source": {},
+  "links": {},
+  "payload": {},
+  "expires_at": null,
+  "metadata": {}
 }
 ```
 
+### 10.2 顶层公共字段
 
-| 字段 | 含义 |
+| 字段 | 类型 | 必填 | 含义 |
+| --- | --- | --- | --- |
+| `schema_version` | `string` | 是 | 当前固定为 `memory.v1` |
+| `id` | `string` | 是 | 记忆唯一 ID |
+| `created_at` | `string` | 是 | 生成时间，ISO 8601 |
+| `audience` | `string` | 是 | 记忆主要面向谁使用 |
+| `kind` | `string` | 是 | 记忆性质 |
+| `type` | `string` | 是 | 记忆具体类型 |
+| `summary` | `string` | 是 | 一句话摘要 |
+| `content` | `string` | 是 | 蒸馏后的完整内容 |
+| `importance` | `int` | 是 | 重要性，范围 `1-10` |
+| `confidence` | `float` | 是 | 可信度，范围 `0-1` |
+| `stability` | `float` | 是 | 稳定度，范围 `0-1` |
+| `status` | `string` | 是 | 当前状态 |
+| `tags` | `string[]` | 否 | 标签集合 |
+| `source` | `object` | 是 | 来源信息 |
+| `links` | `object` | 否 | 关联信息 |
+| `payload` | `object` | 是 | 类型扩展字段 |
+| `expires_at` | `string|null` | 否 | 过期时间 |
+| `metadata` | `object` | 否 | 额外元数据 |
+
+### 10.3 `audience`
+
+| 值 | 含义 |
 | --- | --- |
-| `importance` | 本轮重要性 |
-| `channel` | 来源渠道 |
+| `main_brain` | 主要供主脑理解用户、关系、自我与长期判断使用 |
+| `executor` | 主要供执行系统消费，但仍由主脑检索后转交 |
+| `shared` | 可同时支持主脑与执行，但仍由主脑统一检索与裁剪 |
 
-## 6. 长期 `memory` 记录
+### 10.4 `kind`
 
-当前长期记忆主文件：
+| 值 | 含义 |
+| --- | --- |
+| `episodic` | 事件性记忆，强调某一轮、某一次经历、某一次解决过程 |
+| `durable` | 稳定性记忆，强调较长期不易变化的事实、偏好、关系、画像 |
+| `procedural` | 程序性记忆，强调方法、模式、经验、技能提示 |
 
-- `memory/self_memory.jsonl`
-- `memory/relation_memory.jsonl`
-- `memory/insight_memory.jsonl`
+### 10.5 `status`
 
-统一建议结构：
+| 值 | 含义 |
+| --- | --- |
+| `active` | 当前有效 |
+| `superseded` | 已被更新版本替代 |
+| `invalid` | 已确认无效 |
+| `expired` | 时间到期后自然失效 |
+
+### 10.6 `type`
+
+#### 用户与关系相关
+
+| `type` | 推荐 `audience` | 推荐 `kind` | 含义 |
+| --- | --- | --- | --- |
+| `user_fact` | `main_brain` | `durable` | 用户稳定事实 |
+| `preference` | `main_brain` | `durable` | 用户偏好、厌恶、风格倾向 |
+| `goal` | `shared` | `durable` 或 `episodic` | 用户目标或当前任务 |
+| `constraint` | `shared` | `durable` 或 `episodic` | 用户边界、限制、禁忌、环境约束 |
+| `relationship` | `main_brain` | `durable` | 用户与人、事、物的关系状态 |
+| `soul_trait` | `main_brain` | `durable` | 主脑长期风格、自我修正与人格锚点 |
+
+#### 执行与经验相关
+
+| `type` | 推荐 `audience` | 推荐 `kind` | 含义 |
+| --- | --- | --- | --- |
+| `turn_insight` | `shared` | `episodic` | 当前轮发生了什么、问题是什么、怎么解决的 |
+| `tool_experience` | `executor` | `procedural` | 某工具在某类任务上的执行经验 |
+| `error_pattern` | `executor` | `procedural` | 错误特征到解决方案的模式 |
+| `workflow_pattern` | `executor` 或 `shared` | `procedural` | 多工具组合形成的稳定路径 |
+| `skill_hint` | `executor` | `procedural` | 已沉淀技能的触发提示，而不是技能全文 |
+
+### 10.7 `source`
+
+建议结构：
 
 ```json
 {
-  "timestamp": "2026-03-10T18:00:00+08:00",
-  "type": "self_memory|relation_memory|deep_insight|durable_execution_pattern|skill_candidate",
-  "memory": "稳定结论文本",
-  "confidence": 0.82,
-  "summary": "来自某次深反思的阶段总结",
-  "evidence": ["evt_x", "evt_y"],
-  "source_event_ids": ["evt_x", "evt_y"]
+  "session_id": "sess_xxx",
+  "turn_id": "turn_xxx",
+  "event_ids": ["evt_a", "evt_b"],
+  "producer": "main_brain.turn_reflection",
+  "tool_names": ["shell", "web"],
+  "model": "gpt-x",
+  "trace_id": "trace_xxx"
 }
 ```
 
+### 10.8 `links`
+
+建议结构：
+
+```json
+{
+  "related_ids": [],
+  "evidence_ids": [],
+  "entity_ids": [],
+  "skill_ids": [],
+  "supersedes": [],
+  "invalidates": []
+}
+```
+
+### 10.9 `payload` 扩展字段
+
+#### A. `turn_insight`
+
+```json
+{
+  "problem": "",
+  "attempt_count": 0,
+  "resolution": "",
+  "outcome": "success",
+  "follow_up": ""
+}
+```
+
+#### B. `user_fact`
+
+```json
+{
+  "subject": "user",
+  "attribute": "city",
+  "value": "杭州",
+  "normalized_value": "hangzhou"
+}
+```
+
+#### C. `preference`
+
+```json
+{
+  "subject": "user",
+  "item": "回复风格",
+  "polarity": "like",
+  "strength": 0.8,
+  "context": "希望直接、少废话"
+}
+```
+
+#### D. `goal`
+
+```json
+{
+  "goal": "减少模型交互次数",
+  "horizon": "mid",
+  "priority": 0.9,
+  "progress": "discussing"
+}
+```
+
+#### E. `constraint`
+
+```json
+{
+  "constraint": "executor 不直接检索 memory",
+  "level": "hard",
+  "scope": "architecture"
+}
+```
+
+#### F. `relationship`
+
+```json
+{
+  "target": "assistant",
+  "relation": "信任增强",
+  "sentiment": "positive",
+  "salience": 0.72
+}
+```
+
+#### G. `soul_trait`
+
+```json
+{
+  "trait": "对架构边界敏感",
+  "direction": "strengthen",
+  "basis": "多轮讨论后用户持续强调主体边界",
+  "evidence_count": 6
+}
+```
+
+#### H. `tool_experience`
+
+```json
+{
+  "tool_name": "shell",
+  "task_signature": "读取并比对文档字段",
+  "failure_mode": "无",
+  "resolution": "直接读取本地文件并结构化整理",
+  "success": true,
+  "latency_hint": "low",
+  "cost_hint": "low"
+}
+```
+
+#### I. `error_pattern`
+
+```json
+{
+  "tool_name": "web",
+  "error_signature": "403 / blocked request",
+  "error_keywords": ["403", "blocked", "forbidden"],
+  "resolution": "改走本地资料或请求用户确认权限",
+  "sample_size": 4,
+  "success_rate": 0.75
+}
+```
+
+#### J. `workflow_pattern`
+
+```json
+{
+  "goal_cluster": "字段规范整理",
+  "tool_sequence": ["shell", "shell", "analysis"],
+  "preconditions": ["本地仓库可读"],
+  "steps_summary": "先读现有文档，再抽字段，再输出结构化草案",
+  "sample_size": 5,
+  "success_rate": 0.8
+}
+```
+
+#### K. `skill_hint`
+
+```json
+{
+  "skill_id": "skill_memory_schema",
+  "skill_name": "字段规范整理",
+  "trigger": "当任务要求输出结构化字段文档时",
+  "hint": "优先抽出公共字段、枚举和 payload，再补示例",
+  "applies_to_tools": ["shell", "analysis"]
+}
+```
+
+---
+
+## 11. 向量索引层字段
+
+定位：为长期 `memory` 提供检索能力的镜像层。
+
+### 11.1 建议字段
 
 | 字段 | 含义 |
 | --- | --- |
-| `timestamp` | 记忆写入时间 |
-| `type` | 记忆类型 |
-| `memory` | 稳定结论文本 |
-| `confidence` | 置信度 |
-| `summary` | 所属阶段总结 |
-| `evidence` | 主脑归纳时引用的证据标识 |
-| `source_event_ids` | 来源事件 ID |
+| `memory_id` | 对应长期记忆 `id` |
+| `embedding` | 向量表示 |
+| `relevance_score` | 本次检索相关性分数 |
+| `importance_score` | 由长期记忆 `importance` 派生的检索权重 |
+| `recency_score` | 由 `created_at` 与当前时间派生的时间权重 |
+| `last_retrieved_at` | 最近一次被检索到的时间 |
+| `recall_count` | 被命中的次数 |
+| `vector_tags` | 为检索附加的标签镜像 |
 
-## 7. 最重要的字段边界
+### 11.2 约束
 
-### 7.1 `execution` vs `execution_review`
+1. 索引层不是人类可读语义源头
+2. 索引层可重建，`memory.jsonl` 才是语义源头
+3. `executor` 不直接查询索引层
+4. 检索排序可参考 `importance + relevance + recency`
+5. 若需访问统计，优先放在索引层，而不是 `memory.jsonl`
 
+---
 
-| 字段 | 回答的问题 | 维护者 |
-| --- | --- | --- |
-| `execution` | 这次执行客观发生了什么 | 执行结果快照提炼逻辑 |
-| `light_insight.execution_review` | 主脑如何评价这次执行 | `main_brain` 轻反思 |
+## 12. 示例
 
-### 7.2 `next_hint` vs `next_execution_hint`
+### 12.1 `turn_insight`
 
+```json
+{
+  "schema_version": "memory.v1",
+  "id": "mem_01",
+  "created_at": "2026-03-10T20:10:00+08:00",
+  "audience": "shared",
+  "kind": "episodic",
+  "type": "turn_insight",
+  "summary": "多次工具尝试后最终成功，关键阻塞是权限限制",
+  "content": "本轮为了完成任务进行了多次工具尝试。中途因权限限制导致执行受阻，最终改用替代路径成功完成。后续类似情况应优先检查权限边界并准备降级方案。",
+  "importance": 7,
+  "confidence": 0.92,
+  "stability": 0.56,
+  "status": "active",
+  "tags": ["tool", "retry", "fallback"],
+  "source": {
+    "session_id": "sess_x",
+    "turn_id": "turn_12",
+    "event_ids": ["evt_1", "evt_2"],
+    "producer": "main_brain.turn_reflection",
+    "tool_names": ["shell", "web"]
+  },
+  "links": {
+    "related_ids": [],
+    "evidence_ids": ["evt_1", "evt_2"],
+    "entity_ids": [],
+    "skill_ids": [],
+    "supersedes": [],
+    "invalidates": []
+  },
+  "payload": {
+    "problem": "权限限制导致执行受阻",
+    "attempt_count": 4,
+    "resolution": "改用替代路径",
+    "outcome": "success",
+    "follow_up": "下次先检查权限与可用降级方案"
+  },
+  "expires_at": null,
+  "metadata": {}
+}
+```
 
-| 字段 | 面向谁 | 含义 |
-| --- | --- | --- |
-| `light_insight.next_hint` | `main_brain` 下一轮承接 | 下一轮怎么接用户 |
-| `light_insight.execution_review.next_execution_hint` | `executor` 继续执行 | 如果继续执行，下一步怎么走 |
+### 12.2 `tool_experience`
 
-### 7.3 运行时材料 vs 长期记忆
+```json
+{
+  "schema_version": "memory.v1",
+  "id": "mem_02",
+  "created_at": "2026-03-10T20:12:00+08:00",
+  "audience": "executor",
+  "kind": "procedural",
+  "type": "tool_experience",
+  "summary": "读取本地文档并整理字段时，优先直接读现有文档结构",
+  "content": "当任务是整理字段规范且本地仓库可读时，先读取现有架构文档和字段文档，再输出统一字段表，通常比直接从零起草更稳定。",
+  "importance": 8,
+  "confidence": 0.88,
+  "stability": 0.73,
+  "status": "active",
+  "tags": ["doc", "schema", "local-read"],
+  "source": {
+    "session_id": "sess_x",
+    "turn_id": "turn_12",
+    "event_ids": ["evt_3"],
+    "producer": "main_brain.turn_reflection",
+    "tool_names": ["shell"]
+  },
+  "links": {
+    "related_ids": [],
+    "evidence_ids": ["evt_3"],
+    "entity_ids": [],
+    "skill_ids": [],
+    "supersedes": [],
+    "invalidates": []
+  },
+  "payload": {
+    "tool_name": "shell",
+    "task_signature": "字段文档整理",
+    "failure_mode": "",
+    "resolution": "先读取已有文档结构再整理输出",
+    "success": true,
+    "latency_hint": "low",
+    "cost_hint": "low"
+  },
+  "expires_at": null,
+  "metadata": {}
+}
+```
 
-- `thread_id / run_id / pending_review / raw trace` 属于运行时材料
-- 它们可以进入 `session`、`internal`、`checkpointer`
-- 但不能直接进入长期 `memory`
-- 长期 `memory` 只保存被 `deep_insight` 确认过的稳定结论
+### 12.3 `skill_hint`
+
+```json
+{
+  "schema_version": "memory.v1",
+  "id": "mem_03",
+  "created_at": "2026-03-10T20:20:00+08:00",
+  "audience": "executor",
+  "kind": "procedural",
+  "type": "skill_hint",
+  "summary": "遇到字段文档类任务时，优先输出公共字段、枚举、payload 三段式结构",
+  "content": "当任务目标是制定结构化字段文档时，优先划分公共字段、枚举语义和按类型扩展字段，再用少量示例校验完整性。",
+  "importance": 7,
+  "confidence": 0.84,
+  "stability": 0.81,
+  "status": "active",
+  "tags": ["skill", "schema", "writing"],
+  "source": {
+    "session_id": "sess_x",
+    "turn_id": "turn_20",
+    "event_ids": ["evt_7", "evt_8"],
+    "producer": "main_brain.deep_reflection",
+    "tool_names": ["shell", "analysis"]
+  },
+  "links": {
+    "related_ids": [],
+    "evidence_ids": ["evt_7", "evt_8"],
+    "entity_ids": [],
+    "skill_ids": ["skill_memory_schema"],
+    "supersedes": [],
+    "invalidates": []
+  },
+  "payload": {
+    "skill_id": "skill_memory_schema",
+    "skill_name": "字段规范整理",
+    "trigger": "当任务要求输出结构化字段文档时",
+    "hint": "先列公共字段，再列 type 扩展字段，最后补示例",
+    "applies_to_tools": ["shell", "analysis"]
+  },
+  "expires_at": null,
+  "metadata": {}
+}
+```
+
+---
+
+## 13. 最终边界总结
+
+1. `session` 只存原始数据
+2. `memory` 是统一长期存储
+3. `main_brain` 是唯一长期记忆检索者
+4. `executor` 只接收主脑打包后的执行上下文
+5. 每轮反思直接把蒸馏后的价值写入长期 `memory`
+6. 周期深反思负责用户整体评估、主脑稳定修正、技能候选沉淀
+7. 技能最终进入 `skills`，长期 `memory` 只保留 `skill_hint`
+8. 当同一 `skill_hint` 聚合到足够支持度后，可物化为 `workspace/skills/<skill>/SKILL.md`；技能正文不回写进 `memory`

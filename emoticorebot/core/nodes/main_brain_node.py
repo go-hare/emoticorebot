@@ -38,11 +38,14 @@ async def main_brain_node(state: TurnState, runtime) -> TurnState:
         main_brain.execution_action = str(control.get("action", "") or "")
         main_brain.execution_reason = str(control.get("reason", "") or "")
         if main_brain.execution_action == "resume":
+            main_brain.execution_request = str(
+                paused_execution.get("summary", "") or main_brain.question_to_executor or "继续当前执行"
+            ).strip()
             delegation = _build_executor_delegation(
                 runtime,
                 action="resume",
                 user_input=user_input,
-                question_to_executor=str(paused_execution.get("summary", "") or main_brain.question_to_executor or "继续当前执行").strip(),
+                question_to_executor=main_brain.execution_request,
                 intent=main_brain.intent,
                 working_hypothesis=main_brain.working_hypothesis,
                 session_id=state.get("session_id", ""),
@@ -83,6 +86,17 @@ async def main_brain_node(state: TurnState, runtime) -> TurnState:
         )
         main_brain.intent = deliberation.get("intent", "")
         main_brain.working_hypothesis = deliberation.get("working_hypothesis", "")
+        main_brain.retrieval_query = str(deliberation.get("retrieval_query", "") or user_input)
+        main_brain.retrieval_focus = [
+            str(item).strip()
+            for item in list(deliberation.get("retrieval_focus", []) or [])
+            if str(item).strip()
+        ]
+        main_brain.retrieved_memory_ids = [
+            str(item).strip()
+            for item in list(deliberation.get("retrieved_memory_ids", []) or [])
+            if str(item).strip()
+        ]
         main_brain.question_to_executor = deliberation.get("question_to_executor", "")
         main_brain.model_name = str(deliberation.get("model_name", "") or "")
         main_brain.prompt_tokens = int(deliberation.get("prompt_tokens", 0) or 0)
@@ -98,6 +112,7 @@ async def main_brain_node(state: TurnState, runtime) -> TurnState:
 
         if main_brain.execution_action == "start":
             question = str(control.get("question_to_executor", "") or main_brain.question_to_executor or "")
+            main_brain.execution_request = question
             main_brain.question_to_executor = question
             delegation = _build_executor_delegation(
                 runtime,
@@ -140,6 +155,17 @@ async def main_brain_node(state: TurnState, runtime) -> TurnState:
 
     main_brain.final_decision = str(finalize.get("decision", "") or "")
     main_brain.final_message = str(finalize.get("message", "") or "")
+    main_brain.retrieval_query = str(finalize.get("retrieval_query", "") or main_brain.retrieval_query or user_input)
+    main_brain.retrieval_focus = [
+        str(item).strip()
+        for item in list(finalize.get("retrieval_focus", []) or main_brain.retrieval_focus or [])
+        if str(item).strip()
+    ]
+    main_brain.retrieved_memory_ids = [
+        str(item).strip()
+        for item in list(finalize.get("retrieved_memory_ids", []) or main_brain.retrieved_memory_ids or [])
+        if str(item).strip()
+    ]
     main_brain.question_to_executor = str(finalize.get("question_to_executor", "") or "")
     main_brain.model_name = str(finalize.get("model_name", "") or "")
     main_brain.prompt_tokens = int(finalize.get("prompt_tokens", 0) or 0)
@@ -164,6 +190,7 @@ async def main_brain_node(state: TurnState, runtime) -> TurnState:
 
     if main_brain.execution_action == "continue":
         question = main_brain.question_to_executor
+        main_brain.execution_request = question
         delegation = _build_executor_delegation(
             runtime,
             action="continue",
@@ -254,6 +281,7 @@ def _queue_executor_question(executor: ExecutorState, question: str) -> None:
     executor.control_state = "running"
     executor.status = "none"
     executor.analysis = ""
+    executor.final_result = ""
     executor.risks = []
     executor.recommended_action = ""
     executor.confidence = 0.0
@@ -271,6 +299,7 @@ def _queue_executor_resume(executor: ExecutorState, *, user_input: str, executio
     executor.control_state = "running"
     executor.status = "none"
     executor.analysis = ""
+    executor.final_result = ""
     executor.risks = []
     executor.recommended_action = ""
     executor.confidence = 0.0
@@ -304,11 +333,14 @@ def _build_executor_delegation(runtime, **kwargs) -> dict[str, Any]:
         return dict(builder(**kwargs) or {})
     question = str(kwargs.get("question_to_executor", "") or "").strip()
     return {
-        "task_id": "",
         "goal": question,
-        "context": [],
+        "request": question,
         "constraints": [],
-        "expected_output": "",
+        "relevant_execution_memories": [],
+        "relevant_tool_memories": [],
+        "skill_hints": [],
+        "success_criteria": [],
+        "return_contract": {"mode": "final_only", "must_not": []},
     }
 
 

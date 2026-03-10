@@ -4,7 +4,7 @@
 1. 消息调度（接收消息、分发处理）
 2. 显式 turn loop 编排（`main_brain -> executor`）
 3. 会话管理（加载/保存 `dialogue` 与 `internal`）
-4. 反思调度（每轮 `light_insight`，按需 / 周期 `deep_insight`）
+4. 反思调度（每轮 `turn_reflection`，按需 / 周期 `deep_reflection`）
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from loguru import logger
 
 from emoticorebot.bus.events import InboundMessage, OutboundMessage
 from emoticorebot.bus.queue import MessageBus
-from emoticorebot.config.schema import ModelModeConfig, ProvidersConfig
+from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersConfig
 from emoticorebot.core.context import ContextBuilder
 from emoticorebot.core.model import LLMFactory
 from emoticorebot.core.turn_loop import run_turn_loop
@@ -55,6 +55,7 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         mcp_servers: dict | None = None,
         channels_config: "ChannelsConfig | None" = None,
         providers_config: "ProvidersConfig | None" = None,
+        memory_config: "MemoryConfig | None" = None,
     ):
         from emoticorebot.config.schema import ExecToolConfig
 
@@ -67,7 +68,11 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
 
         self.sessions = session_manager or SessionManager(workspace)
         self.emotion_mgr = EmotionStateManager(workspace)
-        self.context = ContextBuilder(workspace)
+        self.context = ContextBuilder(
+            workspace,
+            memory_config=memory_config,
+            providers_config=providers_config,
+        )
 
         factory = LLMFactory(
             providers_config=providers_config,
@@ -85,7 +90,9 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
             self.sessions,
             executor_mode.memory_window,
             reflection_llm=self.main_brain_llm,
-            deep_insight_decider=self.main_brain_service.decide_deep_insight,
+            deep_reflection_decider=self.main_brain_service.decide_deep_reflection,
+            memory_config=memory_config,
+            providers_config=providers_config,
         )
         self.tool_manager = ToolManager(
             workspace,
@@ -106,7 +113,7 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._reflection_locks: dict[str, asyncio.Lock] = {}
         self._reflection_tasks: dict[str, list[asyncio.Task]] = {}
-        self._deep_insight_lock = asyncio.Lock()
+        self._deep_reflection_lock = asyncio.Lock()
 
         self.subconscious = None
         self.heartbeat = None
@@ -317,12 +324,12 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
     async def run_executor_request(self, **kwargs) -> "ExecutorResultPacket":
         return await self.executor_service.run_request(**kwargs)
 
-    async def write_memory(self, state: dict):
-        return await self.memory_service.write_turn_memory(state)
+    async def write_turn_reflection(self, state: dict):
+        return await self.memory_service.write_turn_reflection(state)
 
-    async def run_deep_insight(self, *, reason: str = "", warm_limit: int = 15):
-        async with self._deep_insight_lock:
-            return await self.memory_service.run_deep_insight(reason=reason, warm_limit=warm_limit)
+    async def run_deep_reflection(self, *, reason: str = "", warm_limit: int = 15):
+        async with self._deep_reflection_lock:
+            return await self.memory_service.run_deep_reflection(reason=reason, warm_limit=warm_limit)
 
     def _schedule_turn_reflection(self, *, session_key: str, state: dict[str, Any]) -> None:
         lock = self._reflection_locks.setdefault(session_key, asyncio.Lock())
@@ -350,10 +357,10 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
     ) -> None:
         try:
             async with lock:
-                result = await self.write_memory(state)
-                if result and getattr(result, "should_run_deep_insight", False):
-                    await self.run_deep_insight(
-                        reason=str(getattr(result, "deep_insight_reason", "") or ""),
+                result = await self.write_turn_reflection(state)
+                if result and getattr(result, "should_run_deep_reflection", False):
+                    await self.run_deep_reflection(
+                        reason=str(getattr(result, "deep_reflection_reason", "") or ""),
                     )
         except Exception as exc:
             logger.warning("Turn reflection failed for {}: {}", session_key, exc)

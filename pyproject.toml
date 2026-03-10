@@ -54,7 +54,8 @@ dependencies = [
     "langchain-ollama>=0.2.0,<1.0.0",
     "langchain-anthropic>=1.0.0,<2.0.0",
     "langchain-google-genai>=4.0.0,<5.0.0",
-    "langchain-groq>=1.0.0,<2.0.0"
+    "langchain-groq>=1.0.0,<2.0.0",
+    "chromadb>=1.4.0,<2.0.0"
 ]
 
 [project.optional-dependencies]

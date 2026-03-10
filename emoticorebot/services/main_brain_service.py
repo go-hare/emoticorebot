@@ -39,22 +39,8 @@ class MainBrainService:
         chat_id: str = "",
         session_id: str = "",
     ) -> str:
+        del channel, chat_id, session_id
         system_prompt = self.context.build_main_brain_system_prompt(query=prompt)
-        if create_deep_agent is not None:
-            try:
-                raw_result = await self._invoke_deep_agent(
-                    system_prompt=system_prompt,
-                    messages=[{"role": "user", "content": prompt}],
-                    channel=channel,
-                    chat_id=chat_id,
-                    session_id=session_id,
-                )
-                text = self._extract_text(raw_result).strip()
-                if text:
-                    return text
-            except Exception:
-                pass
-
         response = await self.brain_llm.ainvoke(
             [
                 {"role": "system", "content": system_prompt},
@@ -76,31 +62,118 @@ class MainBrainService:
     ) -> MainBrainDeliberationPacket:
         lightweight_chat = not self._looks_task_like(user_input)
         if lightweight_chat:
-            prompt = (
-                "You are `main_brain`, making the first internal decision for this turn.\n"
-                "This turn looks like companionship or lightweight conversation, so you should answer directly without invoking `executor`.\n"
-                "Use the same language as the user for `final_message`.\n"
-                "Return only one JSON object.\n"
-                '{"intent":"...","working_hypothesis":"...","execution_action":"answer",'
-                '"execution_reason":"...","final_decision":"answer",'
-                '"question_to_executor":"","final_message":"..."}\n\n'
-                f"User input: {user_input}\n"
-            )
+            prompt = f"""
+你是 `main_brain`，正在为当前轮做第一次内部决策。
+
+这一轮更像陪伴聊天或轻量对话，因此默认应直接回复，不调用 `executor`。
+
+你必须只返回一个 JSON 对象，不能输出解释、前言、Markdown、代码块、补充说明。
+
+字段说明：
+- `intent`：你对用户当前意图的简短理解。
+- `working_hypothesis`：你当前的工作性判断，1 句话即可。
+- `execution_action`：这里只能填 `answer`。
+- `execution_reason`：为什么这轮不需要调用 `executor`。
+- `final_decision`：这里只能填 `answer`。
+- `question_to_executor`：必须为空字符串 `""`。
+- `final_message`：真正要回给用户的话，必须使用与用户相同的语言。
+
+硬性规则：
+1. `execution_action` 必须是 `answer`。
+2. `final_decision` 必须是 `answer`。
+3. `question_to_executor` 必须是空字符串。
+4. `final_message` 必须非空。
+5. 不要遗漏任何字段。
+
+标准结构：
+{{
+  "intent": "...",
+  "working_hypothesis": "...",
+  "execution_action": "answer",
+  "execution_reason": "...",
+  "final_decision": "answer",
+  "question_to_executor": "",
+  "final_message": "..."
+}}
+
+示例：
+{{
+  "intent": "用户在轻松聊天，希望得到自然回应",
+  "working_hypothesis": "当前不需要外部工具或复杂执行",
+  "execution_action": "answer",
+  "execution_reason": "这是轻量对话，主脑可直接完成回复",
+  "final_decision": "answer",
+  "question_to_executor": "",
+  "final_message": "当然可以呀，我在这儿陪你聊。"
+}}
+
+用户输入：{user_input}
+""".strip()
         else:
-            prompt = (
-                "You are `main_brain`, making the first internal decision for this turn.\n"
-                "Understand the user deeply, then decide whether to answer directly or invoke `executor`.\n"
-                "If `executor` is needed, compress the delegation into one clear internal request.\n"
-                "If you write `final_message`, use the same language as the user.\n"
-                "Return only one JSON object.\n"
-                '{"intent":"...","working_hypothesis":"...","execution_action":"start|answer",'
-                '"execution_reason":"...","final_decision":"continue|answer",'
-                '"question_to_executor":"...","final_message":"..."}\n'
-                "Rules:\n"
-                "- If execution_action is `start`, final_decision must be `continue`, question_to_executor must be non-empty, and final_message must be empty.\n"
-                "- If execution_action is `answer`, final_decision must be `answer`, question_to_executor must be empty, and final_message must be non-empty.\n\n"
-                f"User input: {user_input}\n"
-            )
+            prompt = f"""
+你是 `main_brain`，正在为当前轮做第一次内部决策。
+
+请先深入理解用户，再决定：
+- 直接回复；或
+- 调用 `executor` 去完成事实核查、工具执行、多步求解。
+
+你必须只返回一个 JSON 对象，不能输出解释、前言、Markdown、代码块、补充说明。
+
+字段说明：
+- `intent`：你对用户当前意图的简要理解。
+- `working_hypothesis`：你目前对问题的工作性判断。
+- `execution_action`：只能是 `start` 或 `answer`。
+- `execution_reason`：为什么要直接回复，或为什么要启动 `executor`。
+- `final_decision`：如果启动 `executor`，必须是 `continue`；如果直接回复，必须是 `answer`。
+- `question_to_executor`：发给 `executor` 的内部请求。只有在 `execution_action=start` 时填写。
+- `final_message`：只有在 `execution_action=answer` 时填写，必须使用与用户相同的语言。
+
+硬性规则：
+1. 如果 `execution_action` = `start`：
+   - `final_decision` 必须是 `continue`
+   - `question_to_executor` 必须非空
+   - `final_message` 必须是空字符串 `""`
+2. 如果 `execution_action` = `answer`：
+   - `final_decision` 必须是 `answer`
+   - `question_to_executor` 必须是空字符串 `""`
+   - `final_message` 必须非空
+3. 不要遗漏任何字段。
+
+标准结构：
+{{
+  "intent": "...",
+  "working_hypothesis": "...",
+  "execution_action": "start|answer",
+  "execution_reason": "...",
+  "final_decision": "continue|answer",
+  "question_to_executor": "...",
+  "final_message": "..."
+}}
+
+启动 executor 示例：
+{{
+  "intent": "用户希望解决一个需要工具和多步分析的问题",
+  "working_hypothesis": "仅靠主脑当前上下文不足以保证结果准确，需要执行系统补齐事实",
+  "execution_action": "start",
+  "execution_reason": "需要调用工具并进行多步执行",
+  "final_decision": "continue",
+  "question_to_executor": "请检查当前问题需要哪些工具，完成分析并返回最终执行结果、风险和缺失信息。",
+  "final_message": ""
+}}
+
+直接回复示例：
+{{
+  "intent": "用户在表达情绪并希望被承接",
+  "working_hypothesis": "当前更适合由主脑直接回应，不需要执行系统介入",
+  "execution_action": "answer",
+  "execution_reason": "这轮主要是理解和回应，不需要工具或事实核查",
+  "final_decision": "answer",
+  "question_to_executor": "",
+  "final_message": "我在，先别急，你可以慢慢跟我说。"
+}}
+
+用户输入：{user_input}
+""".strip()
 
         raw_text, metrics = await self._run_main_brain_task(
             history=history,
@@ -111,6 +184,8 @@ class MainBrainService:
             channel=channel,
             chat_id=chat_id,
             session_id=session_id,
+            query=user_input,
+            retrieval_focus=["user", "relationship"] if lightweight_chat else ["user", "goal", "constraint", "tool", "skill"],
         )
 
         parsed = self._parse_json(raw_text)
@@ -149,23 +224,69 @@ class MainBrainService:
         chat_id: str = "",
         session_id: str = "",
     ) -> MainBrainFinalizePacket:
-        prompt = (
-            "You are `main_brain`, making the final decision after reading the current executor result.\n"
-            "Combine your first judgment with the executor report.\n"
-            "Choose one final_decision: answer, ask_user, or continue.\n"
-            "Use the same language as the user for `final_message`.\n"
-            "Return only one JSON object.\n"
-            '{"final_decision":"answer|ask_user|continue","final_message":"...",'
-            '"question_to_executor":"if continuing, provide the next internal question; otherwise empty"}\n'
-            "Rules:\n"
-            "- If final_decision is `continue`, question_to_executor must be non-empty and final_message should be empty.\n"
-            "- If final_decision is `answer` or `ask_user`, final_message must be non-empty and question_to_executor must be empty.\n\n"
-            f"User input: {user_input}\n"
-            f"main_brain intent: {main_brain_intent or '(empty)'}\n"
-            f"main_brain working hypothesis: {self._compact_text(main_brain_working_hypothesis, limit=140) or '(empty)'}\n"
-            f"executor summary: {self._compact_text(executor_summary, limit=320) or '(empty)'}\n"
-            f"Loop count: {loop_count}\n"
-        )
+        prompt = f"""
+你是 `main_brain`，正在读取本轮 `executor` 结果并做最终决策。
+
+请综合：
+- 你的初始判断
+- 当前 `executor` 返回结果
+- 用户真实需求
+
+然后只在以下三种决策中选择一种：
+- `answer`：已经可以直接对用户回复
+- `ask_user`：必须让用户补充信息
+- `continue`：还需要继续让 `executor` 往下执行
+
+你必须只返回一个 JSON 对象，不能输出解释、前言、Markdown、代码块、补充说明。
+
+字段说明：
+- `final_decision`：只能是 `answer`、`ask_user`、`continue`。
+- `final_message`：当决策为 `answer` 或 `ask_user` 时，要给用户看的话；必须使用与用户相同的语言。
+- `question_to_executor`：当决策为 `continue` 时，发给 `executor` 的下一条内部问题。
+
+硬性规则：
+1. 如果 `final_decision` = `continue`：
+   - `question_to_executor` 必须非空
+   - `final_message` 必须是空字符串 `""`
+2. 如果 `final_decision` = `answer` 或 `ask_user`：
+   - `final_message` 必须非空
+   - `question_to_executor` 必须是空字符串 `""`
+3. 不要遗漏任何字段。
+
+标准结构：
+{{
+  "final_decision": "answer|ask_user|continue",
+  "final_message": "...",
+  "question_to_executor": "..."
+}}
+
+继续执行示例：
+{{
+  "final_decision": "continue",
+  "final_message": "",
+  "question_to_executor": "请继续处理尚未解决的部分，补齐关键缺失信息后返回最终结果。"
+}}
+
+要求用户补充示例：
+{{
+  "final_decision": "ask_user",
+  "final_message": "我还缺一个关键信息：你希望我以哪个时间范围来查询？",
+  "question_to_executor": ""
+}}
+
+直接回复示例：
+{{
+  "final_decision": "answer",
+  "final_message": "我先把当前能确认的结论告诉你：这个方向是可行的。",
+  "question_to_executor": ""
+}}
+
+用户输入：{user_input}
+主脑意图：{main_brain_intent or '（空）'}
+主脑工作假设：{self._compact_text(main_brain_working_hypothesis, limit=140) or '（空）'}
+executor 摘要：{self._compact_text(executor_summary, limit=320) or '（空）'}
+当前循环次数：{loop_count}
+""".strip()
 
         raw_text, metrics = await self._run_main_brain_task(
             history=history,
@@ -176,6 +297,8 @@ class MainBrainService:
             channel=channel,
             chat_id=chat_id,
             session_id=session_id,
+            query=(f"{user_input}\n{executor_summary}".strip()),
+            retrieval_focus=["user", "goal", "constraint", "tool", "skill"],
         )
 
         parsed = self._parse_json(raw_text)
@@ -362,68 +485,61 @@ class MainBrainService:
             working_hypothesis=working_hypothesis,
             intent=intent,
         )
-        task_anchor = str(
-            execution.get("run_id", "")
-            or execution.get("thread_id", "")
-            or f"{session_id or 'session'}:{max(1, int(loop_count or 0))}"
-        ).strip()
-        context: list[str] = []
-        if user_input:
-            context.append(f"User request: {self._compact_text(user_input, limit=220)}")
-        if intent:
-            context.append(f"Main-brain intent: {self._compact_text(intent, limit=140)}")
-        if working_hypothesis:
-            context.append(f"Working hypothesis: {self._compact_text(working_hypothesis, limit=180)}")
-        execution_summary = str(execution.get("summary", "") or "").strip()
-        if execution_summary:
-            context.append(f"Latest executor summary: {self._compact_text(execution_summary, limit=220)}")
-
+        bundle_query_parts = [goal, user_input, intent, working_hypothesis, str(execution.get("summary", "") or "")]
+        bundle = self.context.build_executor_memory_bundle(
+            query="\n".join(part for part in bundle_query_parts if str(part).strip()),
+            limit=6,
+        )
         missing = [str(item).strip() for item in list(execution.get("missing", []) or []) if str(item).strip()]
-        if missing:
-            context.append("Open missing inputs: " + "; ".join(missing[:4]))
-
-        risks = [str(item).strip() for item in list(execution.get("risks", []) or []) if str(item).strip()]
-        if risks:
-            context.append("Known risks: " + "; ".join(risks[:3]))
-
         constraints = [
-            "Do not produce the final user-facing reply.",
-            "Return only compact execution facts and next-step advice.",
-            "Respect workspace, tool, and approval boundaries.",
+            "不要生成最终面向用户的回复。",
+            "不要直接检索或写入长期记忆。",
+            "只使用 main_brain 已经提供的相关记忆包。",
+            "只返回最终执行结果，并保持事实紧凑、建议明确。",
+            "遵守工作区、工具和审批边界。",
         ]
         normalized_action = str(action or "").strip().lower()
         if normalized_action == "continue":
-            constraints.append("Continue only the unresolved part of the task.")
+            constraints.append("只继续处理当前尚未解决的部分。")
         if normalized_action == "resume":
-            constraints.append("Resume the paused execution from the provided runtime context.")
+            constraints.append("基于提供的运行时上下文恢复已暂停的执行。")
+        if missing:
+            constraints.append("如果条件允许，优先解决当前已知的缺失输入。")
 
         delegation = {
-            "task_id": f"executor:{task_anchor}",
             "goal": goal,
-            "context": context,
+            "request": goal,
             "constraints": constraints,
-            "expected_output": (
-                "Return one JSON result with status, analysis, risks, missing, "
-                "recommended_action, confidence, and pending_review when needed."
-            ),
+            "relevant_execution_memories": list(bundle.get("relevant_execution_memories", []) or []),
+            "relevant_tool_memories": list(bundle.get("relevant_tool_memories", []) or []),
+            "skill_hints": list(bundle.get("skill_hints", []) or []),
+            "success_criteria": [
+                "返回一个 main_brain 可以直接吸收的最终执行结果。",
+                "只有在确实影响完成度时，才列出阻塞风险或缺失输入。",
+                "尽量减少内部往返，能在 executor 内部收敛就不要再拆分。",
+            ],
+            "return_contract": {
+                "mode": "final_only",
+                "must_not": ["direct_user_reply", "memory_retrieval", "memory_write"],
+            },
         }
         resume_payload = execution.get("resume_payload")
         if resume_payload not in (None, "", [], {}):
             delegation["resume_payload"] = resume_payload
         return delegation
 
-    def decide_deep_insight(
+    def decide_deep_reflection(
         self,
         *,
         state: dict[str, Any],
         importance: float,
         execution: dict[str, Any],
-        light_insight: dict[str, Any],
+        turn_reflection: dict[str, Any],
     ) -> tuple[bool, str]:
         main_brain = state.get("main_brain")
         execution_review = (
-            light_insight.get("execution_review")
-            if isinstance(light_insight, dict) and isinstance(light_insight.get("execution_review"), dict)
+            turn_reflection.get("execution_review")
+            if isinstance(turn_reflection, dict) and isinstance(turn_reflection.get("execution_review"), dict)
             else {}
         )
         control_state = str(execution.get("control_state", "") or "").strip().lower()
@@ -431,15 +547,10 @@ class MainBrainService:
         missing = [str(item).strip() for item in list(execution.get("missing", []) or []) if str(item).strip()]
         pending_review = execution.get("pending_review") if isinstance(execution.get("pending_review"), dict) else {}
         effectiveness = str((execution_review or {}).get("effectiveness", "none") or "none").strip().lower()
-        failure_reason = str((execution_review or {}).get("failure_reason", "") or "").strip()
-        relation_shift = str(light_insight.get("relation_shift", "") or "").strip().lower() if isinstance(light_insight, dict) else ""
-        direct_updates = (
-            light_insight.get("direct_updates")
-            if isinstance(light_insight, dict) and isinstance(light_insight.get("direct_updates"), dict)
-            else {}
-        )
-        user_profile = list(direct_updates.get("user_profile", []) or []) if isinstance(direct_updates, dict) else []
-        soul_preferences = list(direct_updates.get("soul_preferences", []) or []) if isinstance(direct_updates, dict) else []
+        failure_reason = str((execution_review or {}).get("main_failure_reason", "") or "").strip()
+        user_updates = [str(item).strip() for item in list(turn_reflection.get("user_updates", []) or []) if str(item).strip()]
+        soul_updates = [str(item).strip() for item in list(turn_reflection.get("soul_updates", []) or []) if str(item).strip()]
+        memory_candidates = list(turn_reflection.get("memory_candidates", []) or []) if isinstance(turn_reflection, dict) else []
         execution_reason = str(getattr(main_brain, "execution_reason", "") or "").strip() if main_brain is not None else ""
 
         if execution.get("invoked") and (status in {"failed", "need_more"} or control_state == "paused"):
@@ -448,10 +559,10 @@ class MainBrainService:
             return True, "main_brain_execution_blocked_or_waiting_review"
         if execution.get("invoked") and effectiveness in {"low", "medium"} and failure_reason:
             return True, f"main_brain_execution_review:{failure_reason}"
-        if importance >= 0.82 and relation_shift in {"trust_up", "trust_down"}:
-            return True, "main_brain_high_importance_relation_shift"
-        if importance >= 0.82 and (user_profile or soul_preferences):
-            return True, "main_brain_high_importance_direct_updates"
+        if importance >= 0.82 and (user_updates or soul_updates):
+            return True, "main_brain_high_importance_identity_updates"
+        if importance >= 0.82 and memory_candidates:
+            return True, "main_brain_high_importance_memory_candidates"
         if execution_reason in {
             "loop_limit_reached",
             "main_brain_requested_executor_followup",
@@ -471,32 +582,29 @@ class MainBrainService:
         channel: str,
         chat_id: str,
         session_id: str,
+        query: str,
+        retrieval_focus: list[str] | None = None,
     ) -> tuple[str, dict[str, Any]]:
+        del channel, chat_id, session_id
+        records = self.context.query_main_brain_memories(query=query, limit=8)
         messages = self.context.build_messages(
             history=history,
             current_message=current_message,
             current_emotion=current_emotion,
             pad_state=pad_state,
             internal_executor_summaries=internal_executor_summaries,
+            query=query,
         )
-        system_prompt = str(messages[0].get("content", "") or "") if messages else ""
-        payload_messages = messages[1:] if len(messages) > 1 else [{"role": "user", "content": current_message}]
-
-        if create_deep_agent is not None:
-            try:
-                raw_result = await self._invoke_deep_agent(
-                    system_prompt=system_prompt,
-                    messages=payload_messages,
-                    channel=channel,
-                    chat_id=chat_id,
-                    session_id=session_id,
-                )
-                return self._extract_text(raw_result), self._extract_result_metrics(raw_result)
-            except Exception:
-                pass
-
         response = await self.brain_llm.ainvoke(messages)
-        return extract_message_text(response), extract_message_metrics(response)
+        metrics = extract_message_metrics(response)
+        metrics.update(
+            {
+                "retrieval_query": query,
+                "retrieval_focus": list(retrieval_focus or []),
+                "retrieved_memory_ids": [str(record.get("id", "") or "") for record in records if str(record.get("id", "") or "")],
+            }
+        )
+        return extract_message_text(response), metrics
 
     def _build_agent(self, system_prompt: str):
         if create_deep_agent is None:

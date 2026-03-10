@@ -14,10 +14,12 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ReflectionResult:
-    persona_delta: str | None = None
-    user_insight: str | None = None
-    memory_updates: list[str] = field(default_factory=list)
-    insight_count: int = 0
+    summary: str = ""
+    memory_ids: list[str] = field(default_factory=list)
+    memory_count: int = 0
+    skill_hint_count: int = 0
+    materialized_skills: list[str] = field(default_factory=list)
+    materialized_skill_count: int = 0
 
 
 class ReflectionEngine:
@@ -28,28 +30,26 @@ class ReflectionEngine:
         self.workspace = workspace
 
     async def run_cycle(self, warm_limit: int = 15) -> ReflectionResult:
-        persona_delta: str | None = None
-        user_insight: str | None = None
-        memory_updates: list[str] = []
-        insight_count = 0
+        result = await self.runtime.run_deep_reflection(reason="periodic_signal", warm_limit=warm_limit)
 
-        result = await self.runtime.run_deep_insight(reason="periodic_signal", warm_limit=warm_limit)
-        if result.insight_count:
-            persona_delta = result.persona_delta
-            user_insight = result.user_insight
-            memory_updates.extend(result.memory_updates)
-            insight_count += result.insight_count
-
-        if insight_count:
-            logger.info("ReflectionEngine: consolidated {} long-term memories", insight_count)
+        if result.memory_count:
+            logger.info("ReflectionEngine: consolidated {} long-term memories", result.memory_count)
         elif warm_limit:
             logger.debug("ReflectionEngine: nothing to consolidate")
+        if result.materialized_skill_count:
+            logger.info(
+                "ReflectionEngine: materialized {} skills ({})",
+                result.materialized_skill_count,
+                ", ".join(result.materialized_skills[:5]),
+            )
 
         return ReflectionResult(
-            persona_delta=persona_delta,
-            user_insight=user_insight,
-            memory_updates=memory_updates,
-            insight_count=insight_count,
+            summary=result.summary,
+            memory_ids=list(result.memory_ids),
+            memory_count=int(result.memory_count),
+            skill_hint_count=int(result.skill_hint_count),
+            materialized_skills=list(result.materialized_skills),
+            materialized_skill_count=int(result.materialized_skill_count),
         )
 
 

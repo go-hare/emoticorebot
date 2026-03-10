@@ -226,22 +226,25 @@ class ExecutorService:
             "你是 executor，负责复杂问题的规划、执行、核查与结果收口。\n"
             "你处理的是 main_brain -> executor 这条内部执行链路，不负责对用户做最终表达。\n\n"
             f"当前工作区目录是 `{workspace}`。\n"
-            "工作区虚拟路径通过 `/state/` 暴露，长期记忆通过 `/memory/` 暴露，技能目录通过 `/skills/workspace/` 与 `/skills/builtin/` 暴露。\n\n"
+            "工作区虚拟路径通过 `/state/` 暴露，技能目录通过 `/skills/workspace/` 与 `/skills/builtin/` 暴露。\n"
+            "与任务相关的执行经验、工具经验、skill 提示，会由 main_brain 直接放进委托上下文。\n\n"
             "## 职责\n"
             "1. 接收 main_brain 委托的问题并转成可执行步骤。\n"
             "2. 必要时拆分步骤、调用工具、使用 skills，并在单个执行内完成汇总。\n"
-            "3. 给出清晰结论、风险、缺失信息和下一步建议。\n"
-            "4. 只关注把事情做对，不模仿主脑的陪伴语气。\n\n"
+            "3. 在单次执行链路内尽量收敛，减少无意义的中间汇报。\n"
+            "4. 给出清晰结论、风险、缺失信息和下一步建议。\n"
+            "5. 只关注把事情做对，不模仿主脑的陪伴语气。\n\n"
             "## 边界\n"
             "1. 不负责最终对用户表达。\n"
             "2. 不把内部分析伪装成用户可见对话。\n"
             "3. 不负责关系判断、人格维护、情绪陪伴和主脑反思。\n"
-            "4. 不更新 `SOUL.md`、`USER.md`，也不负责 `light_insight` / `deep_insight`。\n"
-            "5. 不自行读写长期 `memory` 沉淀文件；原始执行轨迹只作为运行时材料，是否进入 `light_insight` / `deep_insight` 由主脑决定。\n"
+            "4. 不更新 `SOUL.md`、`USER.md`，也不负责 `turn_reflection` / `deep_reflection`。\n"
+            "5. 不直接检索、读写长期 `memory`，也不假设自己拥有长期解释权。\n"
             "6. 不保留临时草稿、一次性中间产物、原始噪声输出。\n\n"
             "## 输出规则\n"
             "1. 最终只输出协议要求的 JSON。\n"
-            "2. JSON 只包含 status、analysis、risks、missing、recommended_action、confidence，以及确有必要时的 pending_review。"
+            "2. JSON 只包含 status、analysis、risks、missing、recommended_action、confidence，以及确有必要时的 pending_review。\n"
+            "3. 优先返回最终结果；只有在真的被阻塞时才返回缺失信息或待审批动作。"
         )
         skills_context = self._build_internal_skill_context()
         extras = [section for section in (skills_context,) if section]
@@ -268,7 +271,6 @@ class ExecutorService:
 
     def _build_backend(self) -> Any | None:
         workspace = Path(self.context.workspace).expanduser().resolve()
-        memory_root = (workspace / "memory").resolve()
         workspace_skills_root = (workspace / "skills").resolve()
         builtin_skills_root = BUILTIN_SKILLS_DIR.resolve()
 
@@ -278,9 +280,7 @@ class ExecutorService:
             return None
 
         def build_agent_backend(rt: Any) -> Any:
-            memory_root.mkdir(parents=True, exist_ok=True)
             routes: dict[str, Any] = {
-                "/memory/": FilesystemBackend(root_dir=memory_root, virtual_mode=True),
                 "/state/": FilesystemBackend(root_dir=workspace, virtual_mode=True),
             }
             if builtin_skills_root.exists():
@@ -418,12 +418,58 @@ class ExecutorService:
             parts.append("最近内部上下文：")
             parts.extend(compact_history)
 
+        parts.append("main_brain 已提供相关执行经验、工具经验和 skill 提示；不要自行检索长期 memory。")
         parts.append(
-            "请完成复杂问题的分析与执行。最终请只输出一个 JSON 对象："
-            '{"status":"completed|needs_input|uncertain|failed","analysis":"...",'
-            '"risks":["..."],"missing":["..."],'
-            '"recommended_action":"answer|ask_user|continue","confidence":0.0,'
-            '"pending_review":{}}'
+            "你必须只返回一个 JSON 对象，不能输出解释、前言、Markdown、代码块、补充说明。\n"
+            "\n"
+            "字段说明：\n"
+            "- `status`：执行整体状态，只能是 `completed`、`needs_input`、`uncertain`、`failed`。\n"
+            "- `analysis`：给 main_brain 的紧凑结论，说明你做了什么、得出了什么结果。\n"
+            "- `risks`：风险、不确定性、边界提醒，没有就返回空数组 `[]`。\n"
+            "- `missing`：继续执行所缺少的信息，没有就返回空数组 `[]`。\n"
+            "- `recommended_action`：建议 main_brain 下一步做什么，只能是 `answer`、`ask_user`、`continue`。\n"
+            "- `confidence`：0 到 1 之间的小数。\n"
+            "- `pending_review`：只有确实存在审批/编辑/确认动作时才填写对象，否则返回空对象 `{{}}`。\n"
+            "\n"
+            "填写规则：\n"
+            "1. 如果任务已经完成且可交付，`status` 应为 `completed`，通常 `recommended_action` 应为 `answer`。\n"
+            "2. 如果必须向用户索取信息，`status` 应为 `needs_input`，`recommended_action` 应为 `ask_user`。\n"
+            "3. 如果还有必要继续内部执行，`recommended_action` 才能是 `continue`。\n"
+            "4. `analysis` 必须非空。\n"
+            "5. 不要遗漏任何字段。\n"
+            "\n"
+            "标准结构：\n"
+            "{{\n"
+            '  "status": "completed|needs_input|uncertain|failed",\n'
+            '  "analysis": "...",\n'
+            '  "risks": ["..."],\n'
+            '  "missing": ["..."],\n'
+            '  "recommended_action": "answer|ask_user|continue",\n'
+            '  "confidence": 0.0,\n'
+            '  "pending_review": {{}}\n'
+            "}}\n"
+            "\n"
+            "已完成示例：\n"
+            "{{\n"
+            '  "status": "completed",\n'
+            '  "analysis": "已完成检查，并得到可直接交付的最终结果。",\n'
+            '  "risks": [],\n'
+            '  "missing": [],\n'
+            '  "recommended_action": "answer",\n'
+            '  "confidence": 0.91,\n'
+            '  "pending_review": {{}}\n'
+            "}}\n"
+            "\n"
+            "缺少信息示例：\n"
+            "{{\n"
+            '  "status": "needs_input",\n'
+            '  "analysis": "已经明确下一步需要的参数，但当前输入不足，无法继续执行。",\n'
+            '  "risks": ["缺少关键参数会导致结果不准确"],\n'
+            '  "missing": ["时间范围", "目标地址"],\n'
+            '  "recommended_action": "ask_user",\n'
+            '  "confidence": 0.84,\n'
+            '  "pending_review": {{}}\n'
+            "}}"
         )
         return "\n".join(parts)
 
@@ -435,16 +481,29 @@ class ExecutorService:
             delegation = {}
 
         goal = str(delegation.get("goal", "") or "").strip() or str(fallback_request or "").strip()
-        context = [str(item).strip() for item in list(delegation.get("context", []) or []) if str(item).strip()]
+        request = str(delegation.get("request", "") or "").strip() or goal
         constraints = [str(item).strip() for item in list(delegation.get("constraints", []) or []) if str(item).strip()]
-        expected_output = str(delegation.get("expected_output", "") or "").strip()
+        relevant_execution_memories = [
+            item for item in list(delegation.get("relevant_execution_memories", []) or []) if isinstance(item, dict)
+        ]
+        relevant_tool_memories = [
+            item for item in list(delegation.get("relevant_tool_memories", []) or []) if isinstance(item, dict)
+        ]
+        skill_hints = [item for item in list(delegation.get("skill_hints", []) or []) if isinstance(item, dict)]
+        success_criteria = [
+            str(item).strip() for item in list(delegation.get("success_criteria", []) or []) if str(item).strip()
+        ]
+        return_contract = dict(delegation.get("return_contract", {}) or {})
 
         normalized = {
-            "task_id": str(delegation.get("task_id", "") or "").strip(),
             "goal": goal,
-            "context": context,
+            "request": request,
             "constraints": constraints,
-            "expected_output": expected_output,
+            "relevant_execution_memories": relevant_execution_memories,
+            "relevant_tool_memories": relevant_tool_memories,
+            "skill_hints": skill_hints,
+            "success_criteria": success_criteria,
+            "return_contract": return_contract,
         }
         resume_payload = delegation.get("resume_payload")
         if resume_payload not in (None, "", [], {}):
@@ -456,23 +515,52 @@ class ExecutorService:
         goal = str(delegation.get("goal", "") or "").strip()
         parts = [f"内部目标：{goal}"] if goal else []
 
-        task_id = str(delegation.get("task_id", "") or "").strip()
-        if task_id:
-            parts.append(f"任务标识：{task_id}")
-
-        context = [str(item).strip() for item in list(delegation.get("context", []) or []) if str(item).strip()]
-        if context:
-            parts.append("任务上下文：")
-            parts.extend(f"- {item}" for item in context[:6])
+        request = str(delegation.get("request", "") or "").strip()
+        if request:
+            parts.append(f"主脑内部请求：{request}")
 
         constraints = [str(item).strip() for item in list(delegation.get("constraints", []) or []) if str(item).strip()]
         if constraints:
             parts.append("执行约束：")
             parts.extend(f"- {item}" for item in constraints[:6])
 
-        expected_output = str(delegation.get("expected_output", "") or "").strip()
-        if expected_output:
-            parts.append(f"期望输出：{expected_output}")
+        execution_memories = [item for item in list(delegation.get("relevant_execution_memories", []) or []) if isinstance(item, dict)]
+        if execution_memories:
+            parts.append("相关执行经验：")
+            parts.extend(
+                f"- [{str(item.get('type', '') or 'memory')}] {str(item.get('summary', '') or item.get('content', '')).strip()}"
+                for item in execution_memories[:3]
+                if str(item.get("summary", "") or item.get("content", "")).strip()
+            )
+
+        tool_memories = [item for item in list(delegation.get("relevant_tool_memories", []) or []) if isinstance(item, dict)]
+        if tool_memories:
+            parts.append("相关工具经验：")
+            parts.extend(
+                f"- [{str(item.get('type', '') or 'memory')}] {str(item.get('summary', '') or item.get('content', '')).strip()}"
+                for item in tool_memories[:3]
+                if str(item.get("summary", "") or item.get("content", "")).strip()
+            )
+
+        skill_hints = [item for item in list(delegation.get("skill_hints", []) or []) if isinstance(item, dict)]
+        if skill_hints:
+            parts.append("Skill 提示：")
+            parts.extend(
+                f"- {str(item.get('summary', '') or item.get('content', '')).strip()}"
+                for item in skill_hints[:3]
+                if str(item.get("summary", "") or item.get("content", "")).strip()
+            )
+
+        success_criteria = [
+            str(item).strip() for item in list(delegation.get("success_criteria", []) or []) if str(item).strip()
+        ]
+        if success_criteria:
+            parts.append("成功标准：")
+            parts.extend(f"- {item}" for item in success_criteria[:5])
+
+        return_contract = delegation.get("return_contract") if isinstance(delegation.get("return_contract"), dict) else {}
+        if return_contract:
+            parts.append(f"返回契约：{json.dumps(return_contract, ensure_ascii=False)}")
 
         resume_payload = delegation.get("resume_payload")
         if resume_payload not in (None, "", [], {}):

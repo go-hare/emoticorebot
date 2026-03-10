@@ -45,6 +45,9 @@ class MainBrainDeliberationPacket(TypedDict, total=False):
     need_executor: bool
     question_to_executor: str
     final_message: str
+    retrieval_query: str
+    retrieval_focus: list[str]
+    retrieved_memory_ids: list[str]
     model_name: str
     prompt_tokens: int
     completion_tokens: int
@@ -59,6 +62,9 @@ class MainBrainFinalizePacket(TypedDict, total=False):
     decision: Literal["answer", "ask_user", "continue"]
     message: str
     question_to_executor: str
+    retrieval_query: str
+    retrieval_focus: list[str]
+    retrieved_memory_ids: list[str]
     model_name: str
     prompt_tokens: int
     completion_tokens: int
@@ -86,6 +92,7 @@ class ExecutorState:
     control_state: ExecutionControlState = "idle"
     status: ExecutionStatus = "none"
     analysis: str = ""
+    final_result: str = ""
     risks: list[str] = field(default_factory=list)
     recommended_action: ExecutorRecommendedAction = ""
     confidence: float = 0.0
@@ -108,6 +115,10 @@ class MainBrainState:
     )
     intent: str = ""
     working_hypothesis: str = ""
+    retrieval_query: str = ""
+    retrieval_focus: list[str] = field(default_factory=list)
+    retrieved_memory_ids: list[str] = field(default_factory=list)
+    execution_request: str = ""
     question_to_executor: str = ""
     final_decision: MainBrainFinalDecision = ""
     final_message: str = ""

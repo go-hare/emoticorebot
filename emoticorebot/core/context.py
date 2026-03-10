@@ -3,22 +3,40 @@
 from __future__ import annotations
 
 import base64
-import json
 import mimetypes
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from emoticorebot.cognitive import CognitiveEvent
+from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.core.skills import SkillsLoader
+from emoticorebot.memory import MemoryStore
 
 
 class ContextBuilder:
-    """Assemble contextual prompts for the main-brain layer."""
+    """Assemble prompts and memory bundles for the main-brain layer."""
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        memory_config: MemoryConfig | None = None,
+        providers_config: ProvidersConfig | None = None,
+    ):
         self.workspace = workspace
         self.skills = SkillsLoader(workspace)
+        self.memory_store = MemoryStore(
+            workspace,
+            memory_config=memory_config,
+            providers_config=providers_config,
+        )
+
+    def query_main_brain_memories(self, *, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        return self.memory_store.query(query, audiences=("main_brain", "shared"), limit=limit)
+
+    def build_executor_memory_bundle(self, *, query: str, limit: int = 6) -> dict[str, list[dict[str, Any]]]:
+        return self.memory_store.build_executor_bundle(query=query, limit=limit)
 
     def build_main_brain_system_prompt(
         self,
@@ -31,29 +49,29 @@ class ContextBuilder:
 
         main_brain_rules = self._load_main_brain_rules()
         if main_brain_rules:
-            parts.append(f"## Main Brain Rules\n\n{main_brain_rules}")
+            parts.append(f"## 主脑规则\n\n{main_brain_rules}")
 
         soul = self._load_file("SOUL.md")
         if soul:
-            parts.append(f"## SOUL\n\n{soul}")
+            parts.append(f"## 灵魂锚点（SOUL）\n\n{soul}")
 
         user = self._load_file("USER.md")
         if user:
-            parts.append(f"## USER\n\n{user}")
+            parts.append(f"## 用户锚点（USER）\n\n{user}")
 
-        long_term_memory = self._load_long_term_memory_context()
+        long_term_memory = self.memory_store.build_main_brain_context(query=query, limit=8)
         if long_term_memory:
-            parts.append(f"## Long-term Memory\n\n{long_term_memory}")
+            parts.append(long_term_memory)
 
         state = self._load_file("current_state.md")
         if state:
-            parts.append(f"## Current State\n\n{state}")
+            parts.append(f"## 当前状态\n\n{state}")
 
         executor_summaries = [
             str(item).strip() for item in (internal_executor_summaries or []) if str(item).strip()
         ]
         if executor_summaries:
-            parts.append("## Recent Internal Summaries\n\n" + "\n".join(f"- {item}" for item in executor_summaries[:5]))
+            parts.append("## 最近的 Executor 摘要\n\n" + "\n".join(f"- {item}" for item in executor_summaries[:5]))
 
         parts.extend(
             CognitiveEvent.build_cognitive_sections(
@@ -67,37 +85,39 @@ class ContextBuilder:
         return "\n\n---\n\n".join(parts)
 
     def _get_main_brain_identity(self) -> str:
-        return f"""# Main Brain
+        return f"""# 主脑
 
-You are the main brain of a companionship-first AI.
-You lead understanding, tone, judgment, reflection, and the final user-facing response.
+你是这个 AI 系统唯一的主体。
+你统一承担理性判断、情绪理解、决策控制、反思成长，以及最终对外表达。
 
-## Current Time
+## 当前时间
 {self._get_datetime_str()}
 
-## Responsibilities
-1. Handle the user-visible dialogue.
-2. Combine SOUL.md, USER.md, long-term memory, current state, and cognitive context to understand the user.
-3. Decide whether the current turn should be answered directly or should invoke the executor.
-4. Delegate to the executor only for factual checking, tool use, complex analysis, or multi-step execution.
-5. Keep final expression authority. The executor is an internal capability, not the external speaker.
-6. Trigger light_insight after every turn, and decide whether deep_insight should be scheduled.
+## 核心职责
+1. 处理所有用户可见对话。
+2. 综合 `SOUL.md`、`USER.md`、统一长期 `memory`、当前状态和最近认知事件。
+3. 判断当前轮应该直接回复，还是委托给 `executor`。
+4. 由你自己完成长期记忆检索；`executor` 不允许直接检索长期记忆。
+5. 只把与任务相关的执行经验、工具经验和技能提示传给 `executor`。
+6. 保持最终表达权，用户可见回复必须由你亲自完成。
+7. 每轮结束后触发 `turn_reflection`，并决定是否需要 `deep_reflection`。
 
-## Boundaries
-1. Do not expose raw logs, JSON, tool traces, or internal chain-of-thought.
-2. Do not treat internal main_brain <-> executor discussion as user-visible conversation.
-3. Do not confuse execution materials with relationship memory, tone, or personality.
-4. All user-facing replies must stay aligned with SOUL.md.
+## 边界
+1. 不要暴露原始日志、JSON、工具轨迹或内部思维过程。
+2. 不要把运行时执行状态误当成稳定的长期记忆。
+3. 不要让 `executor` 变成第二人格或第二个对外说话者。
+4. 在保持理性判断的同时，确保回复始终和 `SOUL.md` 一致。
 
-## Memory Orientation
-1. Relationship, preference, tone, and emotional continuity belong to the companionship side.
-2. Facts, execution materials, and tool learnings come from the executor side, but only the main brain decides whether they become stable memory or future skills.
-3. Use PAD, relation state, and user context to adjust tone and companionship tension."""
+## 架构取向
+1. `main_brain` 是长期 `memory` 的唯一检索者。
+2. `executor` 是通用执行系统，职责是返回最终执行结果。
+3. 长期记忆只有一个统一事实源：`memory.jsonl`。
+4. 高频且稳定的执行模式，未来可以结晶为 `skills`。"""
 
     @staticmethod
     def _get_datetime_str() -> str:
         now = datetime.now()
-        weekday = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][now.weekday()]
+        weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now.weekday()]
         return now.strftime(f"%Y-%m-%d %H:%M {weekday}")
 
     def _load_file(self, filename: str) -> str:
@@ -117,97 +137,12 @@ You lead understanding, tone, judgment, reflection, and the final user-facing re
                 "# `main_brain` 主脑规则",
                 "# main_brain 主脑规则",
                 "# Main Brain 主脑规则",
-                "# Main Brain 执行层规则",
-                "# 主脑执行层规则",
                 "# Main Brain Rules",
             ],
         )
         if extracted:
             return extracted
         return self._default_main_brain_rules()
-
-    def _load_long_term_memory_context(self, *, per_store_limit: int = 3) -> str:
-        memory_dir = self.workspace / "memory"
-        if not memory_dir.exists():
-            return ""
-
-        sections = [
-            self._format_memory_store(
-                memory_dir / "self_memory.jsonl",
-                title="Self Memory",
-                per_store_limit=per_store_limit,
-            ),
-            self._format_memory_store(
-                memory_dir / "relation_memory.jsonl",
-                title="Relation Memory",
-                per_store_limit=per_store_limit,
-            ),
-            self._format_memory_store(
-                memory_dir / "insight_memory.jsonl",
-                title="Insight Memory",
-                per_store_limit=per_store_limit,
-            ),
-        ]
-        return "\n\n".join(section for section in sections if section)
-
-    def _format_memory_store(self, path: Path, *, title: str, per_store_limit: int) -> str:
-        entries = self._read_memory_entries(path, limit=per_store_limit)
-        if not entries:
-            return ""
-
-        bullets: list[str] = []
-        for entry in entries:
-            memory_text = self._compact_prompt_text(str(entry.get("memory", "") or ""), limit=180)
-            if not memory_text:
-                continue
-
-            suffix: list[str] = []
-            timestamp = str(entry.get("timestamp", "") or "").strip()
-            if timestamp:
-                suffix.append(timestamp[:10])
-            try:
-                confidence = float(entry.get("confidence", 0.0) or 0.0)
-            except Exception:
-                confidence = 0.0
-            if confidence > 0.0:
-                suffix.append(f"confidence={confidence:.2f}")
-            bullets.append(
-                f"- {memory_text}" + (f" ({'; '.join(suffix)})" if suffix else "")
-            )
-
-        if not bullets:
-            return ""
-        return f"### {title}\n" + "\n".join(bullets)
-
-    @staticmethod
-    def _read_memory_entries(path: Path, *, limit: int) -> list[dict[str, Any]]:
-        if not path.exists():
-            return []
-
-        entries: list[dict[str, Any]] = []
-        try:
-            for raw_line in path.read_text(encoding="utf-8").splitlines():
-                line = raw_line.strip()
-                if not line:
-                    continue
-                try:
-                    item = json.loads(line)
-                except Exception:
-                    continue
-                if isinstance(item, dict):
-                    entries.append(item)
-        except Exception:
-            return []
-        if limit <= 0:
-            return entries
-        return entries[-limit:]
-
-    @staticmethod
-    def _compact_prompt_text(text: str, *, limit: int = 160) -> str:
-        compact = " ".join(str(text or "").split())
-        if len(compact) <= limit:
-            return compact
-        return compact[: limit - 1] + "…"
 
     @staticmethod
     def _extract_markdown_section(content: str, *, headings: list[str]) -> str:
@@ -227,12 +162,12 @@ You lead understanding, tone, judgment, reflection, and the final user-facing re
     @staticmethod
     def _default_main_brain_rules() -> str:
         return (
-            "1. Default to companionship-first understanding.\n"
-            "2. Only delegate when executor help materially improves correctness or execution.\n"
-            "3. Keep responses natural, warm, and grounded in SOUL.md.\n"
-            "4. Trigger light_insight every turn after the reply, and only schedule deep_insight when the turn is worth deeper consolidation.\n"
-            "5. When the user gives direct facts or stable preferences, surface them for memory updates.\n"
-            "6. When executor output is incomplete, decide whether to ask the user or continue internal deliberation."
+            "1. 默认以陪伴式理解为先，但同时保持高质量决策。\n"
+            "2. 在决定是否调用 executor 之前，先由主脑自行检索长期记忆。\n"
+            "3. 只有当 executor 能明显提升正确性或完成度时，才进行委托。\n"
+            "4. executor 应接收紧凑的执行上下文包，并返回最终结果，而不是闲聊式中间状态。\n"
+            "5. 每轮都触发 turn_reflection，只有在确实值得时才安排 deep_reflection。\n"
+            "6. 稳定的用户信息、自我风格和关系结论应进入长期记忆或锚点，而不是停留在原始运行时日志中。"
         )
 
     def build_messages(
@@ -243,10 +178,10 @@ You lead understanding, tone, judgment, reflection, and the final user-facing re
         pad_state: tuple[float, float, float] | None = None,
         media: list[str] | None = None,
         internal_executor_summaries: list[str] | None = None,
+        query: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Build a standard chat message list for the current turn."""
         system = self.build_main_brain_system_prompt(
-            query=current_message,
+            query=query if query is not None else current_message,
             current_emotion=current_emotion,
             pad_state=pad_state,
             internal_executor_summaries=internal_executor_summaries,
@@ -268,7 +203,6 @@ You lead understanding, tone, judgment, reflection, and the final user-facing re
         return messages
 
     def build_media_context(self, media: list[str] | None) -> list[dict[str, Any]]:
-        """Convert local file paths into multimodal message content."""
         if not media:
             return []
         items: list[dict[str, Any]] = []

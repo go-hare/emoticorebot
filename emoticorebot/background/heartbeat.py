@@ -20,18 +20,18 @@ _HEARTBEAT_TOOL = {
     "type": "function",
     "function": {
         "name": "heartbeat",
-        "description": "Report heartbeat decision after reviewing tasks.",
+        "description": "检查任务后，报告本次心跳的决策结果。",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
                     "enum": ["skip", "run"],
-                    "description": "skip = nothing to do, run = has active tasks",
+                    "description": "skip 表示当前没有要做的事，run 表示存在需要执行的任务",
                 },
                 "tasks": {
                     "type": "string",
-                    "description": "Natural-language summary of active tasks (required for run)",
+                    "description": "当前活跃任务的自然语言总结（当 action=run 时必填）",
                 },
             },
             "required": ["action"],
@@ -80,11 +80,11 @@ class HeartbeatService:
         resp = await self.runtime.executor_llm.ainvoke(
             [
                 SystemMessage(
-                    content="You are a heartbeat agent. Call the heartbeat tool to report your decision."
+                    content="你是一个心跳检查代理。请调用 heartbeat 工具报告你的判断结果。"
                 ),
                 HumanMessage(
                     content=(
-                        "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
+                        "请阅读下面的 HEARTBEAT.md，并判断当前是否存在需要执行的活跃任务。\n\n"
                         f"{content}"
                     )
                 ),
