@@ -56,9 +56,10 @@
 8. `executor` 不直接检索长期 `memory`
 9. `executor` 所需的执行经验、工具记忆、`skill_hint` 由 `main_brain` 检索并打包后传入
 10. 每轮结束都应至少产生一次 `turn_reflection`
-11. `deep_reflection` 负责阶段性归纳、用户整体评估、技能候选沉淀
-12. 长期 `memory` 只保存蒸馏后的稳定价值，不保存原始大段对话或大段工具输出
-13. 已稳定沉淀到 `skills` 的能力，不重复把完整技能内容写入 `memory`，只保存 `skill_hint`
+11. `turn_reflection` 可把高置信用户信息、主脑风格修正和小幅 `state_update` 直接写回托管锚点或状态文件
+12. `deep_reflection` 负责阶段性归纳、用户整体评估、技能候选沉淀
+13. 长期 `memory` 只保存蒸馏后的稳定价值，不保存原始大段对话或大段工具输出
+14. 已稳定沉淀到 `skills` 的能力，不重复把完整技能内容写入 `memory`，只保存 `skill_hint`
 
 ---
 
@@ -72,7 +73,7 @@
 | 认知层 | `cognitive_event` | 持续累积 | 主脑视角下的一轮结构化认知切片 | 大量原始工具日志 |
 | 反思层 | `turn_reflection` / `deep_reflection` | 每轮或按需/周期产生 | 本轮解释、阶段归纳、候选长期结论 | 最终长期存储真身 |
 | 长期层 | `memory` | 长期 | 已蒸馏的稳定事实、经验、模式、提示 | 原始日志、`thread_id`、`run_id`、完整技能正文 |
-| 索引层 | `vector index` | 长期 | 检索辅助字段、向量、访问统计 | 人类可读语义源 |
+| 索引层 | `memory/chroma/` | 长期 | 检索辅助字段、向量、访问统计 | 人类可读语义源 |
 
 ### 4.2 基本规则
 
@@ -302,7 +303,7 @@
 
 ### 9.1 `turn_reflection`
 
-定位：每轮结束后的即时轻反思。
+定位：每轮结束后的即时轻反思，也是本轮快速直写的结构化来源。
 
 建议结构：
 
@@ -315,6 +316,13 @@
   "next_hint": "",
   "user_updates": [],
   "soul_updates": [],
+  "state_update": {
+    "should_apply": false,
+    "confidence": 0.0,
+    "reason": "",
+    "pad_delta": {},
+    "drives_delta": {}
+  },
   "memory_candidates": [],
   "execution_review": {
     "attempt_count": 0,
@@ -333,10 +341,21 @@
 | `resolution` | 问题最终如何被解决 |
 | `outcome` | `success / partial / failed / no_execution` |
 | `next_hint` | 下一轮主脑如何承接 |
-| `user_updates` | 本轮可沉淀的用户信息候选 |
-| `soul_updates` | 本轮可沉淀的主脑风格候选 |
+| `user_updates` | 本轮可直接写入 `USER.md` 托管锚点块的高置信用户信息候选 |
+| `soul_updates` | 本轮可直接写入 `SOUL.md` 托管锚点块的高置信主脑风格候选 |
+| `state_update` | 对 `current_state.md` 的小幅增量更新建议 |
 | `memory_candidates` | 本轮拟写入长期 `memory` 的候选记录 |
 | `execution_review` | 对本轮执行过程的评价 |
+
+`state_update` 约束：
+
+| 字段 | 含义 |
+| --- | --- |
+| `should_apply` | 是否建议应用本次状态增量 |
+| `confidence` | 置信度，低于阈值时不应应用 |
+| `reason` | 应用该状态微调的原因 |
+| `pad_delta` | `pleasure / arousal / dominance` 的小幅增量 |
+| `drives_delta` | `social / energy` 的小幅增量 |
 
 ### 9.2 `deep_reflection`
 
@@ -346,25 +365,29 @@
 
 ```json
 {
-  "trigger": "periodic",
   "summary": "",
-  "user_model_updates": [],
+  "memory_candidates": [],
+  "user_updates": [],
   "soul_updates": [],
-  "pattern_candidates": [],
-  "skill_candidates": [],
-  "memory_candidates": []
+  "skill_hints": [
+    {
+      "summary": "",
+      "content": "",
+      "trigger": "",
+      "hint": "",
+      "skill_name": ""
+    }
+  ]
 }
 ```
 
 | 字段 | 含义 |
 | --- | --- |
-| `trigger` | `on_demand / periodic` |
 | `summary` | 一个阶段的高层总结 |
-| `user_model_updates` | 对用户整体画像的更新候选 |
-| `soul_updates` | 对主脑稳定风格的更新候选 |
-| `pattern_candidates` | 工具模式、行为模式、工作流模式候选 |
-| `skill_candidates` | 值得上提为 `skills` 的候选 |
 | `memory_candidates` | 拟写入长期 `memory` 的候选记录 |
+| `user_updates` | 对用户整体画像的稳定更新候选，可写入 `USER.md` 深反思锚点块 |
+| `soul_updates` | 对主脑稳定风格的更新候选，可写入 `SOUL.md` 深反思锚点块 |
+| `skill_hints` | 值得沉淀为 `skill_hint` 的执行提示候选 |
 
 ---
 
@@ -375,7 +398,7 @@
 存储模型：
 
 - `memory.jsonl`：人类可读、可审计、追加式写入的源存储
-- `vector index`：面向检索的镜像层
+- `memory/chroma/`：面向检索的 Chroma 镜像层
 - 两者通过同一个 `memory.id` 对齐
 
 ### 10.1 记录结构
@@ -645,26 +668,57 @@
 
 定位：为长期 `memory` 提供检索能力的镜像层。
 
-### 11.1 建议字段
+当前实现：
+
+- 检索镜像目录：`memory/chroma/`
+- 向量后端：`Chroma PersistentClient`
+- 事实源头：`memory/memory.jsonl`
+- 访问统计 sidecar：`memory/chroma/_access_stats.json`
+
+### 11.1 Chroma 集合镜像字段
 
 | 字段 | 含义 |
 | --- | --- |
 | `memory_id` | 对应长期记忆 `id` |
-| `embedding` | 向量表示 |
-| `relevance_score` | 本次检索相关性分数 |
-| `importance_score` | 由长期记忆 `importance` 派生的检索权重 |
-| `recency_score` | 由 `created_at` 与当前时间派生的时间权重 |
-| `last_retrieved_at` | 最近一次被检索到的时间 |
-| `recall_count` | 被命中的次数 |
-| `vector_tags` | 为检索附加的标签镜像 |
+| `audience` | 镜像的受众字段 |
+| `kind` | 镜像的记忆性质字段 |
+| `type` | 镜像的记忆类型字段 |
+| `status` | 镜像的状态字段 |
+| `tags_text` | 由 `tags` 拼接出的检索文本 |
+| `importance` | 从长期记忆镜像过来的重要性 |
+| `confidence` | 从长期记忆镜像过来的可信度 |
+| `stability` | 从长期记忆镜像过来的稳定度 |
+| `created_at` | 创建时间镜像 |
+| `expires_at` | 过期时间镜像 |
 
-### 11.2 约束
+### 11.2 访问统计 sidecar 字段
+
+`memory/chroma/_access_stats.json` 的记录按 `memory_id` 聚合，建议结构：
+
+```json
+{
+  "mem_xxx": {
+    "recall_count": 3,
+    "last_retrieved_at": "2026-03-11T10:10:00+08:00",
+    "last_relevance_score": 0.812345
+  }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `recall_count` | 该记忆被最终命中的累计次数 |
+| `last_retrieved_at` | 最近一次最终命中的时间 |
+| `last_relevance_score` | 最近一次最终命中时的向量相关分数 |
+
+### 11.3 约束
 
 1. 索引层不是人类可读语义源头
 2. 索引层可重建，`memory.jsonl` 才是语义源头
 3. `executor` 不直接查询索引层
-4. 检索排序可参考 `importance + relevance + recency`
-5. 若需访问统计，优先放在索引层，而不是 `memory.jsonl`
+4. 当前实现采用词法分数 + 向量分数的混合排序
+5. 访问统计优先放在索引 sidecar，而不是 `memory.jsonl`
+6. `last_relevance_score` 是检索统计，不等于长期事实语义
 
 ---
 

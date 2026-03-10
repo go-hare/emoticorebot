@@ -138,20 +138,27 @@ flowchart LR
 
     B --> C["cognitive_event\n主脑认知切片"]
     C --> TR["turn_reflection\n每轮轻反思"]
-    TR --> B
+    TR --> M["memory.jsonl\n统一长期记忆"]
+    TR --> STATE["current_state.md\n实时状态快照"]
+    TR --> SOUL["SOUL.md\n主脑锚点（逐轮快写块）"]
+    TR --> USER["USER.md\n用户锚点（逐轮快写块）"]
 
     C --> DR["deep_reflection\n按需/周期深反思"]
     TR --> DR
-    DR --> M["memory.jsonl\n统一长期记忆"]
-    M --> V["vector index\n检索镜像"]
-    DR --> SOUL["SOUL.md\n主脑长期锚点"]
-    DR --> USER["USER.md\n用户长期锚点"]
+    DR --> M
+    M --> V["memory/chroma/\nChroma 检索镜像"]
+    V --> VS["_access_stats.json\n检索访问统计"]
+    DR --> SOUL2["SOUL.md\n深反思沉淀块"]
+    DR --> USER2["USER.md\n深反思沉淀块"]
     DR --> SK["skills\n高频稳定能力沉淀"]
 
     M --> B
     V --> B
+    STATE --> B
     SOUL --> B
     USER --> B
+    SOUL2 --> B
+    USER2 --> B
 ```
 
 ### 4.2 一句话关系定义
@@ -193,7 +200,7 @@ session / internal / checkpointer
 | 反思层 | `turn_reflection / deep_reflection` | 每轮或按需/周期产生 | 本轮解释、阶段归纳、候选长期结论 | 最终长期存储真身 |
 | 长期层 | `memory` | 长期 | 已蒸馏的稳定事实、经验、模式、提示 | 原始日志、`thread_id`、`run_id`、完整技能正文 |
 | 能力层 | `skills` | 长期 | 高频稳定可复用能力 | 一次性任务上下文 |
-| 索引层 | `vector index` | 长期 | 向量、检索辅助字段、访问统计 | 人类可读语义源 |
+| 索引层 | `memory/chroma/` | 长期 | Chroma 向量镜像、检索辅助元数据、访问统计 | 人类可读语义源 |
 
 ### 5.3 分层原则
 
@@ -227,10 +234,13 @@ session / internal / checkpointer
   - 人类可读
   - append-only
   - 语义源头
-- `vector index`
-  - 面向检索
-  - 存放向量与访问统计
+- `memory/chroma/`
+  - 基于 `Chroma PersistentClient` 的本地检索镜像
+  - 存放向量、镜像元数据与访问统计
   - 可重建，不作为事实源头
+- `memory/chroma/_access_stats.json`
+  - 记录 `recall_count`、`last_retrieved_at`、`last_relevance_score`
+  - 仅服务检索排序与观察，不回写事实语义
 
 ### 6.3 分类方式
 
@@ -436,7 +446,7 @@ sequenceDiagram
 
 ### 9.1 `turn_reflection`
 
-定位：每轮必做的轻反思。
+定位：每轮必做的轻反思，也是当前轮的快速直写入口。
 
 作用：
 
@@ -445,6 +455,7 @@ sequenceDiagram
 - 回看本轮执行路径是否有效
 - 生成下一轮承接提示
 - 产出长期记忆候选
+- 将高置信、低歧义的信息快速写回 `USER.md`、`SOUL.md`、`current_state.md`
 
 每轮真正要做的事情：
 
@@ -453,16 +464,24 @@ sequenceDiagram
 - 判断执行是否有效、冗余、阻塞、缺参
 - 给下一轮 `main_brain` 一个非常短的承接提示
 - 提炼值得沉淀的本轮经验
+- 对用户稳定信息、主脑风格修正、实时状态增量做小而安全的直写
 
 它默认不做的事情：
 
 - 不直接当作长期存储库
+- 不重写整份 `USER.md`、`SOUL.md`、`current_state.md`
 - 不把单轮噪声直接定格为长期人格或长期用户画像
 - 不把原始工具日志直接当成成长结果保存
 
+实现约束：
+
+- `USER.md` / `SOUL.md` 通过独立锚点块增量维护，保留人工内容
+- `current_state.md` 只接受小幅 `state_update` 增量，不接受整文件重写
+- 若置信度不足，则只保留在 `turn_reflection` 结果中，不直写
+
 ### 9.2 `deep_reflection`
 
-定位：按需或周期触发的深反思。
+定位：按需或周期触发的深反思，用来做跨轮归纳与长期沉淀。
 
 作用：
 
@@ -472,12 +491,19 @@ sequenceDiagram
 - 评估 `main_brain` 的稳定风格与修正方向
 - 归纳工具经验、错误模式、工作流模式
 - 发现可上提为 `skills` 的能力候选
+- 真正把稳定结论写回 `USER.md` / `SOUL.md` 的深反思托管块
 
 它不应该做的事情：
 
 - 不直接覆盖当前轮在线状态
 - 不因单轮异常就修改长期人格
 - 不写未经验证的高置信长期结论
+
+实现约束：
+
+- `deep_reflection` 回写的是长期稳定结论，而不是本轮即时状态
+- `deep_reflection` 可以把 `skill_hint` 聚合后物化到 `workspace/skills/`
+- `deep_reflection` 与 `turn_reflection` 使用不同锚点块，避免互相覆盖
 
 ### 9.3 工具经验如何并入反思
 
@@ -577,7 +603,9 @@ sequenceDiagram
 ### 11.4 更新规则
 
 - `turn_reflection` 可快速更新高置信、明确声明、可直接采纳的信息
+- `turn_reflection` 对 `USER.md` / `SOUL.md` 的写入使用独立托管锚点块，对 `current_state.md` 只做小幅增量更新
 - 长期高层结论仍应优先由 `deep_reflection` 决定
+- `deep_reflection` 对 `USER.md` / `SOUL.md` 的写入使用独立托管锚点块
 - `current_state.md` 属于状态管理，不应替代长期记忆
 
 ---
@@ -593,7 +621,7 @@ sequenceDiagram
 | 执行状态恢复 | `checkpointer` |
 | 在线对话持久化 | `JSONL session persistence` |
 | 长期记忆源存储 | `memory.jsonl` |
-| 长期记忆检索镜像 | `vector store / vector index` |
+| 长期记忆检索镜像 | `Chroma PersistentClient`（`memory/chroma/`） |
 | 虚拟路径映射 | `CompositeBackend` |
 | 技能加载 | `skills=["/skills/"]` |
 
@@ -648,6 +676,7 @@ session -> cognitive_event -> memory -> skills
 | 认知事件 | `memory/cognitive_events.jsonl` | 每轮认知切片 |
 | 统一长期记忆 | `memory/memory.jsonl` | 统一长期语义源 |
 | 向量镜像 | `memory/chroma/` | 长期记忆检索镜像 |
+| 向量访问统计 | `memory/chroma/_access_stats.json` | 检索命中次数、最近命中时间、最近相关分数 |
 | 主脑状态快照 | `current_state.md` | 当前 PAD、drives 与短期状态 |
 | 主脑人格锚点 | `SOUL.md` | 长期人格与风格锚点 |
 | 用户认知锚点 | `USER.md` | 长期用户画像锚点 |
