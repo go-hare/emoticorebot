@@ -501,18 +501,18 @@ emoticorebot channels status  # Show channel connection status
 
 ```text
 emoticorebot/
-├── core/                 # Fusion orchestration (LangGraph graph, state, router, context)
+├── core/                 # Turn orchestration (LangGraph graph, state, router, context)
 │   ├── graph.py          #   LangGraph graph definition & compilation
-│   ├── state.py          #   FusionState / IQState / EQState
-│   ├── router.py         #   FusionRouter (EQ ↔ IQ ↔ Memory routing)
-│   ├── context.py        #   EQ / IQ prompt context builder
+│   ├── state.py          #   TurnState / MainBrainState / ExecutorState
+│   ├── router.py         #   Main brain / executor / memory routing
+│   ├── context.py        #   Shared prompt context builder
 │   ├── model.py          #   LLMFactory (multi-provider)
 │   ├── mcp.py            #   MCP client integration
 │   ├── skills.py         #   Skill loader
-│   └── nodes/            #   eq_node / iq_node / memory_node
+│   └── nodes/            #   main_brain_node / executor_node / memory_node
 ├── services/             # Service layer
-│   ├── eq_service.py     #   EQ lead service (deliberate / finalize)
-│   ├── iq_service.py     #   IQ execution layer (Deep Agents + subagents)
+│   ├── main_brain_service.py # Main brain service (deliberate / finalize / control)
+│   ├── executor_service.py   # Executor layer (Deep Agents + subagents)
 │   ├── memory_service.py #   Memory read/write service
 │   └── tool_manager.py   #   Tool registry & execution
 ├── memory/               # Layered memory implementation

@@ -12,7 +12,7 @@ ExecutionStatus = Literal["none", "done", "need_more", "failed"]
 ExecutorPacketStatus = Literal["completed", "needs_input", "uncertain", "failed"]
 ExecutorRecommendedAction = Literal["", "answer", "ask_user", "continue"]
 MainBrainFinalDecision = Literal["", "answer", "ask_user", "continue"]
-MainBrainExecutionAction = Literal["", "start", "continue", "pause", "stop", "resume", "answer"]
+MainBrainExecutionAction = Literal["", "start", "continue", "pause", "stop", "resume", "defer", "answer"]
 
 
 class ExecutorResultPacket(TypedDict, total=False):

@@ -170,9 +170,10 @@ class ExecutorService:
             raise RuntimeError("deepagents is not available")
 
         tools = self._build_tools()
-        subagents = self._build_subagents()
-        skills = self._build_skill_paths()
         backend = self._build_backend()
+        use_virtual_skill_paths = backend is not None
+        subagents = self._build_subagents(virtual_skill_paths=use_virtual_skill_paths)
+        skills = self._build_skill_paths(virtual_mode=use_virtual_skill_paths)
         checkpointer = self._ensure_checkpointer()
         interrupt_on = self._build_interrupt_on()
 
@@ -229,7 +230,7 @@ class ExecutorService:
             "你是 executor，负责复杂问题的规划、执行、核查与结果收口。\n"
             "你处理的是 main_brain -> executor 这条内部执行链路，不负责对用户做最终表达。\n\n"
             f"当前工作区目录是 `{workspace}`。\n"
-            "工作区虚拟路径通过 `/state/` 暴露，内置技能通过 `/skills/` 暴露。\n\n"
+            "工作区虚拟路径通过 `/state/` 暴露，技能目录通过 `/skills/workspace/` 与 `/skills/builtin/` 暴露。\n\n"
             "## 职责\n"
             "1. 接收 main_brain 委托的问题并转成可执行步骤。\n"
             "2. 必要时拆分步骤、调用工具、使用 skills、委派子代理。\n"
@@ -271,6 +272,7 @@ class ExecutorService:
 
     def _build_backend(self) -> Any | None:
         workspace = Path(self.context.workspace).expanduser().resolve()
+        workspace_skills_root = (workspace / "skills").resolve()
         builtin_skills_root = BUILTIN_SKILLS_DIR.resolve()
 
         try:
@@ -279,12 +281,22 @@ class ExecutorService:
             return None
 
         def build_agent_backend(rt: Any) -> Any:
+            routes: dict[str, Any] = {
+                "/state/": FilesystemBackend(root_dir=workspace, virtual_mode=True),
+            }
+            if builtin_skills_root.exists():
+                routes["/skills/builtin/"] = FilesystemBackend(
+                    root_dir=builtin_skills_root,
+                    virtual_mode=True,
+                )
+            if workspace_skills_root.exists():
+                routes["/skills/workspace/"] = FilesystemBackend(
+                    root_dir=workspace_skills_root,
+                    virtual_mode=True,
+                )
             return CompositeBackend(
                 default=StateBackend(rt),
-                routes={
-                    "/state/": FilesystemBackend(root_dir=workspace, virtual_mode=True),
-                    "/skills/": FilesystemBackend(root_dir=builtin_skills_root, virtual_mode=True),
-                },
+                routes=routes,
             )
 
         return build_agent_backend
@@ -292,10 +304,10 @@ class ExecutorService:
     def _build_tools(self) -> list[Any]:
         return self._build_registry_tools(["web_search", "web_fetch", "message", "cron"])
 
-    def _build_subagents(self) -> list[Any]:
+    def _build_subagents(self, *, virtual_skill_paths: bool = False) -> list[Any]:
         research_tools = self._build_registry_tools(["web_search", "web_fetch"])
         workspace_tools = self._build_registry_tools(["message", "cron"])
-        skill_paths = self._build_skill_paths()
+        skill_paths = self._build_skill_paths(virtual_mode=virtual_skill_paths)
 
         subagents: list[dict[str, Any]] = [
             {
@@ -387,18 +399,19 @@ class ExecutorService:
             return dict[str, Any]
         return str
 
-    def _build_skill_paths(self) -> list[str]:
+    def _build_skill_paths(self, *, virtual_mode: bool = False) -> list[str]:
         workspace = getattr(self.context, "workspace", None)
         paths: list[str] = []
+        workspace_skills: Path | None = None
 
         if workspace is not None:
             workspace_skills = (Path(workspace) / "skills").resolve()
-            if workspace_skills.exists():
-                paths.append(str(workspace_skills))
 
         builtin_skills = BUILTIN_SKILLS_DIR.resolve()
-        if builtin_skills.exists() and str(builtin_skills) not in paths:
-            paths.append(str(builtin_skills))
+        if builtin_skills.exists():
+            paths.append("/skills/builtin/" if virtual_mode else str(builtin_skills))
+        if workspace_skills is not None and workspace_skills.exists():
+            paths.append("/skills/workspace/" if virtual_mode else str(workspace_skills))
 
         return paths
 

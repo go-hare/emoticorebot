@@ -878,8 +878,8 @@ def build_agent_backend(rt):
   - 作为 `/memory/`、`/skills/`、`/state/` 的虚拟路径路由层
 - `checkpointer`
   - 作为 `executor` 的暂停恢复状态层
-- `services/eq_service.py` 与 `services/iq_service.py`
-  - 后续按新命名迁移为 `main_brain` 与 `executor`
+- `services/main_brain_service.py` 与 `services/executor_service.py`
+  - 当前已经按新命名落地，分别承载主脑决策与执行系统能力
 
 ## 15. 文件与字段总览
 

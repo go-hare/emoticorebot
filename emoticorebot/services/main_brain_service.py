@@ -216,6 +216,12 @@ class MainBrainService:
                 "reason": reason,
                 "execution": dict(execution or {}),
             }
+        if action == "defer":
+            return {
+                "action": "defer",
+                "reason": reason,
+                "execution": self._strip_resume_payload(execution),
+            }
         return {
             "action": "pause",
             "reason": reason,
@@ -773,16 +779,30 @@ class MainBrainService:
 
         if cls._looks_like_pause_request(text):
             return "pause", "user_requested_pause"
-        if cls._looks_like_companionship_or_explanation(text, emotion=emotion):
-            return "pause", "main_brain_prioritized_companionship_or_explanation"
-        if cls._looks_like_priority_switch(text):
-            return "pause", "user_switched_priority"
         if resume_payload not in (None, "", [], {}):
             if pending_review:
                 return "resume", "user_responded_to_pending_review"
             if missing:
                 return "resume", "user_provided_missing_information"
             return "resume", "user_requested_resume"
+        if cls._looks_like_resume_request(text):
+            if missing:
+                return "resume", "user_requested_resume_for_missing_information"
+            if not pending_review:
+                return "resume", "user_requested_resume"
+        if cls._looks_like_companionship_or_explanation(text, emotion=emotion):
+            return "pause", "main_brain_prioritized_companionship_or_explanation"
+        if cls._looks_like_priority_switch(text):
+            return "defer", "user_switched_priority"
+        if missing:
+            if cls._looks_like_new_task_input(text):
+                return "defer", "user_started_new_topic_while_execution_paused"
+            if text:
+                return "resume", "user_provided_missing_information"
+        if pending_review and text:
+            return "defer", "user_started_new_topic_while_review_paused"
+        if text:
+            return "defer", "paused_execution_left_on_hold"
         return "pause", "paused_execution_waiting"
 
     @staticmethod
@@ -806,6 +826,41 @@ class MainBrainService:
         }
         prefixes = ("pause", "wait", "later", "先停", "先暂停", "稍等", "等会", "回头", "先别继续")
         return lowered in exact_matches or any(lowered.startswith(prefix) for prefix in prefixes)
+
+    @staticmethod
+    def _looks_like_resume_request(text: str) -> bool:
+        if not text:
+            return False
+        lowered = text.lower().strip()
+        exact_matches = {
+            "resume",
+            "continue",
+            "go ahead",
+            "继续",
+            "继续吧",
+            "继续执行",
+            "恢复",
+            "恢复执行",
+            "接着来",
+            "接着做",
+        }
+        prefixes = (
+            "resume",
+            "continue",
+            "go ahead",
+            "继续",
+            "恢复",
+            "接着",
+        )
+        return lowered in exact_matches or any(lowered.startswith(prefix) for prefix in prefixes)
+
+    @classmethod
+    def _looks_like_new_task_input(cls, text: str) -> bool:
+        if not text:
+            return False
+        if cls._looks_like_priority_switch(text):
+            return True
+        return cls._looks_task_like(text)
 
     @staticmethod
     def _looks_like_companionship_or_explanation(text: str, *, emotion: str) -> bool:

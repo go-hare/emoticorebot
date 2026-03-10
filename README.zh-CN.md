@@ -496,18 +496,18 @@ emoticorebot channels status  # 查看渠道连接状态
 
 ```text
 emoticorebot/
-├── core/                 # 融合流程编排（LangGraph 图、状态、路由、上下文）
+├── core/                 # 单轮流程编排（LangGraph 图、状态、路由、上下文）
 │   ├── graph.py          #   LangGraph 图定义与编译
-│   ├── state.py          #   FusionState / IQState / EQState
-│   ├── router.py         #   FusionRouter（EQ ↔ IQ ↔ Memory 路由）
-│   ├── context.py        #   EQ / IQ 提示词上下文构建器
+│   ├── state.py          #   TurnState / MainBrainState / ExecutorState
+│   ├── router.py         #   主脑 / 执行系统 / 记忆 路由
+│   ├── context.py        #   共享提示词上下文构建器
 │   ├── model.py          #   LLMFactory（多 provider 支持）
 │   ├── mcp.py            #   MCP 客户端集成
 │   ├── skills.py         #   技能加载器
-│   └── nodes/            #   eq_node / iq_node / memory_node
+│   └── nodes/            #   main_brain_node / executor_node / memory_node
 ├── services/             # 服务层
-│   ├── eq_service.py     #   EQ 主导服务（初判 / 终判）
-│   ├── iq_service.py     #   IQ 执行层（Deep Agents + 子代理）
+│   ├── main_brain_service.py # 主脑服务（初判 / 终判 / 控制）
+│   ├── executor_service.py   # 执行系统（Deep Agents + 子代理）
 │   ├── memory_service.py #   记忆读写服务
 │   └── tool_manager.py   #   工具注册与执行
 ├── memory/               # 分层记忆实现

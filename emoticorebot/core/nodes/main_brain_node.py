@@ -38,16 +38,26 @@ async def main_brain_node(state: TurnState, runtime) -> TurnState:
         main_brain.execution_action = str(control.get("action", "") or "")
         main_brain.execution_reason = str(control.get("reason", "") or "")
         if main_brain.execution_action == "resume":
+            state["metadata"] = _set_execution_metadata(
+                metadata,
+                dict(control.get("execution", {}) or paused_execution),
+            )
             _queue_executor_resume(executor, user_input=user_input, execution=paused_execution)
             state["done"] = False
             return state
 
-        state["metadata"] = _set_execution_metadata(metadata, dict(control.get("execution", {}) or {}))
-        main_brain.final_decision = str(control.get("final_decision", "answer") or "answer")
-        main_brain.final_message = str(control.get("message", "") or "")
-        state["output"] = main_brain.final_message
-        state["done"] = True
-        return state
+        state["metadata"] = _set_paused_execution_metadata(
+            metadata,
+            dict(control.get("execution", {}) or paused_execution),
+        )
+        if main_brain.execution_action == "defer":
+            metadata = state["metadata"]
+        else:
+            main_brain.final_decision = str(control.get("final_decision", "answer") or "answer")
+            main_brain.final_message = str(control.get("message", "") or "")
+            state["output"] = main_brain.final_message
+            state["done"] = True
+            return state
 
     if not _has_executor_packet(executor):
         deliberation: MainBrainDeliberationPacket = await runtime.main_brain_deliberate(
@@ -155,18 +165,35 @@ def _has_executor_packet(executor: ExecutorState) -> bool:
 
 
 def _extract_paused_execution(metadata: dict[str, Any]) -> dict[str, Any]:
-    execution = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
-    if str((execution or {}).get("control_state", "") or "").strip() != "paused":
-        return {}
-    return dict(execution)
+    for key in ("paused_execution", "execution"):
+        execution = metadata.get(key) if isinstance(metadata.get(key), dict) else {}
+        if str((execution or {}).get("control_state", "") or "").strip() == "paused":
+            return dict(execution)
+    return {}
 
 
 def _merge_followup_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    return {**metadata, "execution": {}}
+    merged = dict(metadata or {})
+    merged.pop("paused_execution", None)
+    merged["execution"] = {}
+    return merged
 
 
 def _set_execution_metadata(metadata: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
-    return {**metadata, "execution": dict(execution or {})}
+    updated = dict(metadata or {})
+    updated.pop("paused_execution", None)
+    updated["execution"] = dict(execution or {})
+    return updated
+
+
+def _set_paused_execution_metadata(metadata: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(metadata or {})
+    updated.pop("execution", None)
+    if execution:
+        updated["paused_execution"] = dict(execution)
+    else:
+        updated.pop("paused_execution", None)
+    return updated
 
 
 def _queue_executor_question(executor: ExecutorState, question: str) -> None:
@@ -182,7 +209,10 @@ def _queue_executor_question(executor: ExecutorState, question: str) -> None:
 
 
 def _queue_executor_resume(executor: ExecutorState, *, user_input: str, execution: dict[str, Any]) -> None:
-    executor.request = str(user_input or execution.get("summary", "") or "继续上次执行").strip()
+    request = str(user_input or "").strip()
+    if _is_plain_resume_signal(request):
+        request = ""
+    executor.request = str(request or execution.get("summary", "") or "继续上次执行").strip()
     executor.thread_id = str(execution.get("thread_id", "") or "")
     executor.run_id = str(execution.get("run_id", "") or "")
     executor.control_state = "running"
@@ -197,3 +227,19 @@ def _queue_executor_resume(executor: ExecutorState, *, user_input: str, executio
         if str(item).strip()
     ]
     executor.pending_review = dict(execution.get("pending_review", {}) or {})
+
+
+def _is_plain_resume_signal(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    return lowered in {
+        "resume",
+        "continue",
+        "go ahead",
+        "继续",
+        "继续吧",
+        "继续执行",
+        "恢复",
+        "恢复执行",
+        "接着来",
+        "接着做",
+    }
