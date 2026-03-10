@@ -4,13 +4,15 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-**emoticorebot** is an ultra-lightweight personal AI assistant with an **EQ-led fusion architecture (EQ + IQ Layer)**, built on [LangGraph](https://github.com/langchain-ai/langgraph) and derived from the original Nanobot project.
+**emoticorebot** is an ultra-lightweight personal AI assistant built around a **main_brain -> executor** architecture and derived from the original Nanobot project.
 
-It perceives emotional context in every conversation turn, lets **EQ act as the lead layer**, routes complex work into a **Deep Agents-based IQ layer** when needed, and continuously evolves its persona through background reflection.
+It keeps `main_brain` as the only outward-facing subject, delegates complex work to a **Deep Agents-based `executor`** when needed, and evolves through `light_insight + deep_insight`.
 
 Detailed architecture design:
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md)
+- [docs/FIELDS.zh-CN.md](docs/FIELDS.zh-CN.md)
 
 ---
 
@@ -55,8 +57,14 @@ This creates `~/.emoticorebot/` with default config, `SOUL.md` (persona), `USER.
   },
   "agents": {
     "defaults": {
-      "model": "anthropic/claude-opus-4-5",
-      "provider": "openrouter"
+      "mainBrainMode": {
+        "model": "anthropic/claude-opus-4-5",
+        "provider": "openrouter"
+      },
+      "executorMode": {
+        "model": "anthropic/claude-opus-4-5",
+        "provider": "openrouter"
+      }
     }
   }
 }
@@ -78,88 +86,86 @@ emoticorebot gateway
 
 ## Architecture
 
-### EQ-led Fusion Graph (LangGraph)
+### `main_brain -> executor` Loop
 
-emoticorebot uses a **LangGraph state machine** to execute each conversation turn. The external graph remains simple, but the internal semantics are now **EQ-led deliberation + Deep Agents execution**:
+emoticorebot now uses an **explicit turn loop** instead of an outer LangGraph state machine. The runtime stays simple: `main_brain` decides, `executor` executes when needed, and reflection happens asynchronously after the user-facing response.
 
 ```
 User Input
     │
     ▼
-Session history / pending-task metadata
+session / internal / checkpointer
     │
     ▼
- ┌──────────────────────────────────────────────────────┐
- │                  LangGraph Graph                     │
- │                                                      │
- │   ENTRY ──→ [EQ Node] ──┬──→ [IQ Layer] ──┐         │
- │               ▲         │        │         │         │
- │               └─────────┘        ▼         │         │
- │                          [Memory Node] ←───┘         │
- │                                │                     │
- └────────────────────────────────┼─────────────────────┘
-                                  ▼
-                               END / Output
+main_brain ──→ executor (optional)
+    │             │
+    └──────←──────┘
+    │
+    ▼
+User Reply
+    │
+    ▼
+cognitive_event -> light_insight -> deep_insight -> memory
 ```
 
-`EQ Node` and `IQ Layer` may loop for multiple internal rounds, but **only EQ can terminate the turn and produce the user-facing message**.
+Only `main_brain` can terminate the turn and produce the user-facing message.
 
-**Node responsibilities:**
-
-| Node | Role |
-|------|------|
-| `EQ Node` | Lead layer. Interprets intent, decides whether to consult IQ, tracks task continuity, and produces the final user-facing reply. |
-| `IQ Layer` | Deep Agents-based execution layer. Handles planning, tool use, subagents, and long-running complex tasks. |
-| `Memory Node` | Writes the event stream and persists PAD state. |
-
-**Routing logic (`FusionRouter`):**
-
-- `EQ → IQ`: EQ decides the current turn needs internal rational work.
-- `IQ → EQ`: IQ returns task analysis, evidence, risks, missing params, and a recommended next action.
-- `EQ → Memory`: EQ has decided to answer the user or ask the user for missing info.
-- `* → Memory`: `done=True`; write-back and exit.
-
-### Deep Agents in IQ Layer
-
-The current IQ layer no longer uses the older expert-overlay pipeline. Instead, it is powered by Deep Agents while preserving the same compact EQ↔IQ contract.
+**Runtime responsibilities:**
 
 | Component | Role |
-|---|---|---|
+|------|------|
+| `main_brain` | Only subject. Interprets intent, controls executor, preserves relationship continuity, and produces the final user-facing reply. |
+| `executor` | Deep Agents-based execution layer. Handles planning, tools, skills, and long-running complex tasks. |
+| `reflection` | Async post-turn process. Produces `light_insight` every turn and `deep_insight` on demand or by periodic signal. |
+
+**Turn contract:**
+
+- `main_brain -> executor`: delegate only one clear internal request, plus resume metadata when a paused execution should continue.
+- `executor -> main_brain`: return a compact packet with `control_state`, `status`, `analysis`, `risks`, `missing`, `recommended_action`, `confidence`, and optional `pending_review`.
+- `main_brain -> user`: only `main_brain` can answer, ask for missing info, or decide to continue internal work.
+- `post-turn reflection`: after the first user-facing reply, the runtime writes turn records, builds `cognitive_event`, runs `light_insight`, and schedules `deep_insight` only when warranted.
+
+### Deep Agents in `executor`
+
+The current `executor` no longer uses the older expert-overlay pipeline. Instead, it is powered by Deep Agents while preserving the compact `main_brain -> executor` contract.
+
+| Component | Role |
+|---|---|
 | Planner | Breaks down the internal task and decides how to proceed |
-| Tools | Executes registered capabilities such as web search, fetch, messaging, and cron |
-| Subagents | Offloads focused work such as research or workspace-side operations |
+| Tools | Executes registered capabilities such as file operations, shell execution, web search, fetch, messaging, and cron |
+| Step-level concurrency | Runs independent tool or analysis steps in parallel when safe |
 | Skills | Reuses local workflow instructions from the workspace `skills/` directory |
 
-The contract remains **EQ-led**:
+The contract remains **main_brain-led**:
 
-- EQ decides whether IQ is needed and what internal task should be delegated
-- IQ plans and executes using tools, subagents, and skills
-- IQ returns a normalized packet with `status`, `analysis`, `evidence`, `risks`, `missing`, and `recommended_action`
-- EQ decides whether to answer, ask the user, or continue internal deliberation
+- `main_brain` decides whether `executor` is needed and what internal task should be delegated
+- `executor` plans and executes using tools, skills, and step-level concurrency
+- `executor` returns a normalized packet with `control_state`, `status`, `analysis`, `risks`, `missing`, `recommended_action`, and `confidence`
+- `main_brain` decides whether to answer, ask the user, or continue internal deliberation
 
-This keeps the outer loop stable while allowing the inner IQ engine to become more capable over time.
+This keeps the outer loop stable while allowing the inner execution kernel to become more capable over time.
 
 ### Typical Workflows
 
-#### 1. Normal request → direct IQ execution
+#### 1. Normal request → delegated execution
 
 Example: “Help me summarize this file.”
 
 ```text
 User
-  → EQ judges this is a normal task
-  → EQ delegates a concrete internal task to IQ
-  → IQ plans and executes it
-  → EQ finalizes user-facing reply
+  → main_brain decides executor help is useful
+  → main_brain delegates one concrete internal request
+  → executor plans and executes it
+  → main_brain finalizes the user-facing reply
 ```
 
 Properties:
 
-- simple handoff from EQ to IQ
+- simple handoff from `main_brain` to `executor`
 - no raw tool output is exposed directly to the user
-- EQ still controls the final wording
+- `main_brain` still controls the final wording
 
-#### 2. Resume / follow-up request → EQ continuity + IQ execution
+#### 2. Resume / follow-up request → continuity + resumed execution
 
 Example:
 
@@ -169,98 +175,91 @@ Example:
 
 ```text
 User follow-up
-  → EQ detects likely pending-task recovery
-  → EQ reconstructs continuity from session and memory
-  → IQ continues the delegated task with the recovered context
-  → EQ reviews merged result and answers naturally
+  → main_brain detects likely pending-task recovery
+  → main_brain reconstructs continuity from session, internal history, and paused execution state
+  → executor continues the delegated task with the recovered context
+  → main_brain reviews the merged result and answers naturally
 ```
 
 Properties:
 
 - optimized for unfinished-task recovery
-- keeps cross-turn continuity on the EQ side
+- keeps cross-turn continuity on the `main_brain` side
 - avoids asking the same missing question again when enough context exists
 
-#### 3. Sensitive / low-confidence request → IQ analysis + EQ safeguard
+#### 3. Sensitive / low-confidence request → executor analysis + main_brain safeguard
 
 Example: “Run this command and delete the old files.”
 
 ```text
 User request
-  → EQ detects possible external action / higher risk
-  → EQ delegates a cautious internal task
-  → IQ evaluates feasibility, evidence, and missing safeguards
-  → EQ either answers conservatively, asks the user first, or continues internal deliberation
+  → main_brain detects possible external action / higher risk
+  → main_brain delegates a cautious internal task
+  → executor evaluates feasibility, risks, and missing safeguards
+  → main_brain either answers conservatively, asks the user first, or continues internal deliberation
 ```
 
 Properties:
 
 - optimized for safety and overconfidence control
 - useful when tools are involved or confidence is low
-- keeps the user-facing voice unified through EQ
+- keeps the user-facing voice unified through `main_brain`
 
 ---
 
 ### Decision Inputs & Prompt Construction
 
-The current implementation no longer uses standalone `SignalExtractor` / `PolicyEngine` modules. Instead, turn planning is produced by **`EQService` + `FusionRouter` + session metadata**.
+The current implementation no longer depends on an outer router layer. Turn planning comes directly from `main_brain`, session state, and the executor packet.
 
-**EQ prompt construction (`ContextBuilder.build_eq_system_prompt`)**
+**`main_brain` prompt construction (`ContextBuilder.build_main_brain_system_prompt`)**
 
-- loads EQ execution rules from workspace `AGENTS.md`
+- loads `main_brain` rules from workspace `AGENTS.md`
 - loads persona anchors from `SOUL.md` and user cognition from `USER.md`
-- loads `current_state.md` for PAD / status grounding
-- retrieves EQ event stream sections
-- asks EQ to decide whether IQ is needed and what internal task should be delegated
+- loads `current_state.md` for PAD / state grounding
+- retrieves recent `cognitive_event` context
+- asks `main_brain` to decide whether to answer directly or delegate to `executor`
 
-**IQ prompt construction (`ContextBuilder.build_iq_system_prompt`)**
+**`executor` prompt construction (`ExecutorService._build_agent_instructions`)**
 
-- loads workspace `AGENTS.md` and `TOOLS.md` as execution constraints
-- loads `current_state.md`
-- retrieves event stream sections
-- injects active skills summary and skill bodies when configured
-- passes pending-task and missing-parameter hints through `intent_params`
+- enforces the `main_brain -> executor` contract
+- injects workspace / builtin skill routes and skill summaries
+- constrains output to the compact executor packet
+- uses tool registry, Deep Agents backend routing, and checkpointer-backed resume state
 
 **Session and continuation inputs**
 
-- pending task metadata is injected before EQ deliberation and follow-up IQ rounds
-- assistant-side metadata persists task continuity, task labels, and compact IQ summaries
-- lightweight IQ state such as `iq_status`, `iq_confidence`, and `iq_missing_params` is preserved for continuation
-- `resume_task` recovery helps EQ avoid re-asking the same missing question when enough context exists
+- `dialogue.jsonl` preserves user-visible conversation history
+- `internal.jsonl` preserves compact `main_brain <-> executor` summaries and control decisions
+- paused execution metadata carries `thread_id`, `run_id`, `missing`, and `pending_review`
+- checkpointer state lets `executor` resume from the previous interruption point
 
-In short, the working decision loop is now: **history + memory + pending task → EQ planning → IQ execution → EQ finalization**.
+In short, the working loop is now: **history + cognitive context + paused execution → `main_brain` planning → `executor` execution (optional) → `main_brain` finalization**.
 
 ---
 
 ### Memory Layer
 
-All memory is stored as files under `~/.emoticorebot/data/memory/` (or the configured workspace):
+The architecture now separates **runtime material**, **cognitive events**, and **durable memory**:
 
-| Store | File | Purpose |
+| Layer | File / Store | Purpose |
 |-------|------|---------|
-| `EventStore` | `events.jsonl` | Raw event stream for each turn |
-| `EventStore` | `events.jsonl` | Raw conversation event stream with EQ judgments |
-| `MemoryFacade` | — | Unified read/write API for all stores |
+| `session` | `sessions/<session_key>/dialogue.jsonl` | User-visible `user <-> main_brain` conversation |
+| `internal` | `sessions/<session_key>/internal.jsonl` | Compact `main_brain <-> executor` summaries, control actions, pause/resume hints |
+| `checkpointer` | `sessions/_checkpoints/executor.pkl` | Executor pause / resume state |
+| `cognitive_event` | `memory/cognitive_events.jsonl` | Structured per-turn slices built after the reply |
+| `self_memory` | `memory/self_memory.jsonl` | Stable `main_brain` patterns |
+| `relation_memory` | `memory/relation_memory.jsonl` | Stable user / relationship knowledge |
+| `insight_memory` | `memory/insight_memory.jsonl` | Deep insights, durable execution patterns, skill candidates |
 
-The primary memory flow is now simply **event stream**, with higher-level memory intended to be derived later rather than persisted as parallel stores.
+The runtime flow is:
 
-In the current implementation, the IQ execution layer only receives the **current internal task delegated by EQ**. It no longer replays user/assistant conversation history; cross-turn continuity stays on the EQ side.
+1. Write `dialogue` and `internal` turn records.
+2. Build `cognitive_event` from the completed turn.
+3. Run `light_insight` after every turn.
+4. Schedule `deep_insight` only when `main_brain` judges the turn worth deeper consolidation, or when a periodic signal triggers reflection.
+5. Write only stable conclusions into long-term memory, and optionally update `SOUL.md`, `USER.md`, or future `skills`.
 
-In addition, assistant-side session history now persists a lightweight record:
-
-- compact `iq_summary` for future turn recovery
-- `iq_status`, `iq_confidence`, and `iq_missing_params` for lightweight continuation
-- task continuity metadata such as `task_label` and pending-task state
-
-The hot `sessions/*.jsonl` path stays intentionally small, so later turns can recover context without replaying every internal IQ detail.
-
-This makes later turns much better at resuming unfinished work and preserving the shape of past internal deliberation.
-
-Internal multi-round IQ behavior is also written into structured long-term memory:
-
-- assistant dialogue events now carry the final EQ decision for traceability
-- Higher-level reflections are intended to be derived from the event stream rather than persisted as a parallel store.
-- later retrieval can reuse not just “what happened”, but also “how the internal process unfolded”
+The `executor` only receives the delegated internal request plus resume metadata. It does not replay the entire user conversation; cross-turn continuity remains `main_brain`-led.
 
 The **PAD model** (Pleasure-Arousal-Dominance) is used to track the bot's continuous emotional state across sessions. It is loaded at startup from `current_state.md` and written back after every turn.
 
@@ -270,11 +269,11 @@ The **PAD model** (Pleasure-Arousal-Dominance) is used to track the bot's contin
 
 The current architecture is already usable, but it is intentionally still conservative in a few places:
 
-- Deep Agents output still needs normalization into the compact EQ↔IQ packet, so richer intermediate traces are not yet fully preserved.
+- Deep Agents output still needs normalization into a compact `executor` packet, so richer intermediate traces are still mostly kept in runtime material.
 - The current tool set is intentionally narrow; broader workspace and research coverage can still be added.
-- Cross-turn continuity is still EQ-centric and conservative; implicit follow-up recovery can become stronger.
-- Reflective memory stores compact process summaries rather than full internal execution traces.
-- The outer LangGraph remains intentionally simple; most sophistication still lives inside the IQ engine.
+- Cross-turn continuity is still `main_brain`-centric and conservative; implicit follow-up recovery can become stronger.
+- `deep_insight` stores durable summaries rather than full raw execution traces.
+- Skill promotion is still reflection-led and conservative instead of fully automatic.
 
 ### Roadmap
 
@@ -282,32 +281,31 @@ Recommended next steps for this architecture:
 
 1. **Improve Deep Agents observability**
    - preserve richer execution traces without bloating session history
-   - expose better debugging hooks for internal planning and subagents
+   - expose better debugging hooks for internal planning and execution
 
 2. **Strengthen continuity recovery**
    - improve implicit follow-up detection
-   - better reconcile pending-task / plan / memory signals
+   - better reconcile paused execution / memory / user follow-up signals
 
-3. **Deepen process memory**
-   - enrich `iq_process` reflections with stronger causal tags
+3. **Deepen reflection outputs**
+   - enrich `light_insight.execution_review` and `deep_insight` with stronger causal tags
    - let future turns retrieve not only the outcome but also the failure mode that triggered it
-   - prepare for richer agent-memory behavior later
 
-4. **Refactor the IQ layer internally**
+4. **Refactor the executor internally**
    - split planning / execution / merging more clearly
    - preserve the current lightweight behavior while making extension easier
 
-5. **Expand tools, skills, and subagents carefully**
+5. **Expand tools and skills carefully**
    - only after the current Deep Agents workflow is stable
-   - examples: stronger research workers, richer workspace helpers, domain-specific skills
+   - examples: richer workspace helpers, stronger verification flows, domain-specific skills
 
-In short: the current version optimizes for **clarity, controllable cost, and recoverable history**, and future work should improve IQ execution quality without giving up the lightweight outer design.
+In short: the current version optimizes for **clarity, controllable cost, and recoverable history**, and future work should improve executor quality without adding another outer orchestration layer.
 
 ---
 
 ### Background Processes
 
-Three async daemons run independently in the background:
+Current background behavior is split across a daemon plus shared services:
 
 #### SubconsciousDaemon
 Three concurrent `asyncio.Task` loops:
@@ -315,17 +313,17 @@ Three concurrent `asyncio.Task` loops:
 | Loop | Interval | Behaviour |
 |------|----------|-----------|
 | `_decay_loop` | 30 min (configurable) | Gradually decays PAD drive values toward neutral |
-| `_reflect_loop` | 1 h (configurable) | Triggers `ReflectionEngine` to update SOUL/USER |
+| `_reflect_loop` | 1 h (configurable) | Triggers periodic `deep_insight` through `ReflectionEngine` |
 | `_proactive_loop` | 10 min (configurable) | Randomly initiates a message to the user when idle |
 
 #### ReflectionEngine (meta-cognition)
-Reads recent events and calls an LLM to produce structured JSON:
+Called by the subconscious reflect loop. It runs `deep_insight` with a periodic signal and may:
 
-- **`soul_update`** — micro-adjusts `SOUL.md` (persona evolution, anchors preserved)
-- **`user_update`** — appends new user insights to `USER.md`
-- **`policy_adjustment`** — sets `eq_bias`, `iq_bias`, `tone_preference`, `tool_budget_delta`, `duration_hours`
+- append stable memories into `self_memory.jsonl`, `relation_memory.jsonl`, and `insight_memory.jsonl`
+- rewrite `SOUL.md` when a stable self-pattern is confirmed
+- rewrite `USER.md` when a stable user-pattern is confirmed
 
-Both `SOUL.md` and `USER.md` updates go through a **validator** before write. Writes are atomic (temp file → rename, with backup).
+`SOUL.md` and `USER.md` updates are validated before write, and writes stay atomic.
 
 #### HeartbeatService
 Two-phase background task checker:
@@ -337,7 +335,7 @@ Two-phase background task checker:
 
 ### Tools
 
-Built-in tools available to the IQ node:
+Built-in tools available to the `executor`:
 
 | Tool | Description |
 |------|-------------|
@@ -426,7 +424,7 @@ emoticorebot uses **LangChain** adapters and **litellm** for broad model support
 | Groq | `langchain-groq` |
 | Ollama (local) | `langchain-ollama` |
 
-IQ and EQ can each use a **different model** (`iq.model` / `eq.model` in config), enabling cost/quality trade-offs.
+`main_brain` and `executor` can each use a **different model** through `agents.defaults.mainBrainMode` and `agents.defaults.executorMode` (snake_case keys are also accepted), enabling cost/quality trade-offs.
 
 ---
 
@@ -501,18 +499,17 @@ emoticorebot channels status  # Show channel connection status
 
 ```text
 emoticorebot/
-├── core/                 # Turn orchestration (LangGraph graph, state, router, context)
-│   ├── graph.py          #   LangGraph graph definition & compilation
+├── core/                 # Turn orchestration (explicit loop, state, context)
+│   ├── turn_loop.py      #   Explicit main_brain -> executor scheduler
 │   ├── state.py          #   TurnState / MainBrainState / ExecutorState
-│   ├── router.py         #   Main brain / executor / memory routing
 │   ├── context.py        #   Shared prompt context builder
 │   ├── model.py          #   LLMFactory (multi-provider)
 │   ├── mcp.py            #   MCP client integration
 │   ├── skills.py         #   Skill loader
-│   └── nodes/            #   main_brain_node / executor_node / memory_node
+│   └── nodes/            #   main_brain_node / executor_node
 ├── services/             # Service layer
 │   ├── main_brain_service.py # Main brain service (deliberate / finalize / control)
-│   ├── executor_service.py   # Executor layer (Deep Agents + subagents)
+│   ├── executor_service.py   # Executor layer (Deep Agents execution core)
 │   ├── memory_service.py #   Memory read/write service
 │   └── tool_manager.py   #   Tool registry & execution
 ├── memory/               # Layered memory implementation
@@ -523,15 +520,14 @@ emoticorebot/
 │   ├── schema.py
 │   ├── jsonl_store.py
 │   └── memory_facade.py
-├── background/           # Background daemons
+├── background/           # Background daemon + periodic reflection entrypoints
 │   ├── subconscious.py   #   SubconsciousDaemon (decay / reflect / proactive)
-│   ├── reflection.py     #   ReflectionEngine (meta-cognition)
+│   ├── reflection.py     #   ReflectionEngine (periodic deep_insight bridge)
 │   ├── heartbeat.py      #   HeartbeatService (two-phase task runner)
-│   └── subagent.py       #   Background sub-agent execution
 ├── tools/                # Built-in tool implementations
 ├── channels/             # Channel adapters (Telegram, Discord, …)
 ├── providers/            # LLM provider utilities
-├── runtime/              # FusionRuntime (dispatch + orchestration)
+├── runtime/              # EmoticoreRuntime (dispatch + turn loop + reflection scheduling)
 ├── bus/                  # Inbound / outbound event queue
 ├── cron/                 # Cron scheduler service
 ├── session/              # Session persistence and recovery

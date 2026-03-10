@@ -1,15 +1,17 @@
 # Architecture Overview
 
-The current architecture baseline is documented in detail in the Chinese design doc:
+The current architecture baseline is documented in detail in the Chinese design docs:
 
 - [Detailed Architecture Design (Chinese)](./ARCHITECTURE.zh-CN.md)
+- [Field Definitions (Chinese)](./FIELDS.zh-CN.md)
 
-This project is moving from the older `EQ / IQ` naming toward a clearer model:
+Current architecture baseline:
 
 - `main_brain`: the only user-facing subject
 - `executor`: the execution system called by the brain
-- `reflection`: light and deep insight loops
-- `session -> cognitive_event -> memory`: the three-layer data flow
+- `reflection`: `light_insight` every turn, `deep_insight` on demand or by periodic signal
+- explicit turn loop: `main_brain -> executor` instead of an outer workflow graph
+- `session -> cognitive_event -> memory -> skills`: the data and growth path
 
 The detailed document defines:
 

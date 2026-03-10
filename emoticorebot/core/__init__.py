@@ -1,7 +1,5 @@
-"""Core turn-graph package."""
+"""Core turn orchestration package."""
 
-from emoticorebot.core.graph import create_turn_graph, run_turn_graph
-from emoticorebot.core.router import TurnRouter
 from emoticorebot.core.state import (
     ExecutorState,
     MainBrainState,
@@ -10,15 +8,14 @@ from emoticorebot.core.state import (
     get_emotion_label,
     load_pad_from_workspace,
 )
+from emoticorebot.core.turn_loop import run_turn_loop
 
 __all__ = [
     "ExecutorState",
     "MainBrainState",
-    "TurnRouter",
     "TurnState",
     "create_turn_state",
-    "create_turn_graph",
     "get_emotion_label",
     "load_pad_from_workspace",
-    "run_turn_graph",
+    "run_turn_loop",
 ]

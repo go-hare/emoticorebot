@@ -77,23 +77,28 @@ class MainBrainService:
         lightweight_chat = not self._looks_task_like(user_input)
         if lightweight_chat:
             prompt = (
-                "You are doing the first internal main-brain pass.\n"
-                "This turn looks like companionship or lightweight conversation, so executor help is not needed.\n"
-                "If you write final_message, use the same language as the user.\n"
+                "You are `main_brain`, making the first internal decision for this turn.\n"
+                "This turn looks like companionship or lightweight conversation, so you should answer directly without invoking `executor`.\n"
+                "Use the same language as the user for `final_message`.\n"
                 "Return only one JSON object.\n"
-                '{"intent":"...","working_hypothesis":"...","need_executor":false,'
+                '{"intent":"...","working_hypothesis":"...","execution_action":"answer",'
+                '"execution_reason":"...","final_decision":"answer",'
                 '"question_to_executor":"","final_message":"..."}\n\n'
                 f"User input: {user_input}\n"
             )
         else:
             prompt = (
-                "You are doing the first internal main-brain pass.\n"
-                "Understand the user deeply, then decide whether executor help is needed.\n"
-                "If executor help is needed, compress it into one clear internal request.\n"
-                "If you write final_message, use the same language as the user.\n"
+                "You are `main_brain`, making the first internal decision for this turn.\n"
+                "Understand the user deeply, then decide whether to answer directly or invoke `executor`.\n"
+                "If `executor` is needed, compress the delegation into one clear internal request.\n"
+                "If you write `final_message`, use the same language as the user.\n"
                 "Return only one JSON object.\n"
-                '{"intent":"...","working_hypothesis":"...","need_executor":true,'
-                '"question_to_executor":"...","final_message":""}\n\n'
+                '{"intent":"...","working_hypothesis":"...","execution_action":"start|answer",'
+                '"execution_reason":"...","final_decision":"continue|answer",'
+                '"question_to_executor":"...","final_message":"..."}\n'
+                "Rules:\n"
+                "- If execution_action is `start`, final_decision must be `continue`, question_to_executor must be non-empty, and final_message must be empty.\n"
+                "- If execution_action is `answer`, final_decision must be `answer`, question_to_executor must be empty, and final_message must be non-empty.\n\n"
                 f"User input: {user_input}\n"
             )
 
@@ -145,17 +150,20 @@ class MainBrainService:
         session_id: str = "",
     ) -> MainBrainFinalizePacket:
         prompt = (
-            "You are doing the second internal main-brain pass.\n"
-            "Combine your first judgment with the executor result.\n"
-            "Choose one decision: answer, ask_user, or continue.\n"
-            "If you write message, use the same language as the user.\n"
+            "You are `main_brain`, making the final decision after reading the current executor result.\n"
+            "Combine your first judgment with the executor report.\n"
+            "Choose one final_decision: answer, ask_user, or continue.\n"
+            "Use the same language as the user for `final_message`.\n"
             "Return only one JSON object.\n"
-            '{"decision":"answer|ask_user|continue","message":"...",'
-            '"question_to_executor":"if continuing, provide the next internal question; otherwise empty"}\n\n'
+            '{"final_decision":"answer|ask_user|continue","final_message":"...",'
+            '"question_to_executor":"if continuing, provide the next internal question; otherwise empty"}\n'
+            "Rules:\n"
+            "- If final_decision is `continue`, question_to_executor must be non-empty and final_message should be empty.\n"
+            "- If final_decision is `answer` or `ask_user`, final_message must be non-empty and question_to_executor must be empty.\n\n"
             f"User input: {user_input}\n"
-            f"Main brain intent: {main_brain_intent or '(empty)'}\n"
-            f"Main brain working hypothesis: {self._compact_text(main_brain_working_hypothesis, limit=140) or '(empty)'}\n"
-            f"Executor summary: {self._compact_text(executor_summary, limit=320) or '(empty)'}\n"
+            f"main_brain intent: {main_brain_intent or '(empty)'}\n"
+            f"main_brain working hypothesis: {self._compact_text(main_brain_working_hypothesis, limit=140) or '(empty)'}\n"
+            f"executor summary: {self._compact_text(executor_summary, limit=320) or '(empty)'}\n"
             f"Loop count: {loop_count}\n"
         )
 
@@ -241,10 +249,12 @@ class MainBrainService:
         deliberation: MainBrainDeliberationPacket,
         emotion: str,
     ) -> MainBrainControlPacket:
-        if deliberation.get("need_executor"):
+        execution_action = str(deliberation.get("execution_action", "") or "").strip().lower()
+        execution_reason = str(deliberation.get("execution_reason", "") or "").strip()
+        if execution_action == "start" or deliberation.get("need_executor"):
             return {
                 "action": "start",
-                "reason": "main_brain_requested_executor",
+                "reason": execution_reason or "main_brain_requested_executor",
                 "question_to_executor": str(
                     deliberation.get("question_to_executor", "")
                     or self._build_default_executor_question(
@@ -255,7 +265,7 @@ class MainBrainService:
             }
         return {
             "action": "answer",
-            "reason": "main_brain_answered_directly",
+            "reason": execution_reason or "main_brain_answered_directly",
             "final_decision": "answer",
             "message": str(deliberation.get("final_message", "") or "").strip() or build_companion_prompt(emotion),
         }
@@ -272,8 +282,8 @@ class MainBrainService:
         executor_analysis: str,
         executor_risks: list[str],
     ) -> MainBrainControlPacket:
-        decision = str(finalize.get("decision", "") or "answer").strip().lower()
-        message = str(finalize.get("message", "") or "").strip()
+        decision = str(finalize.get("final_decision", "") or finalize.get("decision", "") or "answer").strip().lower()
+        message = str(finalize.get("final_message", "") or finalize.get("message", "") or "").strip()
         question_to_executor = str(finalize.get("question_to_executor", "") or "").strip()
 
         if decision == "continue":
@@ -323,13 +333,10 @@ class MainBrainService:
         self,
         *,
         cancelled_tasks: int,
-        cancelled_subagents: int,
         execution: dict[str, Any] | None = None,
     ) -> MainBrainControlPacket:
         del execution
         message = f"⏹ 已停止 {max(0, int(cancelled_tasks))} 个主任务"
-        if cancelled_subagents > 0:
-            message += f"，并停止 {int(cancelled_subagents)} 个子任务"
         message += "。"
         return {
             "action": "stop",
@@ -337,6 +344,121 @@ class MainBrainService:
             "final_decision": "answer",
             "message": message,
         }
+
+    def build_executor_delegation(
+        self,
+        *,
+        action: str,
+        user_input: str,
+        question_to_executor: str,
+        intent: str,
+        working_hypothesis: str,
+        session_id: str = "",
+        loop_count: int = 0,
+        execution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        execution = dict(execution or {})
+        goal = str(question_to_executor or "").strip() or self._build_default_executor_question(
+            working_hypothesis=working_hypothesis,
+            intent=intent,
+        )
+        task_anchor = str(
+            execution.get("run_id", "")
+            or execution.get("thread_id", "")
+            or f"{session_id or 'session'}:{max(1, int(loop_count or 0))}"
+        ).strip()
+        context: list[str] = []
+        if user_input:
+            context.append(f"User request: {self._compact_text(user_input, limit=220)}")
+        if intent:
+            context.append(f"Main-brain intent: {self._compact_text(intent, limit=140)}")
+        if working_hypothesis:
+            context.append(f"Working hypothesis: {self._compact_text(working_hypothesis, limit=180)}")
+        execution_summary = str(execution.get("summary", "") or "").strip()
+        if execution_summary:
+            context.append(f"Latest executor summary: {self._compact_text(execution_summary, limit=220)}")
+
+        missing = [str(item).strip() for item in list(execution.get("missing", []) or []) if str(item).strip()]
+        if missing:
+            context.append("Open missing inputs: " + "; ".join(missing[:4]))
+
+        risks = [str(item).strip() for item in list(execution.get("risks", []) or []) if str(item).strip()]
+        if risks:
+            context.append("Known risks: " + "; ".join(risks[:3]))
+
+        constraints = [
+            "Do not produce the final user-facing reply.",
+            "Return only compact execution facts and next-step advice.",
+            "Respect workspace, tool, and approval boundaries.",
+        ]
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action == "continue":
+            constraints.append("Continue only the unresolved part of the task.")
+        if normalized_action == "resume":
+            constraints.append("Resume the paused execution from the provided runtime context.")
+
+        delegation = {
+            "task_id": f"executor:{task_anchor}",
+            "goal": goal,
+            "context": context,
+            "constraints": constraints,
+            "expected_output": (
+                "Return one JSON result with status, analysis, risks, missing, "
+                "recommended_action, confidence, and pending_review when needed."
+            ),
+        }
+        resume_payload = execution.get("resume_payload")
+        if resume_payload not in (None, "", [], {}):
+            delegation["resume_payload"] = resume_payload
+        return delegation
+
+    def decide_deep_insight(
+        self,
+        *,
+        state: dict[str, Any],
+        importance: float,
+        execution: dict[str, Any],
+        light_insight: dict[str, Any],
+    ) -> tuple[bool, str]:
+        main_brain = state.get("main_brain")
+        execution_review = (
+            light_insight.get("execution_review")
+            if isinstance(light_insight, dict) and isinstance(light_insight.get("execution_review"), dict)
+            else {}
+        )
+        control_state = str(execution.get("control_state", "") or "").strip().lower()
+        status = str(execution.get("status", "") or "").strip().lower()
+        missing = [str(item).strip() for item in list(execution.get("missing", []) or []) if str(item).strip()]
+        pending_review = execution.get("pending_review") if isinstance(execution.get("pending_review"), dict) else {}
+        effectiveness = str((execution_review or {}).get("effectiveness", "none") or "none").strip().lower()
+        failure_reason = str((execution_review or {}).get("failure_reason", "") or "").strip()
+        relation_shift = str(light_insight.get("relation_shift", "") or "").strip().lower() if isinstance(light_insight, dict) else ""
+        direct_updates = (
+            light_insight.get("direct_updates")
+            if isinstance(light_insight, dict) and isinstance(light_insight.get("direct_updates"), dict)
+            else {}
+        )
+        user_profile = list(direct_updates.get("user_profile", []) or []) if isinstance(direct_updates, dict) else []
+        soul_preferences = list(direct_updates.get("soul_preferences", []) or []) if isinstance(direct_updates, dict) else []
+        execution_reason = str(getattr(main_brain, "execution_reason", "") or "").strip() if main_brain is not None else ""
+
+        if execution.get("invoked") and (status in {"failed", "need_more"} or control_state == "paused"):
+            return True, f"main_brain_execution_followup:{control_state or status}"
+        if execution.get("invoked") and (missing or pending_review):
+            return True, "main_brain_execution_blocked_or_waiting_review"
+        if execution.get("invoked") and effectiveness in {"low", "medium"} and failure_reason:
+            return True, f"main_brain_execution_review:{failure_reason}"
+        if importance >= 0.82 and relation_shift in {"trust_up", "trust_down"}:
+            return True, "main_brain_high_importance_relation_shift"
+        if importance >= 0.82 and (user_profile or soul_preferences):
+            return True, "main_brain_high_importance_direct_updates"
+        if execution_reason in {
+            "loop_limit_reached",
+            "main_brain_requested_executor_followup",
+            "executor_waiting_for_user_input",
+        }:
+            return True, f"main_brain_signal:{execution_reason}"
+        return False, ""
 
     async def _run_main_brain_task(
         self,
@@ -499,26 +621,42 @@ class MainBrainService:
         if not isinstance(parsed, dict):
             return None
 
-        need_executor = parsed.get("need_executor")
-        if not isinstance(need_executor, bool):
-            return None
-
         intent = str(parsed.get("intent", "") or "").strip()
         working_hypothesis = str(parsed.get("working_hypothesis", "") or "").strip()
+        execution_action = str(parsed.get("execution_action", "") or "").strip().lower()
+        execution_reason = str(parsed.get("execution_reason", "") or "").strip()
+        final_decision = str(parsed.get("final_decision", "") or "").strip().lower()
+        need_executor = parsed.get("need_executor")
+        if execution_action not in {"start", "answer"}:
+            if isinstance(need_executor, bool):
+                execution_action = "start" if need_executor else "answer"
+            else:
+                return None
+        if final_decision not in {"answer", "continue"}:
+            final_decision = "continue" if execution_action == "start" else "answer"
+
         question_to_executor = str(parsed.get("question_to_executor", "") or "").strip()
         final_message = str(parsed.get("final_message", "") or "").strip()
 
-        if need_executor and not question_to_executor:
+        if execution_action == "start":
+            final_decision = "continue"
+        else:
+            final_decision = "answer"
+
+        if execution_action == "start" and not question_to_executor:
             question_to_executor = working_hypothesis or intent
-        if not need_executor and not final_message:
+        if execution_action == "answer" and not final_message:
             return None
 
         return {
             "intent": intent,
             "working_hypothesis": working_hypothesis,
-            "need_executor": need_executor,
-            "question_to_executor": question_to_executor if need_executor else "",
-            "final_message": "" if need_executor else final_message,
+            "execution_action": execution_action,
+            "execution_reason": execution_reason,
+            "final_decision": final_decision,
+            "need_executor": execution_action == "start",
+            "question_to_executor": question_to_executor if execution_action == "start" else "",
+            "final_message": "" if execution_action == "start" else final_message,
         }
 
     @classmethod
@@ -526,11 +664,11 @@ class MainBrainService:
         if not isinstance(parsed, dict):
             return None
 
-        decision = str(parsed.get("decision", "") or "").strip().lower()
+        decision = str(parsed.get("final_decision", "") or parsed.get("decision", "") or "").strip().lower()
         if decision not in {"answer", "ask_user", "continue"}:
             return None
 
-        message = str(parsed.get("message", "") or "").strip()
+        message = str(parsed.get("final_message", "") or parsed.get("message", "") or "").strip()
         question_to_executor = str(parsed.get("question_to_executor", "") or "").strip()
         if decision == "continue" and not question_to_executor:
             question_to_executor = message
@@ -540,6 +678,8 @@ class MainBrainService:
             return None
 
         return {
+            "final_decision": decision,
+            "final_message": message,
             "decision": decision,
             "message": message,
             "question_to_executor": question_to_executor,
@@ -589,11 +729,36 @@ class MainBrainService:
     @classmethod
     def _recover_deliberation(cls, raw: str) -> MainBrainDeliberationPacket | None:
         cleaned = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL).strip()
+        execution_action = cls._extract_json_string_field(cleaned, "execution_action").lower()
+        execution_reason = cls._extract_json_string_field(cleaned, "execution_reason")
+        final_decision = cls._extract_json_string_field(cleaned, "final_decision").lower()
         need_executor = cls._extract_json_bool_field(cleaned, "need_executor")
         intent = cls._extract_json_string_field(cleaned, "intent")
         working_hypothesis = cls._extract_json_string_field(cleaned, "working_hypothesis")
         question_to_executor = cls._extract_json_string_field(cleaned, "question_to_executor")
         final_message = cls._extract_json_string_field(cleaned, "final_message")
+        if execution_action == "start" and question_to_executor:
+            return {
+                "intent": intent,
+                "working_hypothesis": working_hypothesis,
+                "execution_action": "start",
+                "execution_reason": execution_reason,
+                "final_decision": "continue",
+                "need_executor": True,
+                "question_to_executor": question_to_executor,
+                "final_message": "",
+            }
+        if execution_action == "answer" and final_message:
+            return {
+                "intent": intent,
+                "working_hypothesis": working_hypothesis,
+                "execution_action": "answer",
+                "execution_reason": execution_reason,
+                "final_decision": "answer",
+                "need_executor": False,
+                "question_to_executor": "",
+                "final_message": final_message,
+            }
         if need_executor is True and question_to_executor:
             return {
                 "intent": intent,
@@ -615,8 +780,8 @@ class MainBrainService:
     @classmethod
     def _recover_finalize(cls, raw: str) -> MainBrainFinalizePacket | None:
         cleaned = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL).strip()
-        decision = cls._extract_json_string_field(cleaned, "decision") or "answer"
-        message = cls._extract_json_string_field(cleaned, "message")
+        decision = cls._extract_json_string_field(cleaned, "final_decision") or cls._extract_json_string_field(cleaned, "decision") or "answer"
+        message = cls._extract_json_string_field(cleaned, "final_message") or cls._extract_json_string_field(cleaned, "message")
         question_to_executor = cls._extract_json_string_field(cleaned, "question_to_executor")
         if decision not in {"answer", "ask_user", "continue"}:
             decision = "answer"
@@ -624,6 +789,8 @@ class MainBrainService:
             if not question_to_executor:
                 return None
             return {
+                "final_decision": decision,
+                "final_message": "",
                 "decision": decision,
                 "message": "",
                 "question_to_executor": question_to_executor,
@@ -631,6 +798,8 @@ class MainBrainService:
         if not message:
             return None
         return {
+            "final_decision": decision,
+            "final_message": message,
             "decision": decision,
             "message": message,
             "question_to_executor": "",
@@ -686,6 +855,9 @@ class MainBrainService:
             return {
                 "intent": "用户需要事实分析、执行帮助，或更强的问题求解。",
                 "working_hypothesis": "在给出最终表达前，需要先调用 executor 补齐事实与执行判断。",
+                "execution_action": "start",
+                "execution_reason": "main_brain_requested_executor",
+                "final_decision": "continue",
                 "need_executor": True,
                 "question_to_executor": "请分析用户请求需要的事实、工具、风险与最合适的下一步。",
                 "final_message": "",
@@ -693,6 +865,9 @@ class MainBrainService:
         return {
             "intent": "用户当前更需要陪伴式回应或轻量交流。",
             "working_hypothesis": "这一轮无需调用 executor。",
+            "execution_action": "answer",
+            "execution_reason": "main_brain_answered_directly",
+            "final_decision": "answer",
             "need_executor": False,
             "question_to_executor": "",
             "final_message": build_companion_prompt(emotion),
@@ -713,17 +888,23 @@ class MainBrainService:
             or executor_recommended_action == "ask_user"
         ):
             return {
+                "final_decision": "ask_user",
+                "final_message": build_missing_info_prompt(executor_missing),
                 "decision": "ask_user",
                 "message": build_missing_info_prompt(executor_missing),
                 "question_to_executor": "",
             }
         if executor_recommended_action == "continue":
             return {
+                "final_decision": "continue",
+                "final_message": "",
                 "decision": "continue",
                 "message": "",
                 "question_to_executor": "请补上最关键的证据缺口、主要风险，以及最稳妥的下一步。",
             }
         return {
+            "final_decision": "answer",
+            "final_message": executor_analysis or "我已经把当前思路理顺了，我们可以顺着这个继续。",
             "decision": "answer",
             "message": executor_analysis or "我已经把当前思路理顺了，我们可以顺着这个继续。",
             "question_to_executor": "",

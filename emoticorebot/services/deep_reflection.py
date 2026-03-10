@@ -32,12 +32,15 @@ You are the main brain's periodic deep reflection process for a companion AI.
 Your job:
 1. Read recent cognitive events and their light insights.
 2. Distill stable long-term memories, not one-off noise.
+3. Consolidate repeated execution/tool-use patterns only when they are stable across events.
 3. Optionally update USER.md and SOUL.md only when the pattern is stable enough.
 
 Rules:
 - Write self memories only for stable brain-side style or response patterns.
 - Write relation memories only for stable user preference, trust, familiarity, or relationship phase signals.
 - Write insight memories for higher-level observations that should guide future reflection.
+- Write durable_execution_patterns only for repeated execution/tool-use patterns that seem reusable or caution-worthy.
+- Write skill_candidates only when a repeated execution pattern looks worth promoting into an explicit skill.
 - Do not turn a single momentary mood into a long-term memory.
 - Only rewrite USER.md or SOUL.md if confidence is high and the whole markdown should be replaced.
 - Keep existing markdown structure if you rewrite either file.
@@ -61,8 +64,14 @@ Required JSON schema:
   "relation_memories": [
     {{"memory": "stable user or relation pattern", "confidence": 0.0, "evidence": ["evt_x"]}}
   ],
-  "deep_insights": [
+  "insight_memories": [
     {{"memory": "higher-level insight", "confidence": 0.0, "evidence": ["evt_x"]}}
+  ],
+  "durable_execution_patterns": [
+    {{"memory": "stable execution pattern", "confidence": 0.0, "evidence": ["evt_x"]}}
+  ],
+  "skill_candidates": [
+    {{"memory": "candidate skill pattern", "confidence": 0.0, "evidence": ["evt_x"]}}
   ],
   "soul_update": {{
     "should_write": false,
@@ -136,14 +145,29 @@ Required JSON schema:
 
             insight_added = self._append_memories(
                 self.insight_memory_file,
-                self._coerce_memory_payload(parsed.get("deep_insights")),
+                self._coerce_memory_payload(parsed.get("insight_memories") or parsed.get("deep_insights")),
                 memory_type="deep_insight",
                 source_events=events,
                 summary=deep_summary,
             )
-            if insight_added:
-                memory_updates.append(f"insight_memory:{insight_added}")
-                insight_count += insight_added
+            execution_pattern_added = self._append_memories(
+                self.insight_memory_file,
+                self._coerce_memory_payload(parsed.get("durable_execution_patterns")),
+                memory_type="durable_execution_pattern",
+                source_events=events,
+                summary=deep_summary,
+            )
+            skill_candidate_added = self._append_memories(
+                self.insight_memory_file,
+                self._coerce_memory_payload(parsed.get("skill_candidates")),
+                memory_type="skill_candidate",
+                source_events=events,
+                summary=deep_summary,
+            )
+            insight_family_added = insight_added + execution_pattern_added + skill_candidate_added
+            if insight_family_added:
+                memory_updates.append(f"insight_memory:{insight_family_added}")
+                insight_count += insight_family_added
 
             persona_delta = self._maybe_update_doc(
                 target=self.workspace / "SOUL.md",
@@ -179,15 +203,31 @@ Required JSON schema:
             content = self._compact_text(str(event.get("content", "") or ""), limit=120)
             relation_state = ((event.get("state") or {}).get("relation_state") or {}) if isinstance(event.get("state"), dict) else {}
             self_state = ((event.get("state") or {}).get("self_state") or {}) if isinstance(event.get("state"), dict) else {}
+            execution = event.get("execution") if isinstance(event.get("execution"), dict) else {}
             light_insight = event.get("light_insight") or {}
             mood = str((self_state or {}).get("mood", "") or "stable")
             relation = str((relation_state or {}).get("stage", "") or (relation_state or {}).get("signal", "") or "stable")
             insight_summary = self._compact_text(str((light_insight or {}).get("summary", "") or ""), limit=80)
             relation_shift = str((light_insight or {}).get("relation_shift", "") or "stable")
             context_update = self._compact_text(str((light_insight or {}).get("context_update", "") or ""), limit=80)
+            execution_review = light_insight.get("execution_review") if isinstance(light_insight, dict) and isinstance(light_insight.get("execution_review"), dict) else {}
+            execution_status = (
+                f"{str((execution or {}).get('control_state', 'idle') or 'idle').strip()}/"
+                f"{str((execution or {}).get('status', 'none') or 'none').strip()}"
+            )
+            execution_summary = self._compact_text(str((execution or {}).get("summary", "") or ""), limit=80)
+            execution_missing = self._normalize_list((execution or {}).get("missing"))
+            review_summary = self._compact_text(str((execution_review or {}).get("summary", "") or ""), limit=80)
+            review_effectiveness = str((execution_review or {}).get("effectiveness", "none") or "none").strip()
+            review_failure = str((execution_review or {}).get("failure_reason", "") or "").strip()
+            review_missing = self._normalize_list((execution_review or {}).get("missing_inputs"))
+            review_hint = self._compact_text(str((execution_review or {}).get("next_execution_hint", "") or ""), limit=80)
             lines.append(
                 f"- {event_id} [{timestamp}] [{actor}] mood={mood} relation={relation} shift={relation_shift} "
-                f"content={content} insight={insight_summary} context={context_update}"
+                f"content={content} insight={insight_summary} context={context_update} "
+                f"exec={execution_status} exec_summary={execution_summary} exec_missing={execution_missing} "
+                f"exec_review={review_summary} exec_effect={review_effectiveness} exec_failure={review_failure} "
+                f"exec_review_missing={review_missing} exec_next={review_hint}"
             )
         return "\n".join(lines)
 
@@ -407,6 +447,17 @@ Required JSON schema:
         if len(compact) <= limit:
             return compact
         return compact[: limit - 3] + "..."
+
+    @staticmethod
+    def _normalize_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        items: list[str] = []
+        for item in value:
+            text = " ".join(str(item or "").split()).strip()
+            if text and text not in items:
+                items.append(text)
+        return items[:6]
 
 
 __all__ = ["DeepReflectionResult", "DeepReflectionService"]

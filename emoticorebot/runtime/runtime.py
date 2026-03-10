@@ -2,9 +2,9 @@
 
 精简后的 Runtime，职责：
 1. 消息调度（接收消息、分发处理）
-2. 服务编排（协调各个服务完成任务）
-3. 会话管理（加载/保存 session）
-4. 策略生成（信号提取 → 策略参数）
+2. 显式 turn loop 编排（`main_brain -> executor`）
+3. 会话管理（加载/保存 `dialogue` 与 `internal`）
+4. 反思调度（每轮 `light_insight`，按需 / 周期 `deep_insight`）
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ from emoticorebot.bus.events import InboundMessage, OutboundMessage
 from emoticorebot.bus.queue import MessageBus
 from emoticorebot.config.schema import ModelModeConfig, ProvidersConfig
 from emoticorebot.core.context import ContextBuilder
-from emoticorebot.core.graph import run_turn_graph
 from emoticorebot.core.model import LLMFactory
+from emoticorebot.core.turn_loop import run_turn_loop
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.runtime.execution_control import RuntimeExecutionControlMixin
 from emoticorebot.runtime.turn_persistence import RuntimeTurnPersistenceMixin
@@ -85,6 +85,7 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
             self.sessions,
             executor_mode.memory_window,
             reflection_llm=self.main_brain_llm,
+            deep_insight_decider=self.main_brain_service.decide_deep_insight,
         )
         self.tool_manager = ToolManager(
             workspace,
@@ -98,37 +99,17 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         self.tool_manager.register_default_tools()
         self.executor_service.tools = self.tool_manager.get_registry()
 
-        self.subagents = None
-        self._initialize_subagent_manager()
-
         self._mcp_servers = mcp_servers or {}
-
-        from emoticorebot.core.graph import create_turn_graph
-
-        self._compiled_graph = create_turn_graph(self.workspace, runtime=self)
 
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._reflection_locks: dict[str, asyncio.Lock] = {}
+        self._reflection_tasks: dict[str, list[asyncio.Task]] = {}
+        self._deep_insight_lock = asyncio.Lock()
 
         self.subconscious = None
         self.heartbeat = None
-
-    def _initialize_subagent_manager(self) -> None:
-        """初始化 SubagentManager 并注册 spawn 工具"""
-        from emoticorebot.background.subagent import SubagentManager
-
-        self.subagents = SubagentManager(
-            workspace=self.workspace,
-            bus=self.bus,
-            executor_llm=self.executor_llm,
-            brave_api_key=self.tool_manager.brave_api_key,
-            exec_config=self.tool_manager.exec_config,
-            restrict_to_workspace=self.tool_manager.restrict_to_workspace,
-        )
-
-        self.tool_manager.register_spawn_tool(self.subagents)
-        logger.debug("SubagentManager initialized")
 
     async def run(self) -> None:
         """主循环：接收消息并调度"""
@@ -213,7 +194,7 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         msg.metadata["message_id"] = message_id
         turn_metadata = self._build_turn_metadata(session=session, user_input=msg.content, message_id=message_id)
 
-        content, final_state = await run_turn_graph(
+        content, final_state = await run_turn_loop(
             user_input=msg.content,
             workspace=self.workspace,
             runtime=self,
@@ -223,8 +204,8 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
             channel=msg.channel,
             chat_id=msg.chat_id,
             session_id=key,
+            media=msg.media,
             on_progress=on_progress,
-            agent=self._compiled_graph,
         )
 
         assistant_timestamp = datetime.now().isoformat()
@@ -251,6 +232,7 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
 
         self.sessions.save(session)
         self._save_proactive_target(msg.channel, msg.chat_id)
+        self._schedule_turn_reflection(session_key=key, state=final_state)
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -329,11 +311,52 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
     def main_brain_control_stop_execution(self, **kwargs):
         return self.main_brain_service.control_stop_execution(**kwargs)
 
+    def main_brain_build_executor_delegation(self, **kwargs):
+        return self.main_brain_service.build_executor_delegation(**kwargs)
+
     async def run_executor_request(self, **kwargs) -> "ExecutorResultPacket":
         return await self.executor_service.run_request(**kwargs)
 
-    async def write_memory(self, state: dict) -> None:
-        await self.memory_service.write_turn_memory(state)
+    async def write_memory(self, state: dict):
+        return await self.memory_service.write_turn_memory(state)
+
+    async def run_deep_insight(self, *, reason: str = "", warm_limit: int = 15):
+        async with self._deep_insight_lock:
+            return await self.memory_service.run_deep_insight(reason=reason, warm_limit=warm_limit)
+
+    def _schedule_turn_reflection(self, *, session_key: str, state: dict[str, Any]) -> None:
+        lock = self._reflection_locks.setdefault(session_key, asyncio.Lock())
+        task = asyncio.create_task(
+            self._run_turn_reflection(session_key=session_key, state=dict(state), lock=lock),
+            name=f"reflection:{session_key}",
+        )
+        self._reflection_tasks.setdefault(session_key, []).append(task)
+
+        def _cleanup(done_task: asyncio.Task, key: str = session_key) -> None:
+            tasks = self._reflection_tasks.get(key, [])
+            if done_task in tasks:
+                tasks.remove(done_task)
+            if not tasks:
+                self._reflection_tasks.pop(key, None)
+
+        task.add_done_callback(_cleanup)
+
+    async def _run_turn_reflection(
+        self,
+        *,
+        session_key: str,
+        state: dict[str, Any],
+        lock: asyncio.Lock,
+    ) -> None:
+        try:
+            async with lock:
+                result = await self.write_memory(state)
+                if result and getattr(result, "should_run_deep_insight", False):
+                    await self.run_deep_insight(
+                        reason=str(getattr(result, "deep_insight_reason", "") or ""),
+                    )
+        except Exception as exc:
+            logger.warning("Turn reflection failed for {}: {}", session_key, exc)
 
     def initialize_subconscious(self, enable_reflection: bool = True, enable_heartbeat: bool = False) -> None:
         """初始化潜意识守护进程和心跳服务"""

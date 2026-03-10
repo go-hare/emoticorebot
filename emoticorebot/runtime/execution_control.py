@@ -91,15 +91,10 @@ class RuntimeExecutionControlMixin:
             except (asyncio.CancelledError, Exception):
                 pass
 
-        subagent_cancelled = 0
-        if self.subagents:
-            subagent_cancelled = await self.subagents.cancel_by_session(msg.session_key)
-
         self._mark_last_execution_stopped(msg.session_key)
         execution = self.get_execution_state(msg.session_key)
         control = self.main_brain_control_stop_execution(
             cancelled_tasks=cancelled,
-            cancelled_subagents=subagent_cancelled,
             execution=execution,
         )
         main_brain_payload = {
@@ -126,15 +121,6 @@ class RuntimeExecutionControlMixin:
                 event="executor.execution.stopped.failed",
                 content=str(execution.get("summary", "") or "执行已被手动停止。"),
                 timestamp=timestamp,
-            )
-            self.memory_service.append_execution_memory(
-                session_id=msg.session_key,
-                turn_id=message_id,
-                execution=execution,
-                channel=msg.channel,
-                source="runtime_control",
-                event="executor.execution.stopped.failed",
-                main_brain=main_brain_payload,
             )
 
         return OutboundMessage(

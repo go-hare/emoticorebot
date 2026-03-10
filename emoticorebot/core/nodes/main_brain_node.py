@@ -1,4 +1,4 @@
-"""Main-brain node for the turn graph."""
+"""Main-brain node for the explicit turn loop."""
 
 from __future__ import annotations
 
@@ -38,9 +38,21 @@ async def main_brain_node(state: TurnState, runtime) -> TurnState:
         main_brain.execution_action = str(control.get("action", "") or "")
         main_brain.execution_reason = str(control.get("reason", "") or "")
         if main_brain.execution_action == "resume":
+            delegation = _build_executor_delegation(
+                runtime,
+                action="resume",
+                user_input=user_input,
+                question_to_executor=str(paused_execution.get("summary", "") or main_brain.question_to_executor or "继续当前执行").strip(),
+                intent=main_brain.intent,
+                working_hypothesis=main_brain.working_hypothesis,
+                session_id=state.get("session_id", ""),
+                loop_count=loop_count + 1,
+                execution=dict(control.get("execution", {}) or paused_execution),
+            )
             state["metadata"] = _set_execution_metadata(
                 metadata,
                 dict(control.get("execution", {}) or paused_execution),
+                delegation=delegation,
             )
             _queue_executor_resume(executor, user_input=user_input, execution=paused_execution)
             state["done"] = False
@@ -87,7 +99,17 @@ async def main_brain_node(state: TurnState, runtime) -> TurnState:
         if main_brain.execution_action == "start":
             question = str(control.get("question_to_executor", "") or main_brain.question_to_executor or "")
             main_brain.question_to_executor = question
-            state["metadata"] = _merge_followup_metadata(metadata)
+            delegation = _build_executor_delegation(
+                runtime,
+                action="start",
+                user_input=user_input,
+                question_to_executor=question,
+                intent=main_brain.intent,
+                working_hypothesis=main_brain.working_hypothesis,
+                session_id=state.get("session_id", ""),
+                loop_count=loop_count + 1,
+            )
+            state["metadata"] = _merge_followup_metadata(metadata, delegation=delegation)
             _queue_executor_question(executor, question)
             state["loop_count"] = loop_count + 1
             state["done"] = False
@@ -142,7 +164,22 @@ async def main_brain_node(state: TurnState, runtime) -> TurnState:
 
     if main_brain.execution_action == "continue":
         question = main_brain.question_to_executor
-        state["metadata"] = _merge_followup_metadata(metadata)
+        delegation = _build_executor_delegation(
+            runtime,
+            action="continue",
+            user_input=user_input,
+            question_to_executor=question,
+            intent=main_brain.intent,
+            working_hypothesis=main_brain.working_hypothesis,
+            session_id=state.get("session_id", ""),
+            loop_count=loop_count + 1,
+            execution=_build_executor_runtime_context(executor),
+        )
+        state["metadata"] = _merge_followup_metadata(
+            metadata,
+            delegation=delegation,
+            execution=_build_executor_runtime_context(executor),
+        )
         _queue_executor_question(executor, question)
         state["loop_count"] = loop_count + 1
         state["done"] = False
@@ -172,17 +209,33 @@ def _extract_paused_execution(metadata: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _merge_followup_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+def _merge_followup_metadata(
+    metadata: dict[str, Any],
+    *,
+    delegation: dict[str, Any] | None = None,
+    execution: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     merged = dict(metadata or {})
     merged.pop("paused_execution", None)
-    merged["execution"] = {}
+    merged_execution = dict(execution or {})
+    if delegation:
+        merged_execution["delegation"] = dict(delegation)
+    merged["execution"] = merged_execution
     return merged
 
 
-def _set_execution_metadata(metadata: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
+def _set_execution_metadata(
+    metadata: dict[str, Any],
+    execution: dict[str, Any],
+    *,
+    delegation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     updated = dict(metadata or {})
     updated.pop("paused_execution", None)
-    updated["execution"] = dict(execution or {})
+    execution_payload = dict(execution or {})
+    if delegation:
+        execution_payload["delegation"] = dict(delegation)
+    updated["execution"] = execution_payload
     return updated
 
 
@@ -227,6 +280,36 @@ def _queue_executor_resume(executor: ExecutorState, *, user_input: str, executio
         if str(item).strip()
     ]
     executor.pending_review = dict(execution.get("pending_review", {}) or {})
+
+
+def _build_executor_runtime_context(executor: ExecutorState) -> dict[str, Any]:
+    return {
+        "invoked": True,
+        "thread_id": str(executor.thread_id or "").strip(),
+        "run_id": str(executor.run_id or "").strip(),
+        "control_state": str(executor.control_state or "idle").strip(),
+        "status": str(executor.status or "none").strip(),
+        "summary": str(executor.analysis or "").strip(),
+        "risks": list(executor.risks or []),
+        "recommended_action": str(executor.recommended_action or "").strip(),
+        "confidence": float(executor.confidence or 0.0),
+        "missing": [str(item).strip() for item in list(executor.missing or []) if str(item).strip()],
+        "pending_review": dict(executor.pending_review or {}),
+    }
+
+
+def _build_executor_delegation(runtime, **kwargs) -> dict[str, Any]:
+    builder = getattr(runtime, "main_brain_build_executor_delegation", None)
+    if callable(builder):
+        return dict(builder(**kwargs) or {})
+    question = str(kwargs.get("question_to_executor", "") or "").strip()
+    return {
+        "task_id": "",
+        "goal": question,
+        "context": [],
+        "constraints": [],
+        "expected_output": "",
+    }
 
 
 def _is_plain_resume_signal(text: str) -> bool:

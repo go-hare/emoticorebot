@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from emoticorebot.services.tool_reflection import ToolLightReflectionService
 from emoticorebot.tools import (
     CronTool,
     EditFileTool,
@@ -21,7 +20,6 @@ from emoticorebot.tools import (
     ListDirTool,
     MessageTool,
     ReadFileTool,
-    SpawnTool,
     ToolRegistry,
     WebFetchTool,
     WebSearchTool,
@@ -40,10 +38,9 @@ class ToolManager:
     生命周期：
     1. __init__ → 配置参数
     2. register_default_tools() → 注册文件/执行/网络/消息/cron 工具
-    3. register_spawn_tool(manager) → 注册 spawn 工具（可选）
-    4. set_context(...) → 每次请求前注入 channel/chat_id
-    5. connect_mcp_servers(...) → 一次性连接 MCP（可选）
-    6. close_mcp() → 关闭连接（应用退出时）
+    3. set_context(...) → 每次请求前注入 channel/chat_id
+    4. connect_mcp_servers(...) → 一次性连接 MCP（可选）
+    5. close_mcp() → 关闭连接（应用退出时）
     """
 
     def __init__(
@@ -63,8 +60,6 @@ class ToolManager:
         self.restrict_to_workspace = restrict_to_workspace
 
         self.registry = ToolRegistry()
-        self.tool_reflection = ToolLightReflectionService(workspace)
-        self.registry.set_execution_observer(self.tool_reflection.record_execution)
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
@@ -101,11 +96,6 @@ class ToolManager:
 
         logger.info("Default tools registered: {} tools", len(self.registry.get_definitions()))
 
-    def register_spawn_tool(self, subagent_manager: object) -> None:
-        """注册子任务派生工具（依赖 SubagentManager）。"""
-        self.registry.register(SpawnTool(subagent_manager))
-        logger.debug("Spawn tool registered")
-
     def set_context(
         self,
         channel: str,
@@ -121,13 +111,11 @@ class ToolManager:
             session_key=session_key,
             source="executor",
         )
-        for name in ("message", "cron", "spawn"):
+        for name in ("message", "cron"):
             if tool := self.registry.get(name):
                 if hasattr(tool, "set_context"):
                     if name == "message":
                         tool.set_context(channel, chat_id, message_id)
-                    elif name == "spawn" and session_key:
-                        tool.set_context(channel, chat_id, session_key)
                     else:
                         tool.set_context(channel, chat_id)
 

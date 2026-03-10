@@ -5,7 +5,7 @@
 - exec_tool.py   ExecTool（Shell 命令执行）
 - file_tools.py  文件操作工具（read/write/edit/list/search/insert/delete/replace）
 - web_tools.py   网络工具（搜索/抓取）
-- system_tools.py 系统工具（消息发送/定时任务/子任务派生）
+- system_tools.py 系统工具（消息发送/定时任务）
 - mcp_tool.py    MCP 工具封装
 """
 
@@ -24,7 +24,7 @@ from emoticorebot.tools.file_tools import (
     ReplaceLinesTool,
 )
 from emoticorebot.tools.web_tools import WebFetchTool, WebSearchTool
-from emoticorebot.tools.system_tools import CronTool, MessageTool, SpawnTool
+from emoticorebot.tools.system_tools import CronTool, MessageTool
 from emoticorebot.tools.mcp_tool import MCPTool
 
 __all__ = [
@@ -48,7 +48,6 @@ __all__ = [
     # 系统
     "MessageTool",
     "CronTool",
-    "SpawnTool",
     # MCP
     "MCPTool",
 ]

@@ -1,4 +1,4 @@
-"""Executor node for the turn graph."""
+"""Executor node for the explicit turn loop."""
 
 from __future__ import annotations
 

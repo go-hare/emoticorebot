@@ -1,4 +1,4 @@
-"""Turn-graph state definitions."""
+"""Turn-loop state definitions."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ MainBrainExecutionAction = Literal["", "start", "continue", "pause", "stop", "re
 
 
 class ExecutorResultPacket(TypedDict, total=False):
-    """Normalized executor result packet returned into the turn graph."""
+    """Normalized executor result packet returned into the turn loop."""
 
     control_state: ExecutionControlState
     status: ExecutionStatus
@@ -39,6 +39,9 @@ class MainBrainDeliberationPacket(TypedDict, total=False):
 
     intent: str
     working_hypothesis: str
+    execution_action: Literal["start", "answer"]
+    execution_reason: str
+    final_decision: Literal["answer", "continue"]
     need_executor: bool
     question_to_executor: str
     final_message: str
@@ -51,6 +54,8 @@ class MainBrainDeliberationPacket(TypedDict, total=False):
 class MainBrainFinalizePacket(TypedDict, total=False):
     """Main-brain final decision after reading the executor packet."""
 
+    final_decision: Literal["answer", "ask_user", "continue"]
+    final_message: str
     decision: Literal["answer", "ask_user", "continue"]
     message: str
     question_to_executor: str
@@ -115,7 +120,7 @@ class MainBrainState:
 
 
 class TurnState(TypedDict, total=False):
-    """Runtime state for the turn graph."""
+    """Runtime state for the explicit main_brain -> executor loop."""
 
     user_input: str
     dialogue_history: list[dict]

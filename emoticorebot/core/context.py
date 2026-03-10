@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,10 @@ class ContextBuilder:
         if user:
             parts.append(f"## USER\n\n{user}")
 
+        long_term_memory = self._load_long_term_memory_context()
+        if long_term_memory:
+            parts.append(f"## Long-term Memory\n\n{long_term_memory}")
+
         state = self._load_file("current_state.md")
         if state:
             parts.append(f"## Current State\n\n{state}")
@@ -72,10 +77,11 @@ You lead understanding, tone, judgment, reflection, and the final user-facing re
 
 ## Responsibilities
 1. Handle the user-visible dialogue.
-2. Combine SOUL.md, USER.md, current state, and cognitive context to understand the user.
-3. Decide whether the current turn is companionship, lightweight discussion, or needs executor help.
+2. Combine SOUL.md, USER.md, long-term memory, current state, and cognitive context to understand the user.
+3. Decide whether the current turn should be answered directly or should invoke the executor.
 4. Delegate to the executor only for factual checking, tool use, complex analysis, or multi-step execution.
 5. Keep final expression authority. The executor is an internal capability, not the external speaker.
+6. Trigger light_insight after every turn, and decide whether deep_insight should be scheduled.
 
 ## Boundaries
 1. Do not expose raw logs, JSON, tool traces, or internal chain-of-thought.
@@ -85,7 +91,7 @@ You lead understanding, tone, judgment, reflection, and the final user-facing re
 
 ## Memory Orientation
 1. Relationship, preference, tone, and emotional continuity belong to the companionship side.
-2. Facts, reusable procedures, tool learnings, and execution artifacts belong to the executor side.
+2. Facts, execution materials, and tool learnings come from the executor side, but only the main brain decides whether they become stable memory or future skills.
 3. Use PAD, relation state, and user context to adjust tone and companionship tension."""
 
     @staticmethod
@@ -107,11 +113,101 @@ You lead understanding, tone, judgment, reflection, and the final user-facing re
         content = self._load_file("AGENTS.md")
         extracted = self._extract_markdown_section(
             content,
-            headings=["# Main Brain 执行层规则", "# 主脑执行层规则", "# Main Brain Rules"],
+            headings=[
+                "# `main_brain` 主脑规则",
+                "# main_brain 主脑规则",
+                "# Main Brain 主脑规则",
+                "# Main Brain 执行层规则",
+                "# 主脑执行层规则",
+                "# Main Brain Rules",
+            ],
         )
         if extracted:
             return extracted
         return self._default_main_brain_rules()
+
+    def _load_long_term_memory_context(self, *, per_store_limit: int = 3) -> str:
+        memory_dir = self.workspace / "memory"
+        if not memory_dir.exists():
+            return ""
+
+        sections = [
+            self._format_memory_store(
+                memory_dir / "self_memory.jsonl",
+                title="Self Memory",
+                per_store_limit=per_store_limit,
+            ),
+            self._format_memory_store(
+                memory_dir / "relation_memory.jsonl",
+                title="Relation Memory",
+                per_store_limit=per_store_limit,
+            ),
+            self._format_memory_store(
+                memory_dir / "insight_memory.jsonl",
+                title="Insight Memory",
+                per_store_limit=per_store_limit,
+            ),
+        ]
+        return "\n\n".join(section for section in sections if section)
+
+    def _format_memory_store(self, path: Path, *, title: str, per_store_limit: int) -> str:
+        entries = self._read_memory_entries(path, limit=per_store_limit)
+        if not entries:
+            return ""
+
+        bullets: list[str] = []
+        for entry in entries:
+            memory_text = self._compact_prompt_text(str(entry.get("memory", "") or ""), limit=180)
+            if not memory_text:
+                continue
+
+            suffix: list[str] = []
+            timestamp = str(entry.get("timestamp", "") or "").strip()
+            if timestamp:
+                suffix.append(timestamp[:10])
+            try:
+                confidence = float(entry.get("confidence", 0.0) or 0.0)
+            except Exception:
+                confidence = 0.0
+            if confidence > 0.0:
+                suffix.append(f"confidence={confidence:.2f}")
+            bullets.append(
+                f"- {memory_text}" + (f" ({'; '.join(suffix)})" if suffix else "")
+            )
+
+        if not bullets:
+            return ""
+        return f"### {title}\n" + "\n".join(bullets)
+
+    @staticmethod
+    def _read_memory_entries(path: Path, *, limit: int) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+
+        entries: list[dict[str, Any]] = []
+        try:
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(item, dict):
+                    entries.append(item)
+        except Exception:
+            return []
+        if limit <= 0:
+            return entries
+        return entries[-limit:]
+
+    @staticmethod
+    def _compact_prompt_text(text: str, *, limit: int = 160) -> str:
+        compact = " ".join(str(text or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 1] + "…"
 
     @staticmethod
     def _extract_markdown_section(content: str, *, headings: list[str]) -> str:
@@ -134,8 +230,9 @@ You lead understanding, tone, judgment, reflection, and the final user-facing re
             "1. Default to companionship-first understanding.\n"
             "2. Only delegate when executor help materially improves correctness or execution.\n"
             "3. Keep responses natural, warm, and grounded in SOUL.md.\n"
-            "4. When the user gives direct facts or stable preferences, surface them for memory updates.\n"
-            "5. When executor output is incomplete, decide whether to ask the user or continue internal deliberation."
+            "4. Trigger light_insight every turn after the reply, and only schedule deep_insight when the turn is worth deeper consolidation.\n"
+            "5. When the user gives direct facts or stable preferences, surface them for memory updates.\n"
+            "6. When executor output is incomplete, decide whether to ask the user or continue internal deliberation."
         )
 
     def build_messages(

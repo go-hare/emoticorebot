@@ -1,4 +1,4 @@
-"""系统工具 - 消息发送、定时任务、子任务派生。"""
+"""系统工具 - 消息发送、定时任务。"""
 
 from __future__ import annotations
 
@@ -165,50 +165,4 @@ class CronTool(Tool):
             return f"Error managing cron: {e}"
 
 
-class SpawnTool(Tool):
-    """在后台派生子任务 agent（长任务并发执行）"""
-
-    def __init__(self, subagent_manager: Any):
-        self._manager = subagent_manager
-        self._channel: str = "cli"
-        self._chat_id: str = "direct"
-        self._session_key: str | None = None
-
-    def set_context(self, channel: str, chat_id: str, session_key: str | None = None) -> None:
-        self._channel = channel
-        self._chat_id = chat_id
-        self._session_key = session_key
-
-    @property
-    def name(self) -> str:
-        return "spawn"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Spawn a background subagent to handle a long-running or parallel task. "
-            "The subagent runs independently and reports results when done."
-        )
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "task": {"type": "string", "description": "Task description for the subagent"},
-                "label": {"type": "string", "description": "Short label for display (optional)"},
-            },
-            "required": ["task"],
-        }
-
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
-        return await self._manager.spawn(
-            task=task,
-            label=label,
-            origin_channel=self._channel,
-            origin_chat_id=self._chat_id,
-            session_key=self._session_key,
-        )
-
-
-__all__ = ["MessageTool", "CronTool", "SpawnTool"]
+__all__ = ["MessageTool", "CronTool"]

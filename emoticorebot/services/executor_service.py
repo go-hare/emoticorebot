@@ -41,7 +41,6 @@ class ExecutorService:
     The inner execution model is Deep Agents-based:
     - planning
     - skills
-    - subagents
     - long-running complex tasks
     """
 
@@ -89,7 +88,7 @@ class ExecutorService:
             return self._failed_packet("executor 未收到有效问题。")
 
         if on_progress is not None:
-            await on_progress("executor 正在恢复上次执行" if can_resume else "executor 正在规划内部问题")
+            await on_progress("正在恢复内部执行" if can_resume else "正在规划内部执行")
 
         agent = self._ensure_agent()
         run_id = str((execution_context or {}).get("run_id", "") or "").strip() if can_resume else ""
@@ -172,7 +171,6 @@ class ExecutorService:
         tools = self._build_tools()
         backend = self._build_backend()
         use_virtual_skill_paths = backend is not None
-        subagents = self._build_subagents(virtual_skill_paths=use_virtual_skill_paths)
         skills = self._build_skill_paths(virtual_mode=use_virtual_skill_paths)
         checkpointer = self._ensure_checkpointer()
         interrupt_on = self._build_interrupt_on()
@@ -183,8 +181,6 @@ class ExecutorService:
                 "tools": tools,
                 "system_prompt": self._build_agent_instructions(),
             }
-            if subagents:
-                kwargs["subagents"] = subagents
             if skills:
                 kwargs["skills"] = skills
             if backend is not None:
@@ -230,10 +226,10 @@ class ExecutorService:
             "你是 executor，负责复杂问题的规划、执行、核查与结果收口。\n"
             "你处理的是 main_brain -> executor 这条内部执行链路，不负责对用户做最终表达。\n\n"
             f"当前工作区目录是 `{workspace}`。\n"
-            "工作区虚拟路径通过 `/state/` 暴露，技能目录通过 `/skills/workspace/` 与 `/skills/builtin/` 暴露。\n\n"
+            "工作区虚拟路径通过 `/state/` 暴露，长期记忆通过 `/memory/` 暴露，技能目录通过 `/skills/workspace/` 与 `/skills/builtin/` 暴露。\n\n"
             "## 职责\n"
             "1. 接收 main_brain 委托的问题并转成可执行步骤。\n"
-            "2. 必要时拆分步骤、调用工具、使用 skills、委派子代理。\n"
+            "2. 必要时拆分步骤、调用工具、使用 skills，并在单个执行内完成汇总。\n"
             "3. 给出清晰结论、风险、缺失信息和下一步建议。\n"
             "4. 只关注把事情做对，不模仿主脑的陪伴语气。\n\n"
             "## 边界\n"
@@ -241,11 +237,11 @@ class ExecutorService:
             "2. 不把内部分析伪装成用户可见对话。\n"
             "3. 不负责关系判断、人格维护、情绪陪伴和主脑反思。\n"
             "4. 不更新 `SOUL.md`、`USER.md`，也不负责 `light_insight` / `deep_insight`。\n"
-            "5. 不自行读写长期 `memory` 沉淀文件；工具调用后的即时经验会由外层记录为 `tool_light_reflection`。\n"
+            "5. 不自行读写长期 `memory` 沉淀文件；原始执行轨迹只作为运行时材料，是否进入 `light_insight` / `deep_insight` 由主脑决定。\n"
             "6. 不保留临时草稿、一次性中间产物、原始噪声输出。\n\n"
             "## 输出规则\n"
             "1. 最终只输出协议要求的 JSON。\n"
-            "2. JSON 只包含 status、analysis、risks、missing、recommended_action、confidence。"
+            "2. JSON 只包含 status、analysis、risks、missing、recommended_action、confidence，以及确有必要时的 pending_review。"
         )
         skills_context = self._build_internal_skill_context()
         extras = [section for section in (skills_context,) if section]
@@ -272,6 +268,7 @@ class ExecutorService:
 
     def _build_backend(self) -> Any | None:
         workspace = Path(self.context.workspace).expanduser().resolve()
+        memory_root = (workspace / "memory").resolve()
         workspace_skills_root = (workspace / "skills").resolve()
         builtin_skills_root = BUILTIN_SKILLS_DIR.resolve()
 
@@ -281,7 +278,9 @@ class ExecutorService:
             return None
 
         def build_agent_backend(rt: Any) -> Any:
+            memory_root.mkdir(parents=True, exist_ok=True)
             routes: dict[str, Any] = {
+                "/memory/": FilesystemBackend(root_dir=memory_root, virtual_mode=True),
                 "/state/": FilesystemBackend(root_dir=workspace, virtual_mode=True),
             }
             if builtin_skills_root.exists():
@@ -302,38 +301,9 @@ class ExecutorService:
         return build_agent_backend
 
     def _build_tools(self) -> list[Any]:
-        return self._build_registry_tools(["web_search", "web_fetch", "message", "cron"])
-
-    def _build_subagents(self, *, virtual_skill_paths: bool = False) -> list[Any]:
-        research_tools = self._build_registry_tools(["web_search", "web_fetch"])
-        workspace_tools = self._build_registry_tools(["message", "cron"])
-        skill_paths = self._build_skill_paths(virtual_mode=virtual_skill_paths)
-
-        subagents: list[dict[str, Any]] = [
-            {
-                "name": "research",
-                "description": "负责信息检索、网页抓取、事实对比、资料整理。",
-                "system_prompt": (
-                    "你是 research 子 agent。专注检索、阅读、比对、总结外部信息。"
-                    "避免直接做大规模工作区修改。"
-                ),
-                "tools": research_tools,
-            },
-            {
-                "name": "workspace",
-                "description": "负责本地工作区分析、文件修改、命令执行、代码与文档处理。",
-                "system_prompt": (
-                    "你是 workspace 子 agent。专注本地文件、代码、命令与工作区操作。"
-                    "优先保持修改最小且可验证。"
-                ),
-                "tools": workspace_tools,
-            },
-        ]
-
-        if skill_paths:
-            for item in subagents:
-                item["skills"] = skill_paths
-        return subagents
+        if self.tools is None:
+            return []
+        return self._build_registry_tools(self.tools.tool_names)
 
     def _build_registry_tools(self, names: list[str]) -> list[Any]:
         if self.tools is None:
@@ -423,9 +393,9 @@ class ExecutorService:
         execution_context: dict[str, Any] | None,
         media: list[str] | None,
     ) -> str:
-        parts = [f"内部问题：{request}"] if request else []
-
         execution = execution_context or {}
+        delegation = self._normalize_delegation(execution.get("delegation"), fallback_request=request)
+        parts = self._build_delegation_prompt_sections(delegation=delegation)
         resume_payload = execution.get("resume_payload")
         missing = self._extract_missing(execution)
         thread_id = str(execution.get("thread_id", "") or "").strip()
@@ -452,9 +422,64 @@ class ExecutorService:
             "请完成复杂问题的分析与执行。最终请只输出一个 JSON 对象："
             '{"status":"completed|needs_input|uncertain|failed","analysis":"...",'
             '"risks":["..."],"missing":["..."],'
-            '"recommended_action":"answer|ask_user|continue","confidence":0.0}'
+            '"recommended_action":"answer|ask_user|continue","confidence":0.0,'
+            '"pending_review":{}}'
         )
         return "\n".join(parts)
+
+    @staticmethod
+    def _normalize_delegation(value: Any, *, fallback_request: str) -> dict[str, Any]:
+        if isinstance(value, dict):
+            delegation = dict(value)
+        else:
+            delegation = {}
+
+        goal = str(delegation.get("goal", "") or "").strip() or str(fallback_request or "").strip()
+        context = [str(item).strip() for item in list(delegation.get("context", []) or []) if str(item).strip()]
+        constraints = [str(item).strip() for item in list(delegation.get("constraints", []) or []) if str(item).strip()]
+        expected_output = str(delegation.get("expected_output", "") or "").strip()
+
+        normalized = {
+            "task_id": str(delegation.get("task_id", "") or "").strip(),
+            "goal": goal,
+            "context": context,
+            "constraints": constraints,
+            "expected_output": expected_output,
+        }
+        resume_payload = delegation.get("resume_payload")
+        if resume_payload not in (None, "", [], {}):
+            normalized["resume_payload"] = resume_payload
+        return normalized
+
+    @staticmethod
+    def _build_delegation_prompt_sections(*, delegation: dict[str, Any]) -> list[str]:
+        goal = str(delegation.get("goal", "") or "").strip()
+        parts = [f"内部目标：{goal}"] if goal else []
+
+        task_id = str(delegation.get("task_id", "") or "").strip()
+        if task_id:
+            parts.append(f"任务标识：{task_id}")
+
+        context = [str(item).strip() for item in list(delegation.get("context", []) or []) if str(item).strip()]
+        if context:
+            parts.append("任务上下文：")
+            parts.extend(f"- {item}" for item in context[:6])
+
+        constraints = [str(item).strip() for item in list(delegation.get("constraints", []) or []) if str(item).strip()]
+        if constraints:
+            parts.append("执行约束：")
+            parts.extend(f"- {item}" for item in constraints[:6])
+
+        expected_output = str(delegation.get("expected_output", "") or "").strip()
+        if expected_output:
+            parts.append(f"期望输出：{expected_output}")
+
+        resume_payload = delegation.get("resume_payload")
+        if resume_payload not in (None, "", [], {}):
+            payload_text = resume_payload if isinstance(resume_payload, str) else json.dumps(resume_payload, ensure_ascii=False)
+            parts.append(f"委托恢复载荷：{payload_text}")
+
+        return parts
 
     @staticmethod
     def _compact_history(history: list[dict[str, Any]] | None, *, limit: int = 6) -> list[str]:
@@ -854,6 +879,7 @@ class ExecutorService:
                 recommended_action = "answer"
             missing = [str(item).strip() for item in parsed.get("missing", []) if str(item).strip()]
             risks = [str(item).strip() for item in parsed.get("risks", []) if str(item).strip()][:8]
+            pending_review = dict(parsed.get("pending_review", {}) or {}) if isinstance(parsed.get("pending_review"), dict) else {}
             confidence = parsed.get("confidence", 0.0)
             try:
                 confidence_value = max(0.0, min(1.0, float(confidence)))
@@ -864,6 +890,7 @@ class ExecutorService:
                 raw_status=raw_status,
                 missing=missing,
                 recommended_action=recommended_action,
+                pending_review=pending_review,
             )
             packet = {
                 "control_state": control_state,
@@ -873,6 +900,7 @@ class ExecutorService:
                 "missing": missing,
                 "recommended_action": recommended_action,
                 "confidence": confidence_value,
+                "pending_review": pending_review,
             }
             packet.update(metrics)
             return packet
@@ -982,10 +1010,16 @@ class ExecutorService:
         }
 
     @staticmethod
-    def _map_result_status(*, raw_status: str, missing: list[str], recommended_action: str) -> tuple[str, str]:
+    def _map_result_status(
+        *,
+        raw_status: str,
+        missing: list[str],
+        recommended_action: str,
+        pending_review: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
         if raw_status == "failed":
             return "stopped", "failed"
-        if raw_status == "needs_input" or missing or recommended_action == "ask_user":
+        if raw_status == "needs_input" or missing or recommended_action == "ask_user" or pending_review:
             return "paused", "need_more"
         if raw_status == "uncertain" or recommended_action == "continue":
             return "completed", "need_more"

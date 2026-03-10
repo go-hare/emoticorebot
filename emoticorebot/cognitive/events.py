@@ -139,7 +139,7 @@ class CognitiveEvent:
         output = str(state.get("output", "") or "").strip()
         executor = state.get("executor")
         execution = cls._build_execution(state=state, executor=executor)
-        insight_payload = dict(light_insight or cls._build_light_insight())
+        insight_payload = cls._normalize_light_insight(light_insight)
 
         relation_signal = cls._infer_relation(user_input=user_input, emotion_event=emotion_event)
         relation_state = cls._build_relation_state(relation_signal)
@@ -154,11 +154,10 @@ class CognitiveEvent:
 
         events: list[CognitiveEvent] = []
         if user_input:
-            user_emotion = cls._infer_user_emotion(user_input=user_input, emotion_event=emotion_event)
             self_state = cls._build_self_state(
                 pad=pad,
                 drives=drives,
-                mood=str(user_emotion["label"]),
+                mood=emotion_label,
                 tone="attentive",
                 companionship_tension=cls._infer_companionship_tension(relation_signal),
             )
@@ -515,7 +514,7 @@ class CognitiveEvent:
 
     @classmethod
     def _build_growth_state(cls, *, light_insight: dict[str, Any] | None = None) -> dict[str, Any]:
-        insight = light_insight if isinstance(light_insight, dict) else {}
+        insight = cls._normalize_light_insight(light_insight)
         direct_updates = insight.get("direct_updates") if isinstance(insight.get("direct_updates"), dict) else {}
         stable_preferences = cls._normalize_string_items(direct_updates.get("user_profile"))
         stable_preferences.extend(cls._normalize_string_items(direct_updates.get("soul_preferences")))
@@ -539,6 +538,13 @@ class CognitiveEvent:
             "relation_shift": "stable",
             "context_update": "",
             "next_hint": "",
+            "execution_review": {
+                "summary": "",
+                "effectiveness": "none",
+                "failure_reason": "",
+                "missing_inputs": [],
+                "next_execution_hint": "",
+            },
             "direct_updates": {
                 "user_profile": [],
                 "soul_preferences": [],
@@ -552,6 +558,45 @@ class CognitiveEvent:
                     "state": False,
                 },
                 "applied_state_snapshot": {},
+            },
+        }
+
+    @classmethod
+    def _normalize_light_insight(cls, light_insight: dict[str, Any] | None) -> dict[str, Any]:
+        default = cls._build_light_insight()
+        if not isinstance(light_insight, dict):
+            return default
+
+        direct_updates = light_insight.get("direct_updates") if isinstance(light_insight.get("direct_updates"), dict) else {}
+        current_state_updates = direct_updates.get("current_state_updates") if isinstance(direct_updates.get("current_state_updates"), dict) else {}
+        applied = direct_updates.get("applied") if isinstance(direct_updates.get("applied"), dict) else {}
+        execution_review = light_insight.get("execution_review") if isinstance(light_insight.get("execution_review"), dict) else {}
+
+        return {
+            "summary": str(light_insight.get("summary", "") or "").strip(),
+            "relation_shift": str(light_insight.get("relation_shift", "stable") or "stable").strip() or "stable",
+            "context_update": str(light_insight.get("context_update", "") or "").strip(),
+            "next_hint": str(light_insight.get("next_hint", "") or "").strip(),
+            "execution_review": {
+                "summary": str(execution_review.get("summary", "") or "").strip(),
+                "effectiveness": str(execution_review.get("effectiveness", "none") or "none").strip() or "none",
+                "failure_reason": str(execution_review.get("failure_reason", "") or "").strip(),
+                "missing_inputs": cls._normalize_string_items(execution_review.get("missing_inputs")),
+                "next_execution_hint": str(execution_review.get("next_execution_hint", "") or "").strip(),
+            },
+            "direct_updates": {
+                "user_profile": cls._normalize_string_items(direct_updates.get("user_profile")),
+                "soul_preferences": cls._normalize_string_items(direct_updates.get("soul_preferences")),
+                "current_state_updates": {
+                    "pad": dict(current_state_updates.get("pad")) if isinstance(current_state_updates.get("pad"), dict) else None,
+                    "drives": dict(current_state_updates.get("drives")) if isinstance(current_state_updates.get("drives"), dict) else None,
+                },
+                "applied": {
+                    "user": bool(applied.get("user", False)),
+                    "soul": bool(applied.get("soul", False)),
+                    "state": bool(applied.get("state", False)),
+                },
+                "applied_state_snapshot": dict(direct_updates.get("applied_state_snapshot")) if isinstance(direct_updates.get("applied_state_snapshot"), dict) else {},
             },
         }
 
@@ -575,6 +620,22 @@ class CognitiveEvent:
             getattr(executor, "status", "") if executor is not None else execution.get("status", ""),
             control_state=control_state,
         )
+        recommended_action = CognitiveEvent._normalize_recommended_action(
+            getattr(executor, "recommended_action", "") if executor is not None else execution.get("recommended_action", "")
+        )
+        pending_review = (
+            dict(getattr(executor, "pending_review", {}) or {})
+            if executor is not None
+            else dict(execution.get("pending_review", {}) or {})
+        )
+        try:
+            confidence = float(
+                getattr(executor, "confidence", 0.0)
+                if executor is not None
+                else execution.get("confidence", 0.0)
+            )
+        except Exception:
+            confidence = 0.0
         return {
             "invoked": True,
             "control_state": control_state,
@@ -596,6 +657,8 @@ class CognitiveEvent:
                 or ""
             ).strip(),
             "summary": CognitiveEvent._normalize_text(summary, limit=180),
+            "recommended_action": recommended_action,
+            "confidence": round(max(0.0, min(1.0, confidence)), 2),
             "missing": [
                 str(item).strip()
                 for item in list(
@@ -605,6 +668,7 @@ class CognitiveEvent:
                 )
                 if str(item).strip()
             ],
+            "pending_review": pending_review,
         }
 
     @staticmethod
@@ -670,10 +734,14 @@ class CognitiveEvent:
         execution: dict[str, Any] | None = None,
     ) -> list[str]:
         unfinished: list[str] = []
-        if isinstance(light_insight, dict):
-            next_hint = str(light_insight.get("next_hint", "") or "").strip()
-            if next_hint:
-                unfinished.append(cls._normalize_text(next_hint, limit=80))
+        insight = cls._normalize_light_insight(light_insight)
+        next_hint = str(insight.get("next_hint", "") or "").strip()
+        if next_hint:
+            unfinished.append(cls._normalize_text(next_hint, limit=80))
+        execution_review = insight.get("execution_review") if isinstance(insight.get("execution_review"), dict) else {}
+        next_execution_hint = str(execution_review.get("next_execution_hint", "") or "").strip()
+        if next_execution_hint:
+            unfinished.append(cls._normalize_text(next_execution_hint, limit=80))
         if isinstance(execution, dict) and str(execution.get("status", "") or "") == "need_more":
             missing = execution.get("missing") if isinstance(execution.get("missing"), list) else []
             if missing:
@@ -703,8 +771,18 @@ class CognitiveEvent:
             "thread_id": "",
             "run_id": "",
             "summary": "",
+            "recommended_action": "",
+            "confidence": 0.0,
             "missing": [],
+            "pending_review": {},
         }
+
+    @staticmethod
+    def _normalize_recommended_action(value: Any) -> str:
+        action = str(value or "").strip().lower()
+        if action in {"answer", "ask_user", "continue"}:
+            return action
+        return ""
 
     @staticmethod
     def _normalize_execution_control_state(value: Any) -> str:
