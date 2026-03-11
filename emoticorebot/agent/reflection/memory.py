@@ -10,11 +10,11 @@ from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 
 from loguru import logger
 
-from emoticorebot.cognitive import CognitiveEvent
+from emoticorebot.agent.cognitive import CognitiveEvent
 from emoticorebot.memory import MemoryStore
 from emoticorebot.models.emotion_state import EmotionStateManager
-from emoticorebot.services.deep_reflection import DeepReflectionResult, DeepReflectionService
-from emoticorebot.services.turn_reflection import TurnReflectionService
+from emoticorebot.agent.reflection.deep import DeepReflectionResult, DeepReflectionService
+from emoticorebot.agent.reflection.turn import TurnReflectionService
 from emoticorebot.session.manager import SessionManager
 
 
@@ -81,7 +81,7 @@ class MemoryService:
         self.emotion_mgr.update_from_conversation(user_input, output)
         snapshot = self.emotion_mgr.snapshot()
         importance = CognitiveEvent.estimate_importance(user_input, output)
-        execution = self._extract_execution_snapshot_from_state(state)
+        task = self._extract_task_snapshot_from_state(state)
 
         reflection = await self.turn_reflection.reflect_turn(
             user_input=user_input,
@@ -89,7 +89,7 @@ class MemoryService:
             emotion_label=str(snapshot.get("emotion_label", "平静") or "平静"),
             pad=dict(snapshot.get("pad", {}) or {}),
             drives=dict(snapshot.get("drives", {}) or {}),
-            execution=execution,
+            execution=task,
         )
 
         updated_user, updated_soul, updated_state, state_snapshot = self._apply_turn_reflection_direct_updates(
@@ -117,7 +117,7 @@ class MemoryService:
         should_run_deep_reflection, deep_reflection_reason = decider(
             state=state,
             importance=importance,
-            execution=execution,
+            task=task,
             turn_reflection=reflection.turn_reflection,
         )
         if should_run_deep_reflection:
@@ -258,7 +258,7 @@ class MemoryService:
                         "session_id": session_id,
                         "turn_id": turn_id,
                         "event_ids": event_ids,
-                        "producer": "main_brain.turn_reflection",
+                        "producer": "brain.turn_reflection",
                         "tool_names": tool_names,
                     },
                     "links": {
@@ -276,7 +276,7 @@ class MemoryService:
     @staticmethod
     def _extract_tool_names(state: dict[str, Any]) -> list[str]:
         names: list[str] = []
-        for item in list(state.get("executor_trace", []) or []):
+        for item in list(state.get("task_trace", []) or []):
             if not isinstance(item, dict):
                 continue
             for key in ("tool_name", "tool", "name", "node"):
@@ -286,61 +286,63 @@ class MemoryService:
         return names[:6]
 
     @staticmethod
-    def _extract_execution_snapshot_from_state(state: dict[str, Any]) -> dict[str, Any]:
-        executor = state.get("executor")
+    def _extract_task_snapshot_from_state(state: dict[str, Any]) -> dict[str, Any]:
+        task = state.get("task")
         metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-        execution_metadata = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
-        if executor is None and not execution_metadata:
+        task_metadata = metadata.get("task") if isinstance(metadata.get("task"), dict) else {}
+        if not task_metadata:
+            task_metadata = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
+        if task is None and not task_metadata:
             return {}
 
         summary = ""
-        if executor is not None:
-            summary = str(getattr(executor, "analysis", "") or "").strip()
+        if task is not None:
+            summary = str(getattr(task, "analysis", "") or "").strip()
         if not summary:
-            summary = str(execution_metadata.get("summary", "") or "").strip()
+            summary = str(task_metadata.get("summary", "") or "").strip()
 
         try:
             confidence_value = float(
-                getattr(executor, "confidence", 0.0)
-                if executor is not None
-                else execution_metadata.get("confidence", 0.0)
+                getattr(task, "confidence", 0.0)
+                if task is not None
+                else task_metadata.get("confidence", 0.0)
             )
         except Exception:
             confidence_value = 0.0
 
         return {
-            "invoked": executor is not None or bool(execution_metadata),
+            "invoked": task is not None or bool(task_metadata),
             "thread_id": str(
-                (getattr(executor, "thread_id", "") if executor is not None else "")
-                or execution_metadata.get("thread_id", "")
+                (getattr(task, "thread_id", "") if task is not None else "")
+                or task_metadata.get("thread_id", "")
             ).strip(),
             "run_id": str(
-                (getattr(executor, "run_id", "") if executor is not None else "")
-                or execution_metadata.get("run_id", "")
+                (getattr(task, "run_id", "") if task is not None else "")
+                or task_metadata.get("run_id", "")
             ).strip(),
             "control_state": str(
-                (getattr(executor, "control_state", "") if executor is not None else "")
-                or execution_metadata.get("control_state", "idle")
+                (getattr(task, "control_state", "") if task is not None else "")
+                or task_metadata.get("control_state", "idle")
             ).strip(),
             "status": str(
-                (getattr(executor, "status", "") if executor is not None else "")
-                or execution_metadata.get("status", "none")
+                (getattr(task, "status", "") if task is not None else "")
+                or task_metadata.get("status", "none")
             ).strip(),
             "summary": summary,
             "missing": list(
-                (getattr(executor, "missing", []) if executor is not None else []) or execution_metadata.get("missing", []) or []
+                (getattr(task, "missing", []) if task is not None else []) or task_metadata.get("missing", []) or []
             ),
             "pending_review": dict(
-                (getattr(executor, "pending_review", {}) if executor is not None else {})
-                or execution_metadata.get("pending_review", {})
+                (getattr(task, "pending_review", {}) if task is not None else {})
+                or task_metadata.get("pending_review", {})
                 or {}
             ),
             "recommended_action": str(
-                (getattr(executor, "recommended_action", "") if executor is not None else "")
-                or execution_metadata.get("recommended_action", "")
+                (getattr(task, "recommended_action", "") if task is not None else "")
+                or task_metadata.get("recommended_action", "")
             ).strip(),
             "confidence": confidence_value,
-            "attempt_count": int(getattr(executor, "attempts", 0) if executor is not None else 0),
+            "attempt_count": int(getattr(task, "attempts", 0) if task is not None else 0),
         }
 
     @staticmethod
@@ -348,43 +350,44 @@ class MemoryService:
         *,
         state: dict[str, Any],
         importance: float,
-        execution: dict[str, Any],
+        task: dict[str, Any],
         turn_reflection: dict[str, Any],
     ) -> tuple[bool, str]:
-        main_brain = state.get("main_brain")
+        brain = state.get("brain")
         execution_review = (
             turn_reflection.get("execution_review")
             if isinstance(turn_reflection, dict) and isinstance(turn_reflection.get("execution_review"), dict)
             else {}
         )
-        status = str(execution.get("status", "") or "").strip().lower()
-        control_state = str(execution.get("control_state", "") or "").strip().lower()
-        missing = [str(item).strip() for item in list(execution.get("missing", []) or []) if str(item).strip()]
-        pending_review = execution.get("pending_review") if isinstance(execution.get("pending_review"), dict) else {}
+        status = str(task.get("status", "") or "").strip().lower()
+        control_state = str(task.get("control_state", "") or "").strip().lower()
+        missing = [str(item).strip() for item in list(task.get("missing", []) or []) if str(item).strip()]
+        pending_review = task.get("pending_review") if isinstance(task.get("pending_review"), dict) else {}
         effectiveness = str((execution_review or {}).get("effectiveness", "none") or "none").strip().lower()
         failure_reason = str((execution_review or {}).get("main_failure_reason", "") or "").strip()
         user_updates = [str(item).strip() for item in list(turn_reflection.get("user_updates", []) or []) if str(item).strip()]
         soul_updates = [str(item).strip() for item in list(turn_reflection.get("soul_updates", []) or []) if str(item).strip()]
         memory_candidates = list(turn_reflection.get("memory_candidates", []) or []) if isinstance(turn_reflection, dict) else []
-        execution_reason = str(getattr(main_brain, "execution_reason", "") or "").strip() if main_brain is not None else ""
+        task_reason = str(getattr(brain, "task_reason", "") or "").strip() if brain is not None else ""
 
-        if execution.get("invoked") and (status in {"failed", "need_more"} or control_state == "paused"):
-            return True, f"execution_requires_followup:{control_state or status}"
-        if execution.get("invoked") and (missing or pending_review):
-            return True, "execution_blocked_or_waiting_review"
-        if execution.get("invoked") and effectiveness in {"low", "medium"} and failure_reason:
-            return True, f"execution_review:{failure_reason}"
+        if task.get("invoked") and (status in {"failed", "need_more"} or control_state == "paused"):
+            return True, f"task_requires_followup:{control_state or status}"
+        if task.get("invoked") and (missing or pending_review):
+            return True, "task_blocked_or_waiting_review"
+        if task.get("invoked") and effectiveness in {"low", "medium"} and failure_reason:
+            return True, f"task_review:{failure_reason}"
         if importance >= 0.82 and (user_updates or soul_updates):
             return True, "high_importance_identity_updates"
         if importance >= 0.82 and memory_candidates:
             return True, "high_importance_memory_candidates"
-        if execution_reason in {
+        if task_reason in {
             "loop_limit_reached",
-            "main_brain_requested_executor_followup",
-            "executor_waiting_for_user_input",
+            "brain_requested_task_followup",
+            "task_waiting_for_user_input",
         }:
-            return True, f"main_brain_signal:{execution_reason}"
+            return True, f"brain_signal:{task_reason}"
         return False, ""
 
 
 __all__ = ["MemoryService", "TurnReflectionWriteResult"]
+

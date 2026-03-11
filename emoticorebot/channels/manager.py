@@ -7,8 +7,7 @@ from typing import Any
 
 from loguru import logger
 
-from emoticorebot.bus.events import OutboundMessage
-from emoticorebot.bus.queue import MessageBus
+from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import Config
 
@@ -23,7 +22,7 @@ class ChannelManager:
     - Route outbound messages
     """
     
-    def __init__(self, config: Config, bus: MessageBus):
+    def __init__(self, config: Config, bus: RuntimeEventBus):
         self.config = config
         self.bus = bus
         self.channels: dict[str, BaseChannel] = {}

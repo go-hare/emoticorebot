@@ -1,4 +1,4 @@
-"""Turn-loop state definitions."""
+"""Turn-loop state definitions aligned to brain / central / task semantics."""
 
 from __future__ import annotations
 
@@ -7,19 +7,32 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-ExecutionControlState = Literal["idle", "running", "paused", "stopped", "completed"]
-ExecutionStatus = Literal["none", "done", "need_more", "failed"]
-ExecutorPacketStatus = Literal["completed", "needs_input", "uncertain", "failed"]
-ExecutorRecommendedAction = Literal["", "answer", "ask_user", "continue"]
-MainBrainFinalDecision = Literal["", "answer", "ask_user", "continue"]
-MainBrainExecutionAction = Literal["", "start", "continue", "pause", "stop", "resume", "defer", "answer"]
+TaskControlState = Literal["idle", "running", "paused", "stopped", "completed"]
+TaskStatus = Literal["none", "done", "need_more", "failed"]
+CentralPacketStatus = Literal["completed", "needs_input", "uncertain", "failed"]
+TaskRecommendedAction = Literal["", "answer", "ask_user", "continue_task"]
+BrainFinalDecision = Literal["", "answer", "ask_user", "continue"]
+BrainTaskAction = Literal[
+    "",
+    "none",
+    "create_task",
+    "continue_task",
+    "pause_task",
+    "resume_task",
+    "cancel_task",
+    "steer_task",
+    "reprioritize_task",
+    "request_report",
+    "takeover_task",
+    "defer",
+]
 
 
-class ExecutorResultPacket(TypedDict, total=False):
-    """Normalized executor result packet returned into the turn loop."""
+class CentralResultPacket(TypedDict, total=False):
+    """Normalized central result packet returned into the turn loop."""
 
-    control_state: ExecutionControlState
-    status: ExecutionStatus
+    control_state: TaskControlState
+    status: TaskStatus
     analysis: str
     risks: list[str]
     missing: list[str]
@@ -34,16 +47,16 @@ class ExecutorResultPacket(TypedDict, total=False):
     total_tokens: int
 
 
-class MainBrainDeliberationPacket(TypedDict, total=False):
-    """Main-brain first-pass packet before deciding whether to use the executor."""
+class BrainDeliberationPacket(TypedDict, total=False):
+    """Brain first-pass packet before deciding whether to create a task."""
 
     intent: str
     working_hypothesis: str
-    execution_action: Literal["start", "answer"]
-    execution_reason: str
+    task_action: Literal["none", "create_task"]
+    task_reason: str
     final_decision: Literal["answer", "continue"]
-    need_executor: bool
-    question_to_executor: str
+    needs_task: bool
+    task_brief: str
     final_message: str
     retrieval_query: str
     retrieval_focus: list[str]
@@ -54,14 +67,14 @@ class MainBrainDeliberationPacket(TypedDict, total=False):
     total_tokens: int
 
 
-class MainBrainFinalizePacket(TypedDict, total=False):
-    """Main-brain final decision after reading the executor packet."""
+class BrainFinalizePacket(TypedDict, total=False):
+    """Brain final decision after reading the task packet."""
 
     final_decision: Literal["answer", "ask_user", "continue"]
     final_message: str
     decision: Literal["answer", "ask_user", "continue"]
     message: str
-    question_to_executor: str
+    task_brief: str
     retrieval_query: str
     retrieval_focus: list[str]
     retrieved_memory_ids: list[str]
@@ -71,43 +84,67 @@ class MainBrainFinalizePacket(TypedDict, total=False):
     total_tokens: int
 
 
-class MainBrainControlPacket(TypedDict, total=False):
-    """Explicit main-brain control decision for executor orchestration."""
+class BrainControlPacket(TypedDict, total=False):
+    """Explicit brain control decision for task orchestration."""
 
-    action: MainBrainExecutionAction
+    action: BrainTaskAction
     reason: str
-    final_decision: MainBrainFinalDecision
+    final_decision: BrainFinalDecision
     message: str
-    question_to_executor: str
-    execution: dict[str, Any]
+    task_brief: str
+    task: dict[str, Any]
 
 
 @dataclass
-class ExecutorState:
-    """Runtime state for the subordinate execution layer."""
+class TaskState:
+    """Runtime state for the current task handled by central."""
 
-    request: str = ""
+    task_id: str = ""
+    title: str = ""
+    goal: str = ""
+    brief: str = ""
+    owner_agent: str = "central"
+    created_by: str = "brain"
+    mode: Literal["sync", "async"] = "sync"
+    priority: str = "normal"
     thread_id: str = ""
     run_id: str = ""
-    control_state: ExecutionControlState = "idle"
-    status: ExecutionStatus = "none"
+    control_state: TaskControlState = "idle"
+    status: TaskStatus = "none"
     analysis: str = ""
-    final_result: str = ""
+    result_summary: str = ""
     risks: list[str] = field(default_factory=list)
-    recommended_action: ExecutorRecommendedAction = ""
+    recommended_action: TaskRecommendedAction = ""
     confidence: float = 0.0
     missing: list[str] = field(default_factory=list)
     pending_review: dict[str, Any] = field(default_factory=dict)
+    need_user_input: bool = False
     attempts: int = 0
     model_name: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
 
+    @property
+    def request(self) -> str:
+        return self.brief
+
+    @request.setter
+    def request(self, value: str) -> None:
+        self.brief = str(value or "")
+
+    @property
+    def final_result(self) -> str:
+        return self.result_summary
+
+    @final_result.setter
+    def final_result(self, value: str) -> None:
+        self.result_summary = str(value or "")
+
 
 @dataclass
-class MainBrainState:
-    """Runtime state for the main-brain layer."""
+class BrainState:
+    """Runtime state for the brain layer."""
 
     emotion: str = "平静"
     pad: dict[str, float] = field(
@@ -118,12 +155,12 @@ class MainBrainState:
     retrieval_query: str = ""
     retrieval_focus: list[str] = field(default_factory=list)
     retrieved_memory_ids: list[str] = field(default_factory=list)
-    execution_request: str = ""
-    question_to_executor: str = ""
-    final_decision: MainBrainFinalDecision = ""
+    task_request: str = ""
+    task_brief: str = ""
+    final_decision: BrainFinalDecision = ""
     final_message: str = ""
-    execution_action: MainBrainExecutionAction = ""
-    execution_reason: str = ""
+    task_action: BrainTaskAction = ""
+    task_reason: str = ""
     model_name: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -131,14 +168,14 @@ class MainBrainState:
 
 
 class TurnState(TypedDict, total=False):
-    """Runtime state for the explicit main_brain -> executor loop."""
+    """Runtime state for the explicit brain -> central loop."""
 
     user_input: str
     dialogue_history: list[dict]
     internal_history: list[dict]
-    executor_trace: list[dict]
-    executor: ExecutorState
-    main_brain: MainBrainState
+    task_trace: list[dict]
+    task: TaskState
+    brain: BrainState
     done: bool
     output: str
     workspace: str
@@ -200,8 +237,8 @@ def create_turn_state(
         "user_input": user_input,
         "dialogue_history": dialogue_history or [],
         "internal_history": internal_history or [],
-        "executor": ExecutorState(),
-        "main_brain": MainBrainState(
+        "task": TaskState(),
+        "brain": BrainState(
             emotion=get_emotion_label(pad),
             pad=pad,
         ),
@@ -216,17 +253,17 @@ def create_turn_state(
 
 
 __all__ = [
-    "ExecutionControlState",
-    "ExecutionStatus",
-    "ExecutorPacketStatus",
-    "ExecutorRecommendedAction",
-    "ExecutorResultPacket",
-    "ExecutorState",
-    "MainBrainDeliberationPacket",
-    "MainBrainControlPacket",
-    "MainBrainExecutionAction",
-    "MainBrainFinalizePacket",
-    "MainBrainState",
+    "TaskControlState",
+    "TaskStatus",
+    "CentralPacketStatus",
+    "TaskRecommendedAction",
+    "CentralResultPacket",
+    "TaskState",
+    "BrainDeliberationPacket",
+    "BrainControlPacket",
+    "BrainTaskAction",
+    "BrainFinalizePacket",
+    "BrainState",
     "TurnState",
     "create_turn_state",
     "get_emotion_label",

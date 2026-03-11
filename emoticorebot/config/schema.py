@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -202,7 +202,7 @@ class ChannelsConfig(Base):
 
 
 class ModelModeConfig(Base):
-    """主脑 / 执行器模型模式配置（嵌套在 AgentDefaults 下）。"""
+    """brain / central 模型模式配置（嵌套在 AgentDefaults 下）。"""
 
     model: str = "anthropic/claude-opus-4-5"
     provider: str = "auto"
@@ -215,7 +215,7 @@ class ModelModeConfig(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
     workspace: str = "~/.emoticorebot/workspace"
-    executor_mode: ModelModeConfig = Field(
+    central_mode: ModelModeConfig = Field(
         default_factory=lambda: ModelModeConfig(
             model="anthropic/claude-opus-4-5",
             provider="auto",
@@ -225,7 +225,7 @@ class AgentDefaults(Base):
             memory_window=100,
         )
     )
-    main_brain_mode: ModelModeConfig = Field(
+    brain_mode: ModelModeConfig = Field(
         default_factory=lambda: ModelModeConfig(
             model="anthropic/claude-opus-4-5",
             provider="auto",

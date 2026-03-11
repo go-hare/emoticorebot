@@ -9,8 +9,7 @@ from telegram import BotCommand, Update, ReplyParameters
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
-from emoticorebot.bus.events import OutboundMessage
-from emoticorebot.bus.queue import MessageBus
+from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import TelegramConfig
 
@@ -121,7 +120,7 @@ class TelegramChannel(BaseChannel):
     def __init__(
         self,
         config: TelegramConfig,
-        bus: MessageBus,
+        bus: RuntimeEventBus,
         groq_api_key: str = "",
     ):
         super().__init__(config, bus)

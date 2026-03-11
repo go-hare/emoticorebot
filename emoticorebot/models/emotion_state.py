@@ -207,15 +207,6 @@ class DriveState:
         """social < 20：应触发主动对话（ai.md §1.2 阈值触发行为）。"""
         return self.social < self.threshold_social_low
 
-    def should_refuse_complex_task(self) -> bool:
-        """兼容旧接口：任务始终允许执行。"""
-        return False
-
-    def is_sleeping(self) -> bool:
-        """兼容旧接口：不再进入强制休眠阻断任务。"""
-        return False
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 情绪事件（情绪记忆流的基本单元）
 # ─────────────────────────────────────────────────────────────────────────────

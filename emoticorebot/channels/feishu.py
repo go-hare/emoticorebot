@@ -11,8 +11,7 @@ from typing import Any
 
 from loguru import logger
 
-from emoticorebot.bus.events import OutboundMessage
-from emoticorebot.bus.queue import MessageBus
+from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import FeishuConfig
 
@@ -259,7 +258,7 @@ class FeishuChannel(BaseChannel):
     
     name = "feishu"
     
-    def __init__(self, config: FeishuConfig, bus: MessageBus):
+    def __init__(self, config: FeishuConfig, bus: RuntimeEventBus):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
         self._client: Any = None

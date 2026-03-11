@@ -1,8 +1,8 @@
 """ToolManager - 工具管理服务。
 
-职责（单一）：注册 / 配置 / 连接 / 释放所有工具，向 ExecutorService 提供 ToolRegistry。
+职责（单一）：注册 / 配置 / 连接 / 释放所有工具，向 CentralAgentService 提供 ToolRegistry。
 
-工具注册逻辑集中在此，避免分散到 Runtime 或 ExecutorService 内部。
+工具注册逻辑集中在此，避免分散到 Runtime 或 CentralAgentService 内部。
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from emoticorebot.tools import (
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ExecToolConfig
     from emoticorebot.cron.service import CronService
-    from emoticorebot.bus.queue import MessageBus
+from emoticorebot.runtime.event_bus import RuntimeEventBus
 
 
 class ToolManager:
@@ -47,7 +47,7 @@ class ToolManager:
         self,
         workspace: Path,
         exec_config: "ExecToolConfig",
-        bus: "MessageBus | None" = None,
+        bus: "RuntimeEventBus | None" = None,
         cron_service: "CronService | None" = None,
         brave_api_key: str | None = None,
         restrict_to_workspace: bool = False,
@@ -109,7 +109,7 @@ class ToolManager:
             chat_id=chat_id,
             message_id=message_id,
             session_key=session_key,
-            source="executor",
+            source="task",
         )
         for name in ("message", "cron"):
             if tool := self.registry.get(name):
@@ -125,7 +125,7 @@ class ToolManager:
             return
 
         self._mcp_connecting = True
-        from emoticorebot.core.mcp import connect_mcp_servers
+        from emoticorebot.agent.tool.mcp import connect_mcp_servers
 
         try:
             self._mcp_stack = AsyncExitStack()
@@ -156,7 +156,7 @@ class ToolManager:
             logger.info("MCP servers closed")
 
     def get_registry(self) -> ToolRegistry:
-        """获取工具注册表（供 ExecutorService 使用）。"""
+        """获取工具注册表（供 CentralAgentService 使用）。"""
         return self.registry
 
 

@@ -12,7 +12,7 @@ import re
 import shutil
 from pathlib import Path
 
-BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
+BUILTIN_SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
 
 
 class SkillsLoader:

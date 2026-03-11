@@ -13,7 +13,7 @@ from loguru import logger
 
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.memory import MemoryStore
-from emoticorebot.services.skill_materializer import SkillMaterializer
+from emoticorebot.agent.reflection.skill import SkillMaterializer
 from emoticorebot.utils.llm_utils import extract_message_text
 
 
@@ -33,7 +33,7 @@ class DeepReflectionService:
     """Consolidate recent cognitive events into unified long-term memory."""
 
     _PROMPT = """
-你是 `main_brain` 的深反思过程。
+你是 `brain` 的深反思过程。
 
 只返回 JSON，不要输出任何额外说明。
 
@@ -61,7 +61,7 @@ class DeepReflectionService:
   "summary": "",
   "memory_candidates": [
     {{
-      "audience": "main_brain|executor|shared",
+      "audience": "brain|task|shared",
       "kind": "episodic|durable|procedural",
       "type": "user_fact|preference|goal|constraint|relationship|soul_trait|turn_insight|tool_experience|error_pattern|workflow_pattern|skill_hint",
       "summary": "",
@@ -90,35 +90,35 @@ class DeepReflectionService:
 - `summary`：这一阶段的高层总结。
 - `memory_candidates`：真正值得进入统一长期记忆的候选列表，没有就返回空数组。
 - `user_updates`：对用户整体画像的更新候选，没有就返回空数组；每一项都应像 `用户更喜欢先讨论架构，再进入实现细节。` 这样可直接落盘。
-- `soul_updates`：对主脑稳定风格的更新候选，没有就返回空数组；每一项都应像 `复杂任务中先收敛判断，再交给 executor 执行。` 这样可直接落盘。
+- `soul_updates`：对主脑稳定风格的更新候选，没有就返回空数组；每一项都应像 `复杂任务中先收敛判断，再交给 task 执行。` 这样可直接落盘。
 - `skill_hints`：只有在重复模式明显可复用时才填写，没有就返回空数组。
 
 `skill_hints` 字段说明：
 - `summary`：一句话概括这个技能提示。
 - `content`：更完整的说明。
 - `trigger`：什么情况下应触发。
-- `hint`：给 executor 的紧凑提示。
+- `hint`：给 task 的紧凑提示。
 - `skill_name`：未来沉淀为技能时的名称。
 
 示例：
 {{
-  "summary": "近期多轮任务显示，复杂问题更适合由 executor 内部收敛后再交回主脑。",
+  "summary": "近期多轮任务显示，复杂问题更适合由 task 内部收敛后再交回主脑。",
   "memory_candidates": [
     {{
-      "audience": "executor",
+      "audience": "task",
       "kind": "procedural",
       "type": "workflow_pattern",
       "summary": "复杂任务适合走最终结果式执行链路",
-      "content": "当任务需要多步分析和工具配合时，executor 应优先在内部收敛，再把最终结果返回给 main_brain。",
+      "content": "当任务需要多步分析和工具配合时，task 应优先在内部收敛，再把最终结果返回给 brain。",
       "importance": 8,
       "confidence": 0.88,
       "stability": 0.81,
-      "tags": ["workflow", "executor"],
+      "tags": ["workflow", "task"],
       "payload": {{
         "goal_cluster": "complex_execution",
         "tool_sequence": ["analysis", "tool", "summary"],
         "preconditions": ["需要多步执行"],
-        "steps_summary": "主脑决策，executor 内部收敛后返回最终结果",
+        "steps_summary": "主脑决策，task 内部收敛后返回最终结果",
         "sample_size": 4,
         "success_rate": 0.8
       }}
@@ -129,7 +129,7 @@ class DeepReflectionService:
   "skill_hints": [
     {{
       "summary": "复杂任务优先走最终结果式执行",
-      "content": "对于复杂任务，优先让 executor 在单次执行中收敛到最终结果。",
+      "content": "对于复杂任务，优先让 task 在单次执行中收敛到最终结果。",
       "trigger": "需要多步执行或工具组合时",
       "hint": "减少中间汇报，优先给最终结果。",
       "skill_name": "final-result-execution"
@@ -364,24 +364,24 @@ class DeepReflectionService:
         candidates: list[dict[str, Any]] = []
         skill_hints: list[dict[str, Any]] = []
 
-        tool_events = [event for event in events if (event.get("executor") or {}).get("used")]
+        tool_events = [event for event in events if (event.get("task") or {}).get("used")]
         if len(tool_events) >= 2:
             candidates.append(
                 {
-                    "audience": "executor",
+                    "audience": "task",
                     "kind": "procedural",
                     "type": "workflow_pattern",
                     "summary": "近期多轮任务中持续使用执行链路解决问题。",
-                    "content": "最近多轮任务都依赖 executor 执行并由 main_brain 统一收口，适合继续保持最终结果式返回。",
+                    "content": "最近多轮任务都依赖 task 执行并由 brain 统一收口，适合继续保持最终结果式返回。",
                     "importance": 7,
                     "confidence": 0.76,
                     "stability": 0.68,
-                    "tags": ["workflow", "executor"],
+                    "tags": ["workflow", "task"],
                     "payload": {
                         "goal_cluster": "general_execution",
                         "tool_sequence": [],
                         "preconditions": ["需要外部工具或多步执行"],
-                        "steps_summary": "主脑决策，executor 完成执行并返回最终结果。",
+                        "steps_summary": "主脑决策，task 完成执行并返回最终结果。",
                         "sample_size": len(tool_events),
                         "success_rate": 0.7,
                     },
@@ -390,7 +390,7 @@ class DeepReflectionService:
             skill_hints.append(
                 {
                     "summary": "复杂任务默认走最终结果式执行链路",
-                    "content": "遇到复杂任务时，executor 优先在单次执行内完成收敛，再把最终结果交回 main_brain。",
+                    "content": "遇到复杂任务时，task 优先在单次执行内完成收敛，再把最终结果交回 brain。",
                     "trigger": "需要多步执行或工具组合时",
                     "hint": "减少中间态汇报，优先收敛到最终结果。",
                     "skill_name": "final-result-execution",
@@ -414,13 +414,13 @@ class DeepReflectionService:
             user_input = str(event.get("user_input", "") or "").strip()
             assistant_output = str(event.get("assistant_output", "") or "").strip()
             turn_reflection = event.get("turn_reflection") if isinstance(event.get("turn_reflection"), dict) else {}
-            executor = event.get("executor") if isinstance(event.get("executor"), dict) else {}
+            task = event.get("task") if isinstance(event.get("task"), dict) else {}
             lines.append(
                 "- "
                 f"{event_id} [{timestamp}] 用户={DeepReflectionService._compact(user_input, 80)} "
                 f"主脑回复={DeepReflectionService._compact(assistant_output, 80)} "
                 f"反思摘要={DeepReflectionService._compact(str(turn_reflection.get('summary', '') or ''), 80)} "
-                f"执行状态={str(executor.get('status', 'none') or 'none')}"
+                f"执行状态={str(task.get('status', 'none') or 'none')}"
             )
         return "\n".join(lines)
 
@@ -469,7 +469,7 @@ class DeepReflectionService:
             skill_name = str(item.get("skill_name", "") or "").strip() or "unnamed-skill"
             records.append(
                 {
-                    "audience": "executor",
+                    "audience": "task",
                     "kind": "procedural",
                     "type": "skill_hint",
                     "summary": summary or DeepReflectionService._compact(content or hint, 120),
@@ -555,3 +555,4 @@ class DeepReflectionService:
 
 
 __all__ = ["DeepReflectionResult", "DeepReflectionService"]
+

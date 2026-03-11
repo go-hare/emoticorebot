@@ -28,12 +28,12 @@ orchestration:
     relationship_need: 0.35
     inverse_task_strength: 0.20
   thresholds:
-    main_brain_first_emotion: 0.70
-    executor_first_urgency: 0.70
-    executor_first_task: 0.55
-    high_executor_weight: 0.70
-    high_main_brain_weight: 0.70
+    brain_first_emotion: 0.70
+    central_first_urgency: 0.70
+    central_first_task: 0.55
+    high_central_weight: 0.70
+    high_brain_weight: 0.70
   tool_budget:
-    high_executor: 6
-    high_main_brain: 3
+    high_central: 6
+    high_brain: 3
     balanced: 4

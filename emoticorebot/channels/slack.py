@@ -12,8 +12,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from slackify_markdown import slackify_markdown
 
-from emoticorebot.bus.events import OutboundMessage
-from emoticorebot.bus.queue import MessageBus
+from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import SlackConfig
 
@@ -23,7 +22,7 @@ class SlackChannel(BaseChannel):
 
     name = "slack"
 
-    def __init__(self, config: SlackConfig, bus: MessageBus):
+    def __init__(self, config: SlackConfig, bus: RuntimeEventBus):
         super().__init__(config, bus)
         self.config: SlackConfig = config
         self._web_client: AsyncWebClient | None = None
@@ -278,4 +277,3 @@ class SlackChannel(BaseChannel):
             if parts:
                 rows.append(" · ".join(parts))
         return "\n".join(rows)
-

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from emoticorebot.core.skills import BUILTIN_SKILLS_DIR
+from emoticorebot.agent.central.skills import BUILTIN_SKILLS_DIR
 from emoticorebot.memory import MemoryStore
 
 
@@ -189,7 +189,7 @@ class SkillMaterializer:
             f"# {self._title_from_slug(slug)}",
             "",
             "该技能由重复出现的 `skill_hint` 记忆自动沉淀生成。",
-            "当触发条件匹配时，优先采用这一套执行方式，并尽量在一次 executor 运行内完成收敛。",
+            "当触发条件匹配时，优先采用这一套执行方式，并尽量在一次 task 运行内完成收敛。",
             "",
             "## 何时使用",
             "",
@@ -211,10 +211,10 @@ class SkillMaterializer:
             "",
             "## 执行流程",
             "",
-            "1. 先读取 `main_brain` 传入的 `goal`、`request`、`constraints` 与 `success_criteria`。",
+            "1. 先读取 `brain` 传入的 `goal`、`request`、`constraints` 与 `success_criteria`。",
             "2. 优先复用主脑传入的执行经验、工具经验和其他 `skill_hint`，不要自己检索长期 `memory`。",
             "3. 尽量在一次执行内收敛，只有在真的被阻塞时才返回 `missing` 或 `pending_review`。",
-            "4. 最终只返回协议要求的 JSON，交由 `main_brain` 做对外表达。",
+            "4. 最终只返回协议要求的 JSON，交由 `brain` 做对外表达。",
             "",
             "## 边界",
             "",
@@ -234,3 +234,4 @@ class SkillMaterializer:
 
 
 __all__ = ["SkillMaterializationResult", "SkillMaterializer"]
+

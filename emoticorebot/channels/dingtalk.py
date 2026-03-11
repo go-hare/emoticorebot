@@ -8,8 +8,7 @@ from typing import Any
 from loguru import logger
 import httpx
 
-from emoticorebot.bus.events import OutboundMessage
-from emoticorebot.bus.queue import MessageBus
+from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import DingTalkConfig
 
@@ -97,7 +96,7 @@ class DingTalkChannel(BaseChannel):
 
     name = "dingtalk"
 
-    def __init__(self, config: DingTalkConfig, bus: MessageBus):
+    def __init__(self, config: DingTalkConfig, bus: RuntimeEventBus):
         super().__init__(config, bus)
         self.config: DingTalkConfig = config
         self._client: Any = None

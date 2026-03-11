@@ -16,9 +16,9 @@ class CognitiveEvent:
     session_id: str
     turn_id: str
     user_input: str
-    main_brain_state: dict[str, Any] = field(default_factory=dict)
+    brain_state: dict[str, Any] = field(default_factory=dict)
     retrieval: dict[str, Any] = field(default_factory=dict)
-    executor: dict[str, Any] = field(default_factory=dict)
+    task: dict[str, Any] = field(default_factory=dict)
     assistant_output: str = ""
     turn_reflection: dict[str, Any] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
@@ -90,7 +90,7 @@ class CognitiveEvent:
             )
             if not summary:
                 continue
-            emotion = str(((row.get("main_brain_state") or {}).get("emotion", "") or "平静")).strip()
+            emotion = str(((row.get("brain_state") or {}).get("emotion", "") or "平静")).strip()
             outcome_raw = str(((row.get("turn_reflection") or {}).get("outcome", "") or "unknown")).strip()
             outcome = {
                 "success": "成功",
@@ -99,9 +99,9 @@ class CognitiveEvent:
                 "no_execution": "未执行",
                 "unknown": "未知",
             }.get(outcome_raw, outcome_raw or "未知")
-            used_executor = bool((row.get("executor") or {}).get("used"))
+            used_task = bool((row.get("task") or {}).get("used"))
             importance = float((row.get("meta") or {}).get("importance", 0.5) or 0.5)
-            mode = "执行" if used_executor else "直答"
+            mode = "执行" if used_task else "直答"
             lines.append(f"- [{emotion}|{mode}|{outcome}|{importance:.2f}] {summary}")
 
         if not lines:
@@ -122,7 +122,7 @@ class CognitiveEvent:
             return []
 
         metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-        main_brain = state.get("main_brain")
+        brain = state.get("brain")
         event = cls(
             id=f"evt_{uuid4().hex}",
             version="3",
@@ -130,15 +130,15 @@ class CognitiveEvent:
             session_id=str(state.get("session_id", "") or ""),
             turn_id=cls._extract_turn_id(state),
             user_input=user_input,
-            main_brain_state=cls._build_main_brain_state(main_brain),
-            retrieval=cls._build_retrieval(main_brain=main_brain, user_input=user_input),
-            executor=cls._build_executor_state(state),
+            brain_state=cls._build_brain_state(brain),
+            retrieval=cls._build_retrieval(brain=brain, user_input=user_input),
+            task=cls._build_task_state(state),
             assistant_output=assistant_output,
             turn_reflection=cls._normalize_turn_reflection(turn_reflection),
             meta={
                 "importance": round(float(importance), 2),
                 "channel": str(state.get("channel", "") or ""),
-                "source": "main_brain.turn_reflection",
+                "source": "brain.turn_reflection",
                 "message_id": str(metadata.get("message_id", "") or ""),
             },
         )
@@ -167,72 +167,72 @@ class CognitiveEvent:
         return f"turn_{uuid4().hex[:12]}"
 
     @staticmethod
-    def _build_main_brain_state(main_brain: Any) -> dict[str, Any]:
-        if main_brain is None:
+    def _build_brain_state(brain: Any) -> dict[str, Any]:
+        if brain is None:
             return {}
         return {
-            "emotion": str(getattr(main_brain, "emotion", "") or "平静").strip() or "平静",
-            "pad": dict(getattr(main_brain, "pad", {}) or {}),
-            "intent": str(getattr(main_brain, "intent", "") or "").strip(),
-            "working_hypothesis": str(getattr(main_brain, "working_hypothesis", "") or "").strip(),
-            "retrieval_query": str(getattr(main_brain, "retrieval_query", "") or "").strip(),
+            "emotion": str(getattr(brain, "emotion", "") or "平静").strip() or "平静",
+            "pad": dict(getattr(brain, "pad", {}) or {}),
+            "intent": str(getattr(brain, "intent", "") or "").strip(),
+            "working_hypothesis": str(getattr(brain, "working_hypothesis", "") or "").strip(),
+            "retrieval_query": str(getattr(brain, "retrieval_query", "") or "").strip(),
             "retrieval_focus": [
                 str(item).strip()
-                for item in list(getattr(main_brain, "retrieval_focus", []) or [])
+                for item in list(getattr(brain, "retrieval_focus", []) or [])
                 if str(item).strip()
             ],
             "retrieved_memory_ids": [
                 str(item).strip()
-                for item in list(getattr(main_brain, "retrieved_memory_ids", []) or [])
+                for item in list(getattr(brain, "retrieved_memory_ids", []) or [])
                 if str(item).strip()
             ],
-            "execution_request": str(getattr(main_brain, "execution_request", "") or "").strip(),
-            "execution_action": str(getattr(main_brain, "execution_action", "") or "").strip(),
-            "execution_reason": str(getattr(main_brain, "execution_reason", "") or "").strip(),
-            "final_decision": str(getattr(main_brain, "final_decision", "") or "").strip(),
+            "task_request": str(getattr(brain, "task_request", "") or "").strip(),
+            "task_action": str(getattr(brain, "task_action", "") or "").strip(),
+            "task_reason": str(getattr(brain, "task_reason", "") or "").strip(),
+            "final_decision": str(getattr(brain, "final_decision", "") or "").strip(),
         }
 
     @staticmethod
-    def _build_retrieval(*, main_brain: Any, user_input: str) -> dict[str, Any]:
-        query = str(getattr(main_brain, "retrieval_query", "") or "").strip() if main_brain is not None else ""
+    def _build_retrieval(*, brain: Any, user_input: str) -> dict[str, Any]:
+        query = str(getattr(brain, "retrieval_query", "") or "").strip() if brain is not None else ""
         if not query:
             query = user_input
         memory_ids = []
-        if main_brain is not None:
+        if brain is not None:
             memory_ids = [
                 str(item).strip()
-                for item in list(getattr(main_brain, "retrieved_memory_ids", []) or [])
+                for item in list(getattr(brain, "retrieved_memory_ids", []) or [])
                 if str(item).strip()
             ]
         return {"query": query, "memory_ids": memory_ids}
 
     @staticmethod
-    def _build_executor_state(state: dict[str, Any]) -> dict[str, Any]:
-        executor = state.get("executor")
+    def _build_task_state(state: dict[str, Any]) -> dict[str, Any]:
+        task = state.get("task")
         metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
         execution = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
         summary = ""
         status = "none"
-        if executor is not None:
-            summary = str(getattr(executor, "analysis", "") or "").strip()
-            status = str(getattr(executor, "status", "") or "none").strip() or "none"
+        if task is not None:
+            summary = str(getattr(task, "analysis", "") or "").strip()
+            status = str(getattr(task, "status", "") or "none").strip() or "none"
         if not summary:
             summary = str(execution.get("summary", "") or "").strip()
         if status == "none":
             status = str(execution.get("status", "") or "none").strip() or "none"
         return {
-            "used": bool(executor is not None or execution),
+            "used": bool(task is not None or execution),
             "status": status,
             "summary": summary,
             "control_state": str(
-                (getattr(executor, "control_state", "") if executor is not None else "")
+                (getattr(task, "control_state", "") if task is not None else "")
                 or execution.get("control_state", "")
                 or "idle"
             ).strip(),
             "missing": [
                 str(item).strip()
                 for item in list(
-                    (getattr(executor, "missing", []) if executor is not None else []) or execution.get("missing", []) or []
+                    (getattr(task, "missing", []) if task is not None else []) or execution.get("missing", []) or []
                 )
                 if str(item).strip()
             ],
@@ -272,7 +272,7 @@ class CognitiveEvent:
                 str(item.get("user_input", "") or ""),
                 str(item.get("assistant_output", "") or ""),
                 summary,
-                str(((item.get("executor") or {}).get("summary", "")) or ""),
+                str(((item.get("task") or {}).get("summary", "")) or ""),
             ]
         )
         importance = float((item.get("meta") or {}).get("importance", 0.5) or 0.5)
@@ -290,3 +290,4 @@ class CognitiveEvent:
 
 
 __all__ = ["CognitiveEvent"]
+

@@ -47,38 +47,38 @@ _PROVIDER_BASE_URLS: dict[str, str] = {
 
 
 class LLMFactory:
-    """根据主脑 / 执行器模式配置和 provider 凭证构建 LangChain chat model。
+    """根据 brain / central 模式配置和 provider 凭证构建 LangChain chat model。
 
     Usage::
 
         factory = LLMFactory(
             providers_config=config.providers,
-            executor_mode=config.agents.defaults.executor_mode,
-            main_brain_mode=config.agents.defaults.main_brain_mode,
+            central_mode=config.agents.defaults.central_mode,
+            brain_mode=config.agents.defaults.brain_mode,
         )
-        executor_llm = factory.get_executor()
-        main_brain_llm = factory.get_main_brain()
+        central_llm = factory.get_central()
+        brain_llm = factory.get_brain()
     """
 
     def __init__(
         self,
         providers_config: "ProvidersConfig",
-        executor_mode: "ModelModeConfig",
-        main_brain_mode: "ModelModeConfig",
+        central_mode: "ModelModeConfig",
+        brain_mode: "ModelModeConfig",
     ) -> None:
         self._providers = providers_config
-        self._executor = executor_mode
-        self._main_brain = main_brain_mode
+        self._central = central_mode
+        self._brain = brain_mode
 
     # ── 公共接口 ──────────────────────────────────────────────────────────────
 
-    def get_executor(self) -> Any:
-        """构建 executor 主力大模型实例。"""
-        return self._build(self._executor)
+    def get_central(self) -> Any:
+        """构建 central 主力大模型实例。"""
+        return self._build(self._central)
 
-    def get_main_brain(self) -> Any:
-        """构建 main_brain 模型实例。"""
-        return self._build(self._main_brain)
+    def get_brain(self) -> Any:
+        """构建 brain 模型实例。"""
+        return self._build(self._brain)
 
     # ── 内部构建逻辑 ──────────────────────────────────────────────────────────
 

@@ -129,14 +129,14 @@ class ToolRegistry:
         chat_id: str = "",
         message_id: str | None = None,
         session_key: str | None = None,
-        source: str = "executor",
+        source: str = "task",
     ) -> None:
         self._execution_context = {
             "channel": str(channel or ""),
             "chat_id": str(chat_id or ""),
             "message_id": str(message_id or ""),
             "session_key": str(session_key or ""),
-            "source": str(source or "executor"),
+            "source": str(source or "task"),
         }
 
     async def execute(self, name: str, params: dict[str, Any]) -> str:

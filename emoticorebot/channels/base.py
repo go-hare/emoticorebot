@@ -5,8 +5,7 @@ from typing import Any
 
 from loguru import logger
 
-from emoticorebot.bus.events import InboundMessage, OutboundMessage
-from emoticorebot.bus.queue import MessageBus
+from emoticorebot.runtime.event_bus import InboundMessage, OutboundMessage, RuntimeEventBus
 
 
 class BaseChannel(ABC):
@@ -19,7 +18,7 @@ class BaseChannel(ABC):
     
     name: str = "base"
     
-    def __init__(self, config: Any, bus: MessageBus):
+    def __init__(self, config: Any, bus: RuntimeEventBus):
         """
         Initialize the channel.
         

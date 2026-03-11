@@ -17,10 +17,10 @@ from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.memory.vector_index import ChromaPersistentIndex, EmbeddingFactory, VectorSearchHit
 
 
-MAIN_BRAIN_AUDIENCES = {"main_brain", "shared"}
-EXECUTOR_AUDIENCES = {"executor", "shared"}
+BRAIN_AUDIENCES = {"brain", "shared"}
+TASK_AUDIENCES = {"task", "shared"}
 
-EXECUTOR_EXPERIENCE_TYPES = {
+TASK_EXPERIENCE_TYPES = {
     "turn_insight",
     "tool_experience",
     "error_pattern",
@@ -151,8 +151,8 @@ class MemoryStore:
         )
         return selected
 
-    def build_main_brain_context(self, *, query: str, limit: int = 8) -> str:
-        records = self.query(query, audiences=tuple(MAIN_BRAIN_AUDIENCES), limit=limit)
+    def build_brain_context(self, *, query: str, limit: int = 8) -> str:
+        records = self.query(query, audiences=tuple(BRAIN_AUDIENCES), limit=limit)
         if not records:
             return ""
 
@@ -170,22 +170,22 @@ class MemoryStore:
             return ""
         return "## 长期记忆\n" + "\n".join(lines)
 
-    def build_executor_bundle(self, *, query: str, limit: int = 6) -> dict[str, list[dict[str, Any]]]:
+    def build_task_bundle(self, *, query: str, limit: int = 6) -> dict[str, list[dict[str, Any]]]:
         experience = self.query(
             query,
-            audiences=tuple(EXECUTOR_AUDIENCES),
-            types=tuple(EXECUTOR_EXPERIENCE_TYPES),
+            audiences=tuple(TASK_AUDIENCES),
+            types=tuple(TASK_EXPERIENCE_TYPES),
             limit=max(2, limit),
         )
         hints = self.query(
             query,
-            audiences=tuple(EXECUTOR_AUDIENCES),
+            audiences=tuple(TASK_AUDIENCES),
             types=tuple(SKILL_HINT_TYPES),
             limit=3,
         )
 
         return {
-            "relevant_execution_memories": [self._compact_record(record) for record in experience[:3]],
+            "relevant_task_memories": [self._compact_record(record) for record in experience[:3]],
             "relevant_tool_memories": [
                 self._compact_record(record)
                 for record in experience
@@ -213,7 +213,7 @@ class MemoryStore:
             "schema_version": "memory.v1",
             "id": str(payload.get("id", "") or f"mem_{uuid4().hex}"),
             "created_at": str(payload.get("created_at", "") or now),
-            "audience": MemoryStore._normalize_enum(payload.get("audience"), default="shared", allowed={"main_brain", "executor", "shared"}),
+            "audience": MemoryStore._normalize_audience(payload.get("audience")),
             "kind": MemoryStore._normalize_enum(payload.get("kind"), default="episodic", allowed={"episodic", "durable", "procedural"}),
             "type": str(payload.get("type", "turn_insight") or "turn_insight").strip(),
             "summary": summary,
@@ -394,6 +394,11 @@ class MemoryStore:
     def _normalize_enum(value: Any, *, default: str, allowed: set[str]) -> str:
         text = str(value or default).strip()
         return text if text in allowed else default
+
+    @staticmethod
+    def _normalize_audience(value: Any) -> str:
+        text = str(value or "shared").strip()
+        return text if text in {"brain", "task", "shared"} else "shared"
 
     @staticmethod
     def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:

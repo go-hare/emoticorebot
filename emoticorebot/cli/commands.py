@@ -240,7 +240,7 @@ def gateway(
 ):
     """Start the emoticorebot gateway."""
     from emoticorebot.config.loader import load_config, get_data_dir
-    from emoticorebot.bus.queue import MessageBus
+    from emoticorebot.runtime.event_bus import RuntimeEventBus
     from emoticorebot.runtime.runtime import EmoticoreRuntime
     from emoticorebot.channels.manager import ChannelManager
     from emoticorebot.session.manager import SessionManager
@@ -254,7 +254,7 @@ def gateway(
     console.print(f"{__logo__} Starting emoticorebot gateway on port {port}...")
     
     config = load_config()
-    bus = MessageBus()
+    bus = RuntimeEventBus()
     session_manager = SessionManager(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
@@ -265,8 +265,8 @@ def gateway(
     agent = EmoticoreRuntime(
         bus=bus,
         workspace=config.workspace_path,
-        executor_mode=config.agents.defaults.executor_mode,
-        main_brain_mode=config.agents.defaults.main_brain_mode,
+        central_mode=config.agents.defaults.central_mode,
+        brain_mode=config.agents.defaults.brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -288,7 +288,7 @@ def gateway(
             chat_id=job.payload.to or "direct",
         )
         if job.payload.deliver and job.payload.to:
-            from emoticorebot.bus.events import OutboundMessage
+            from emoticorebot.runtime.event_bus import OutboundMessage
             await bus.publish_outbound(OutboundMessage(
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to,
@@ -358,14 +358,14 @@ def agent(
 ):
     """Interact with the agent directly."""
     from emoticorebot.config.loader import load_config, get_data_dir
-    from emoticorebot.bus.queue import MessageBus
+    from emoticorebot.runtime.event_bus import RuntimeEventBus
     from emoticorebot.runtime.runtime import EmoticoreRuntime
     from emoticorebot.cron.service import CronService
     from loguru import logger
     
     config = load_config()
     
-    bus = MessageBus()
+    bus = RuntimeEventBus()
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
@@ -378,8 +378,8 @@ def agent(
     agent_loop = EmoticoreRuntime(
         bus=bus,
         workspace=config.workspace_path,
-        executor_mode=config.agents.defaults.executor_mode,
-        main_brain_mode=config.agents.defaults.main_brain_mode,
+        central_mode=config.agents.defaults.central_mode,
+        brain_mode=config.agents.defaults.brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -419,7 +419,7 @@ def agent(
         asyncio.run(run_once())
     else:
         # Interactive mode — route through bus like other channels
-        from emoticorebot.bus.events import InboundMessage
+        from emoticorebot.runtime.event_bus import InboundMessage
         _init_prompt_session()
         console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
 
@@ -859,17 +859,17 @@ def cron_run(
     from emoticorebot.config.loader import load_config, get_data_dir
     from emoticorebot.cron.service import CronService
     from emoticorebot.cron.types import CronJob
-    from emoticorebot.bus.queue import MessageBus
+    from emoticorebot.runtime.event_bus import RuntimeEventBus
     from emoticorebot.runtime.runtime import EmoticoreRuntime
     logger.disable("emoticorebot")
 
     config = load_config()
-    bus = MessageBus()
+    bus = RuntimeEventBus()
     agent_loop = EmoticoreRuntime(
         bus=bus,
         workspace=config.workspace_path,
-        executor_mode=config.agents.defaults.executor_mode,
-        main_brain_mode=config.agents.defaults.main_brain_mode,
+        central_mode=config.agents.defaults.central_mode,
+        brain_mode=config.agents.defaults.brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -932,3 +932,4 @@ def status():
 
 if __name__ == "__main__":
     app()
+

@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from loguru import logger
 
-from emoticorebot.session.executor_context import build_executor_context
+from emoticorebot.tasks.task_context import build_task_context
 from emoticorebot.utils.helpers import ensure_dir, safe_filename
 from emoticorebot.utils.llm_utils import normalize_content_blocks
 
@@ -85,9 +85,9 @@ def normalize_message_payload(message: dict[str, Any], *, default_message_id: st
     if tool_call_id:
         payload["tool_call_id"] = tool_call_id
 
-    execution = message.get("execution")
-    if isinstance(execution, dict):
-        payload["execution"] = execution
+    task = message.get("task")
+    if isinstance(task, dict):
+        payload["task"] = task
 
     for key in ("phase", "event", "source", "node"):
         value = str(message.get(key, "") or "").strip()
@@ -98,9 +98,9 @@ def normalize_message_payload(message: dict[str, Any], *, default_message_id: st
     if isinstance(namespace, list) and namespace:
         payload["namespace"] = [str(item).strip() for item in namespace if str(item).strip()]
 
-    main_brain = message.get("main_brain")
-    if isinstance(main_brain, dict) and main_brain:
-        payload["main_brain"] = main_brain
+    brain = message.get("brain")
+    if isinstance(brain, dict) and brain:
+        payload["brain"] = brain
 
     meta = message.get("meta")
     if isinstance(meta, dict) and meta:
@@ -145,7 +145,7 @@ class Session:
         self,
         max_messages: int = 500,
         *,
-        include_executor_context: bool = True,
+        include_task_context: bool = True,
     ) -> list[dict[str, Any]]:
         """Return unconsolidated messages for LLM input, aligned to a user turn."""
         unconsolidated = self.messages[self.last_consolidated:]
@@ -159,10 +159,10 @@ class Session:
         out: list[dict[str, Any]] = []
         for message in sliced:
             content = normalize_content_blocks(message.get("content", []))
-            if include_executor_context and message.get("role") == "assistant":
-                executor_context = build_executor_context(message)
-                if executor_context:
-                    content = [*content, {"type": "text", "text": executor_context}]
+            if include_task_context and message.get("role") == "assistant":
+                task_context = build_task_context(message)
+                if task_context:
+                    content = [*content, {"type": "text", "text": task_context}]
 
             entry: dict[str, Any] = {"role": message["role"], "content": content}
             for key in ("tool_calls", "tool_call_id"):
@@ -184,7 +184,6 @@ class SessionManager:
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
-        self.legacy_sessions_dir = Path.home() / ".emoticorebot" / "sessions"
         self._cache: dict[str, Session] = {}
 
     @staticmethod
@@ -205,12 +204,6 @@ class SessionManager:
 
     def _get_session_path(self, key: str) -> Path:
         return self._get_dialogue_path(key)
-
-    def _get_flat_session_path(self, key: str) -> Path:
-        return self.sessions_dir / f"{self._safe_key(key)}.jsonl"
-
-    def _get_legacy_session_path(self, key: str) -> Path:
-        return self.legacy_sessions_dir / f"{self._safe_key(key)}.jsonl"
 
     def append_internal_messages(self, key: str, messages: list[dict[str, Any]]) -> None:
         """Append internal deliberation messages for the current turn."""

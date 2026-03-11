@@ -7,120 +7,120 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from emoticorebot.session.executor_context import build_executor_context
+from emoticorebot.tasks.task_context import build_task_context
 
 
 class RuntimeTurnPersistenceMixin:
-    def _build_executor_summary(self, final_state: dict[str, Any]) -> str:
-        """Build a compact persisted summary from the current turn's executor execution."""
-        executor = final_state.get("executor")
-        if not self._executor_has_meaningful_state(executor):
+    def _build_task_summary(self, final_state: dict[str, Any]) -> str:
+        """Build a compact persisted summary from the current turn's task."""
+        task_state = final_state.get("task")
+        if not self._task_has_meaningful_state(task_state):
             return ""
-        return build_executor_context(
+        return build_task_context(
             {
-                "execution": {
-                    "thread_id": str(getattr(executor, "thread_id", "") or ""),
-                    "run_id": str(getattr(executor, "run_id", "") or ""),
-                    "control_state": getattr(executor, "control_state", ""),
-                    "status": getattr(executor, "status", ""),
-                    "summary": getattr(executor, "analysis", ""),
-                    "recommended_action": getattr(executor, "recommended_action", ""),
-                    "confidence": float(getattr(executor, "confidence", 0.0) or 0.0),
-                    "missing": list(getattr(executor, "missing", []) or []),
+                "task": {
+                    "thread_id": str(getattr(task_state, "thread_id", "") or ""),
+                    "run_id": str(getattr(task_state, "run_id", "") or ""),
+                    "control_state": str(getattr(task_state, "control_state", "") or ""),
+                    "status": str(getattr(task_state, "status", "") or ""),
+                    "summary": str(getattr(task_state, "analysis", "") or ""),
+                    "recommended_action": str(getattr(task_state, "recommended_action", "") or ""),
+                    "confidence": float(getattr(task_state, "confidence", 0.0) or 0.0),
+                    "missing": list(getattr(task_state, "missing", []) or []),
+                    "pending_review": dict(getattr(task_state, "pending_review", {}) or {}),
                 }
             }
         )
 
     @staticmethod
-    def _executor_has_meaningful_state(executor: Any | None) -> bool:
-        if executor is None:
+    def _task_has_meaningful_state(task_state: Any | None) -> bool:
+        if task_state is None:
             return False
         return any(
             [
-                str(getattr(executor, "thread_id", "") or "").strip(),
-                str(getattr(executor, "run_id", "") or "").strip(),
-                str(getattr(executor, "analysis", "") or "").strip(),
-                list(getattr(executor, "missing", []) or []),
-                dict(getattr(executor, "pending_review", {}) or {}),
-                str(getattr(executor, "control_state", "") or "").strip() not in {"", "idle"},
-                str(getattr(executor, "status", "") or "").strip() not in {"", "none"},
+                str(getattr(task_state, "thread_id", "") or "").strip(),
+                str(getattr(task_state, "run_id", "") or "").strip(),
+                str(getattr(task_state, "analysis", "") or "").strip(),
+                list(getattr(task_state, "missing", []) or []),
+                dict(getattr(task_state, "pending_review", {}) or {}),
+                str(getattr(task_state, "control_state", "") or "").strip() not in {"", "idle"},
+                str(getattr(task_state, "status", "") or "").strip() not in {"", "none"},
             ]
         )
 
     @staticmethod
-    def _has_meaningful_execution(execution: dict[str, Any] | None) -> bool:
-        if not isinstance(execution, dict) or not execution:
+    def _has_meaningful_task(task: dict[str, Any] | None) -> bool:
+        if not isinstance(task, dict) or not task:
             return False
-        control_state = str(execution.get("control_state", "") or "").strip()
-        status = str(execution.get("status", "") or "").strip()
+        control_state = str(task.get("control_state", "") or "").strip()
+        status = str(task.get("status", "") or "").strip()
         return any(
             [
-                bool(execution.get("invoked")),
-                str(execution.get("thread_id", "") or "").strip(),
-                str(execution.get("run_id", "") or "").strip(),
-                str(execution.get("summary", "") or "").strip(),
-                list(execution.get("missing", []) or []),
-                dict(execution.get("pending_review", {}) or {}),
+                bool(task.get("invoked")),
+                str(task.get("thread_id", "") or "").strip(),
+                str(task.get("run_id", "") or "").strip(),
+                str(task.get("summary", "") or "").strip(),
+                list(task.get("missing", []) or []),
+                dict(task.get("pending_review", {}) or {}),
                 control_state not in {"", "idle"},
                 status not in {"", "none"},
             ]
         )
 
-    def _resolve_turn_execution(self, final_state: dict[str, Any]) -> dict[str, Any]:
+    def _resolve_turn_task(self, final_state: dict[str, Any]) -> dict[str, Any]:
         metadata = final_state.get("metadata") if isinstance(final_state.get("metadata"), dict) else {}
-        metadata_execution = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
-        paused_execution = metadata.get("paused_execution") if isinstance(metadata.get("paused_execution"), dict) else {}
-        persisted_execution = metadata_execution if self._has_meaningful_execution(metadata_execution) else paused_execution
-        snapshot = self._snapshot_execution(
-            executor=final_state.get("executor"),
-            execution=persisted_execution,
-            summary=self._build_executor_summary(final_state),
+        metadata_task = metadata.get("task") if isinstance(metadata.get("task"), dict) else {}
+        paused_task = metadata.get("paused_task") if isinstance(metadata.get("paused_task"), dict) else {}
+        persisted_task = metadata_task if self._has_meaningful_task(metadata_task) else paused_task
+        snapshot = self._snapshot_task(
+            task_state=final_state.get("task"),
+            task=persisted_task,
+            summary=self._build_task_summary(final_state),
         )
-        return snapshot if self._has_meaningful_execution(snapshot) else {}
+        return snapshot if self._has_meaningful_task(snapshot) else {}
 
-    def get_execution_state(self, session_key: str) -> dict[str, Any]:
+    def get_task_state(self, session_key: str) -> dict[str, Any]:
         session = self.sessions.get(session_key)
         if session is None:
             return {}
-        return self._extract_last_execution(session)
+        return self._extract_last_task(session)
 
-    def has_active_execution(self, session_key: str) -> bool:
+    def has_active_task(self, session_key: str) -> bool:
         return any(not task.done() for task in self._active_tasks.get(session_key, []))
 
-    def _snapshot_execution(
+    def _snapshot_task(
         self,
         *,
-        executor: Any | None = None,
-        execution: dict[str, Any] | None = None,
+        task_state: Any | None = None,
+        task: dict[str, Any] | None = None,
         summary: str = "",
     ) -> dict[str, Any]:
-        base = dict(execution or {})
-        if executor is not None:
-            executor_snapshot = {
+        base = dict(task or {})
+        if task_state is not None:
+            task_snapshot = {
                 "invoked": True,
-                "thread_id": str(getattr(executor, "thread_id", "") or "").strip(),
-                "run_id": str(getattr(executor, "run_id", "") or "").strip(),
-                "control_state": str(getattr(executor, "control_state", "") or "idle").strip(),
-                "status": str(getattr(executor, "status", "") or "none").strip(),
-                "summary": str(summary or getattr(executor, "analysis", "") or "").strip(),
-                "recommended_action": str(getattr(executor, "recommended_action", "") or "").strip(),
-                "confidence": float(getattr(executor, "confidence", 0.0) or 0.0),
-                "missing": list(getattr(executor, "missing", []) or []),
-                "pending_review": dict(getattr(executor, "pending_review", {}) or {}),
+                "thread_id": str(getattr(task_state, "thread_id", "") or "").strip(),
+                "run_id": str(getattr(task_state, "run_id", "") or "").strip(),
+                "control_state": str(getattr(task_state, "control_state", "") or "idle").strip(),
+                "status": str(getattr(task_state, "status", "") or "none").strip(),
+                "summary": str(summary or getattr(task_state, "analysis", "") or "").strip(),
+                "recommended_action": str(getattr(task_state, "recommended_action", "") or "").strip(),
+                "confidence": float(getattr(task_state, "confidence", 0.0) or 0.0),
+                "missing": list(getattr(task_state, "missing", []) or []),
+                "pending_review": dict(getattr(task_state, "pending_review", {}) or {}),
             }
-            executor_has_state = any(
+            if any(
                 [
-                    executor_snapshot["thread_id"],
-                    executor_snapshot["run_id"],
-                    executor_snapshot["summary"],
-                    executor_snapshot["missing"],
-                    executor_snapshot["pending_review"],
-                    executor_snapshot["control_state"] not in {"", "idle"},
-                    executor_snapshot["status"] not in {"", "none"},
+                    task_snapshot["thread_id"],
+                    task_snapshot["run_id"],
+                    task_snapshot["summary"],
+                    task_snapshot["missing"],
+                    task_snapshot["pending_review"],
+                    task_snapshot["control_state"] not in {"", "idle"},
+                    task_snapshot["status"] not in {"", "none"},
                 ]
-            )
-            if executor_has_state or not base:
-                base.update(executor_snapshot)
+            ):
+                base.update(task_snapshot)
             elif summary and not str(base.get("summary", "") or "").strip():
                 base["summary"] = summary
         elif summary and not str(base.get("summary", "") or "").strip():
@@ -150,10 +150,10 @@ class RuntimeTurnPersistenceMixin:
         }
 
     @staticmethod
-    def _execution_event_name(execution: dict[str, Any]) -> str:
-        control_state = str(execution.get("control_state", "") or "completed").strip() or "completed"
-        status = str(execution.get("status", "") or "none").strip() or "none"
-        return f"executor.execution.{control_state}.{status}"
+    def _task_event_name(task: dict[str, Any]) -> str:
+        control_state = str(task.get("control_state", "") or "completed").strip() or "completed"
+        status = str(task.get("status", "") or "none").strip() or "none"
+        return f"task.lifecycle.{control_state}.{status}"
 
     @staticmethod
     def _summarize_resume_payload(resume_payload: Any) -> str:
@@ -181,101 +181,102 @@ class RuntimeTurnPersistenceMixin:
     ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         metadata = final_state.get("metadata") if isinstance(final_state.get("metadata"), dict) else {}
-        metadata_execution = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
-        paused_execution = metadata.get("paused_execution") if isinstance(metadata.get("paused_execution"), dict) else {}
-        main_brain = final_state.get("main_brain")
-        executor = final_state.get("executor")
-        execution = self._resolve_turn_execution(final_state)
-        carried_paused_execution = (
-            not self._executor_has_meaningful_state(executor)
-            and not self._has_meaningful_execution(metadata_execution)
-            and self._has_meaningful_execution(paused_execution)
+        metadata_task = metadata.get("task") if isinstance(metadata.get("task"), dict) else {}
+        paused_task = metadata.get("paused_task") if isinstance(metadata.get("paused_task"), dict) else {}
+
+        brain = final_state.get("brain")
+        task_state = final_state.get("task")
+        task = self._resolve_turn_task(final_state)
+        carried_paused_task = (
+            not self._task_has_meaningful_state(task_state)
+            and not self._has_meaningful_task(metadata_task)
+            and self._has_meaningful_task(paused_task)
         )
 
-        if main_brain is not None:
-            main_brain_payload = {
-                "intent": str(getattr(main_brain, "intent", "") or "").strip(),
-                "working_hypothesis": str(getattr(main_brain, "working_hypothesis", "") or "").strip(),
-                "question_to_executor": str(getattr(main_brain, "question_to_executor", "") or "").strip(),
-                "final_decision": str(getattr(main_brain, "final_decision", "") or "").strip(),
-                "final_message": str(getattr(main_brain, "final_message", "") or "").strip(),
-                "execution_action": str(getattr(main_brain, "execution_action", "") or "").strip(),
-                "execution_reason": str(getattr(main_brain, "execution_reason", "") or "").strip(),
+        if brain is not None:
+            brain_payload = {
+                "intent": str(getattr(brain, "intent", "") or "").strip(),
+                "working_hypothesis": str(getattr(brain, "working_hypothesis", "") or "").strip(),
+                "task_brief": str(getattr(brain, "task_brief", "") or "").strip(),
+                "final_decision": str(getattr(brain, "final_decision", "") or "").strip(),
+                "final_message": str(getattr(brain, "final_message", "") or "").strip(),
+                "task_action": str(getattr(brain, "task_action", "") or "").strip(),
+                "task_reason": str(getattr(brain, "task_reason", "") or "").strip(),
             }
-            main_brain_payload = {key: value for key, value in main_brain_payload.items() if value}
-            if main_brain_payload:
+            brain_payload = {key: value for key, value in brain_payload.items() if value}
+            if brain_payload:
                 records.append(
                     {
                         "message_id": message_id,
                         "role": "assistant",
-                        "phase": "main_brain",
-                        "event": "main_brain.turn.summary",
+                        "phase": "brain",
+                        "event": "brain.turn.summary",
                         "source": "runtime",
-                        "content": json.dumps(main_brain_payload, ensure_ascii=False),
-                        "main_brain": main_brain_payload,
+                        "content": json.dumps(brain_payload, ensure_ascii=False),
+                        "brain": brain_payload,
                         "timestamp": assistant_timestamp,
                     }
                 )
 
-        resume_payload = metadata_execution.get("resume_payload") if isinstance(metadata_execution, dict) else None
+        resume_payload = metadata_task.get("resume_payload") if isinstance(metadata_task, dict) else None
         resume_summary = self._summarize_resume_payload(resume_payload)
-        if execution.get("invoked") and resume_summary:
+        if task.get("invoked") and resume_summary:
             records.append(
                 {
                     "message_id": message_id,
                     "role": "assistant",
-                    "phase": "main_brain",
-                    "event": "main_brain.execution.resume_requested",
+                    "phase": "brain",
+                    "event": "brain.task.resume_requested",
                     "source": "runtime",
                     "content": resume_summary,
-                    "main_brain": {
-                        "execution_action": "resume",
-                        "execution_reason": "resume_payload_available",
+                    "brain": {
+                        "task_action": "resume_task",
+                        "task_reason": "resume_payload_available",
                     },
-                    "execution": execution,
+                    "task": task,
                     "meta": {"resume_payload": resume_payload},
                     "timestamp": assistant_timestamp,
                 }
             )
 
-        if execution.get("invoked") and not carried_paused_execution:
-            execution_summary_payload = {
-                "control_state": execution.get("control_state", "idle"),
-                "status": execution.get("status", "none"),
-                "thread_id": execution.get("thread_id", ""),
-                "run_id": execution.get("run_id", ""),
-                "summary": execution.get("summary", ""),
-                "missing": execution.get("missing", []),
+        if task.get("invoked") and not carried_paused_task:
+            task_payload = {
+                "control_state": task.get("control_state", "idle"),
+                "status": task.get("status", "none"),
+                "thread_id": task.get("thread_id", ""),
+                "run_id": task.get("run_id", ""),
+                "summary": task.get("summary", ""),
+                "missing": task.get("missing", []),
             }
-            if execution.get("pending_review"):
-                execution_summary_payload["pending_review"] = execution.get("pending_review", {})
+            if task.get("pending_review"):
+                task_payload["pending_review"] = task.get("pending_review", {})
             records.append(
                 {
                     "message_id": message_id,
                     "role": "assistant",
-                    "phase": "executor",
-                    "event": self._execution_event_name(execution),
+                    "phase": "task",
+                    "event": self._task_event_name(task),
                     "source": "runtime",
-                    "content": json.dumps(execution_summary_payload, ensure_ascii=False),
-                    "execution": execution,
+                    "content": json.dumps(task_payload, ensure_ascii=False),
+                    "task": task,
                     "timestamp": assistant_timestamp,
                 }
             )
 
         return records
 
-    def _append_internal_execution_event(
+    def _append_internal_task_event(
         self,
         *,
         session_key: str,
         message_id: str,
-        execution: dict[str, Any],
+        task: dict[str, Any],
         event: str,
         content: str,
         timestamp: str | None = None,
         source: str = "runtime_control",
     ) -> None:
-        if not execution:
+        if not task:
             return
         self.sessions.append_internal_messages(
             session_key,
@@ -283,27 +284,27 @@ class RuntimeTurnPersistenceMixin:
                 {
                     "message_id": message_id,
                     "role": "assistant",
-                    "phase": "executor",
+                    "phase": "task",
                     "event": event,
                     "source": source,
                     "content": content,
-                    "execution": execution,
+                    "task": task,
                     "timestamp": timestamp or datetime.now().isoformat(),
                 }
             ],
         )
 
-    def _append_internal_main_brain_event(
+    def _append_internal_brain_event(
         self,
         *,
         session_key: str,
         message_id: str,
-        main_brain: dict[str, Any],
+        brain: dict[str, Any],
         timestamp: str | None = None,
-        event: str = "main_brain.execution.control",
+        event: str = "brain.task.control",
         source: str = "runtime_control",
     ) -> None:
-        if not main_brain:
+        if not brain:
             return
         self.sessions.append_internal_messages(
             session_key,
@@ -311,40 +312,33 @@ class RuntimeTurnPersistenceMixin:
                 {
                     "message_id": message_id,
                     "role": "assistant",
-                    "phase": "main_brain",
+                    "phase": "brain",
                     "event": event,
                     "source": source,
-                    "content": json.dumps(main_brain, ensure_ascii=False),
-                    "main_brain": main_brain,
+                    "content": json.dumps(brain, ensure_ascii=False),
+                    "brain": brain,
                     "timestamp": timestamp or datetime.now().isoformat(),
                 }
             ],
         )
 
-    def _build_assistant_session_fields(
-        self,
-        final_state: dict[str, Any],
-    ) -> dict[str, Any]:
-        main_brain = final_state.get("main_brain")
-        if main_brain is None:
+    def _build_assistant_session_fields(self, final_state: dict[str, Any]) -> dict[str, Any]:
+        brain = final_state.get("brain")
+        if brain is None:
             return {}
-        execution = self._resolve_turn_execution(final_state)
+        task = self._resolve_turn_task(final_state)
         fields = {
             key: value
             for key, value in {
-                "model_name": str(getattr(main_brain, "model_name", "") or ""),
-                "prompt_tokens": int(getattr(main_brain, "prompt_tokens", 0) or 0),
-                "completion_tokens": int(getattr(main_brain, "completion_tokens", 0) or 0),
-                "total_tokens": int(getattr(main_brain, "total_tokens", 0) or 0),
+                "model_name": str(getattr(brain, "model_name", "") or ""),
+                "prompt_tokens": int(getattr(brain, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(brain, "completion_tokens", 0) or 0),
+                "total_tokens": int(getattr(brain, "total_tokens", 0) or 0),
             }.items()
             if value not in ("", 0)
         }
-        if execution:
-            fields["execution"] = {
-                key: value
-                for key, value in execution.items()
-                if value not in ("", [], {}, None)
-            }
+        if task:
+            fields["task"] = {key: value for key, value in task.items() if value not in ("", [], {}, None)}
         return fields
 
     def _build_internal_turn_records(
@@ -355,19 +349,19 @@ class RuntimeTurnPersistenceMixin:
         message_id: str,
         existing_internal_count: int = 0,
     ) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = self._build_internal_lifecycle_records(
+        records = self._build_internal_lifecycle_records(
             final_state,
             assistant_timestamp=assistant_timestamp,
             message_id=message_id,
         )
         seen_signatures: set[str] = set()
         internal_history = (final_state.get("internal_history", []) or [])[max(0, existing_internal_count):]
-        executor_trace = final_state.get("executor_trace", []) or []
-        for source_name, source in (("internal_history", internal_history), ("executor_trace", executor_trace)):
+        task_trace = final_state.get("task_trace", []) or []
+        for source_name, source in (("internal_history", internal_history), ("task_trace", task_trace)):
             for item in source:
                 if not isinstance(item, dict):
                     continue
-                if source_name == "executor_trace" and item.get("phase"):
+                if source_name == "task_trace" and item.get("phase"):
                     continue
                 payload = dict(item)
                 payload.setdefault("message_id", message_id)
@@ -378,7 +372,13 @@ class RuntimeTurnPersistenceMixin:
                         continue
                     seen_signatures.add(signature)
                 records.append(payload)
-        records.sort(key=lambda item: (str(item.get("timestamp", "") or assistant_timestamp), item.get("role", ""), item.get("event", "")))
+        records.sort(
+            key=lambda item: (
+                str(item.get("timestamp", "") or assistant_timestamp),
+                item.get("role", ""),
+                item.get("event", ""),
+            )
+        )
         return records
 
     def _build_user_message_content(self, content: str, media: list[str] | None) -> list[dict[str, Any]]:
@@ -391,33 +391,33 @@ class RuntimeTurnPersistenceMixin:
 
     def _build_turn_metadata(self, *, session, user_input: str, message_id: str) -> dict[str, Any]:
         metadata: dict[str, Any] = {"message_id": message_id}
-        paused_execution = self._build_resume_execution_context(session=session, user_input=user_input)
-        if paused_execution:
-            metadata["paused_execution"] = paused_execution
+        paused_task = self._build_resume_task_context(session=session, user_input=user_input)
+        if paused_task:
+            metadata["paused_task"] = paused_task
         return metadata
 
     @staticmethod
-    def _extract_last_execution(session) -> dict[str, Any]:
+    def _extract_last_task(session) -> dict[str, Any]:
         fallback: dict[str, Any] = {}
         for message in reversed(getattr(session, "messages", []) or []):
             if message.get("role") != "assistant":
                 continue
-            execution = message.get("execution")
-            if isinstance(execution, dict):
-                if RuntimeTurnPersistenceMixin._has_meaningful_execution(execution):
-                    return dict(execution)
+            task = message.get("task")
+            if isinstance(task, dict):
+                if RuntimeTurnPersistenceMixin._has_meaningful_task(task):
+                    return dict(task)
                 if not fallback:
-                    fallback = dict(execution)
+                    fallback = dict(task)
         return fallback
 
-    def _build_resume_execution_context(self, *, session, user_input: str) -> dict[str, Any]:
-        execution = self._extract_last_execution(session)
-        if str(execution.get("control_state", "") or "").strip() != "paused":
+    def _build_resume_task_context(self, *, session, user_input: str) -> dict[str, Any]:
+        task = self._extract_last_task(session)
+        if str(task.get("control_state", "") or "").strip() != "paused":
             return {}
-        resumed = dict(execution)
+        resumed = dict(task)
         resume_input = self._extract_resume_input(
             user_input,
-            pending_review=execution.get("pending_review") if isinstance(execution.get("pending_review"), dict) else {},
+            pending_review=task.get("pending_review") if isinstance(task.get("pending_review"), dict) else {},
         )
         if resume_input not in (None, "", [], {}):
             resumed["resume_payload"] = resume_input

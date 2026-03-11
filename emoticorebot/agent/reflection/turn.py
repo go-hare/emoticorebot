@@ -21,7 +21,7 @@ class TurnReflectionService:
     """Generate one compact per-turn reflection plus memory candidates."""
 
     _PROMPT = """
-你是 `main_brain` 的逐轮反思环节。
+你是 `brain` 的逐轮反思环节。
 
 只返回 JSON，不要输出任何额外说明。
 
@@ -29,7 +29,7 @@ class TurnReflectionService:
 1. 总结本轮发生了什么。
 2. 列出本轮暴露出的主要问题（如果有）。
 3. 说明问题最终是如何解决的。
-4. 从 `main_brain` 视角评价本轮 `executor` 执行情况。
+4. 从 `brain` 视角评价本轮 `task` 执行情况。
 5. 只在确实有长期价值时，产出少量长期记忆候选。
 6. 只在本轮存在高置信、可直接落盘的信息时，填写 `user_updates` 与 `soul_updates`。
 7. 只在确实需要微调当前实时状态时，填写 `state_update`，并且只能给出很小的增量。
@@ -79,7 +79,7 @@ class TurnReflectionService:
   }},
   "memory_candidates": [
     {{
-      "audience": "main_brain|executor|shared",
+      "audience": "brain|task|shared",
       "kind": "episodic|durable|procedural",
       "type": "turn_insight|user_fact|preference|goal|constraint|relationship|soul_trait|tool_experience|error_pattern|workflow_pattern|skill_hint",
       "summary": "",
@@ -120,7 +120,7 @@ class TurnReflectionService:
 - `drives_delta`：`social` / `energy` 的微小增量，没有就 `{}`。
 
 `memory_candidates` 内部字段说明：
-- `audience`：只能是 `main_brain`、`executor`、`shared`。
+- `audience`：只能是 `brain`、`task`、`shared`。
 - `kind`：只能是 `episodic`、`durable`、`procedural`。
 - `type`：只能从给定枚举里选。
 - `summary`：一句话摘要。
@@ -139,7 +139,7 @@ class TurnReflectionService:
   "outcome": "success",
   "next_hint": "下次遇到类似情况时先确认关键参数是否齐全。",
   "user_updates": ["用户希望复杂问题先收敛架构判断，再进入具体实现。"],
-  "soul_updates": ["复杂问题先收敛判断，再把最终任务交给 executor。"],
+  "soul_updates": ["复杂问题先收敛判断，再把最终任务交给 task。"],
   "state_update": {{
     "should_apply": true,
     "confidence": 0.72,
@@ -530,3 +530,4 @@ class TurnReflectionService:
 
 
 __all__ = ["TurnReflectionResult", "TurnReflectionService"]
+

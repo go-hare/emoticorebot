@@ -1,8 +1,8 @@
-"""Runtime - 使用服务类架构
+"""Runtime - 使用 agent 分层架构
 
 精简后的 Runtime，职责：
 1. 消息调度（接收消息、分发处理）
-2. 显式 turn loop 编排（`main_brain -> executor`）
+2. 显式 turn engine 编排（`brain -> central`）
 3. 会话管理（加载/保存 `dialogue` 与 `internal`）
 4. 反思调度（每轮 `turn_reflection`，按需 / 周期 `deep_reflection`）
 """
@@ -16,37 +16,39 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
-from emoticorebot.bus.events import InboundMessage, OutboundMessage
-from emoticorebot.bus.queue import MessageBus
+from emoticorebot.agent.central import CentralAgentService
+from emoticorebot.agent.brain import BrainService
+from emoticorebot.agent.reflection import MemoryService
+from emoticorebot.agent.tool import ToolManager
 from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersConfig
-from emoticorebot.core.context import ContextBuilder
-from emoticorebot.core.model import LLMFactory
-from emoticorebot.core.turn_loop import run_turn_loop
+from emoticorebot.agent.context import ContextBuilder
+from emoticorebot.agent.model import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
+from emoticorebot.runtime.event_bus import InboundMessage, OutboundMessage, RuntimeEventBus
 from emoticorebot.runtime.execution_control import RuntimeExecutionControlMixin
+from emoticorebot.runtime.turn_engine import run_turn_engine
 from emoticorebot.runtime.turn_persistence import RuntimeTurnPersistenceMixin
-from emoticorebot.services import ExecutorService, MainBrainService, MemoryService, ToolManager
 from emoticorebot.session.manager import SessionManager
 
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
-    from emoticorebot.core.state import (
-        ExecutorResultPacket,
-        MainBrainDeliberationPacket,
-        MainBrainFinalizePacket,
+    from emoticorebot.agent.state import (
+        CentralResultPacket,
+        BrainDeliberationPacket,
+        BrainFinalizePacket,
     )
     from emoticorebot.cron.service import CronService
 
 
 class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin):
-    """精简的 Runtime - 使用服务类架构"""
+    """精简的 Runtime - 使用 agent 分层架构"""
 
     def __init__(
         self,
-        bus: MessageBus,
+        bus: RuntimeEventBus,
         workspace: Path,
-        executor_mode: "ModelModeConfig",
-        main_brain_mode: "ModelModeConfig",
+        central_mode: "ModelModeConfig",
+        brain_mode: "ModelModeConfig",
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
@@ -61,9 +63,9 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
 
         self.bus = bus
         self.workspace = workspace
-        self.executor_mode = executor_mode
-        self.main_brain_mode = main_brain_mode
-        self.memory_window = executor_mode.memory_window
+        self.central_mode = central_mode
+        self.brain_mode = brain_mode
+        self.memory_window = central_mode.memory_window
         self.channels_config = channels_config
 
         self.sessions = session_manager or SessionManager(workspace)
@@ -76,21 +78,21 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
 
         factory = LLMFactory(
             providers_config=providers_config,
-            executor_mode=executor_mode,
-            main_brain_mode=main_brain_mode,
+            central_mode=central_mode,
+            brain_mode=brain_mode,
         )
-        self.executor_llm = factory.get_executor()
-        self.main_brain_llm = factory.get_main_brain()
+        self.central_llm = factory.get_central()
+        self.brain_llm = factory.get_brain()
 
-        self.main_brain_service = MainBrainService(self.main_brain_llm, self.context)
-        self.executor_service = ExecutorService(self.executor_llm, None, self.context)
+        self.brain_service = BrainService(self.brain_llm, self.context)
+        self.central_service = CentralAgentService(self.central_llm, None, self.context)
         self.memory_service = MemoryService(
             workspace,
             self.emotion_mgr,
             self.sessions,
-            executor_mode.memory_window,
-            reflection_llm=self.main_brain_llm,
-            deep_reflection_decider=self.main_brain_service.decide_deep_reflection,
+            central_mode.memory_window,
+            reflection_llm=self.brain_llm,
+            deep_reflection_decider=self.brain_service.decide_deep_reflection,
             memory_config=memory_config,
             providers_config=providers_config,
         )
@@ -104,7 +106,7 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         )
 
         self.tool_manager.register_default_tools()
-        self.executor_service.tools = self.tool_manager.get_registry()
+        self.central_service.tools = self.tool_manager.get_registry()
 
         self._mcp_servers = mcp_servers or {}
 
@@ -130,9 +132,9 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
             except asyncio.TimeoutError:
                 continue
 
-            control = self._parse_execution_control_command(msg.content)
+            control = self._parse_task_control_command(msg.content)
             if control and control[0] in {"stop", "pause"}:
-                response = await self._handle_execution_control(msg, action=control[0], argument=control[1])
+                response = await self._handle_task_control(msg, action=control[0], argument=control[1])
                 if response is not None:
                     await self.bus.publish_outbound(response)
                 continue
@@ -171,9 +173,9 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         session = self.sessions.get_or_create(key)
         cmd = msg.content.strip().lower()
 
-        control = self._parse_execution_control_command(msg.content)
+        control = self._parse_task_control_command(msg.content)
         if control is not None:
-            return await self._handle_execution_control(msg, action=control[0], argument=control[1])
+            return await self._handle_task_control(msg, action=control[0], argument=control[1])
 
         if cmd == "/new":
             session.clear()
@@ -195,13 +197,13 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
             key,
         )
 
-        dialogue_history = session.get_history(max_messages=self.memory_window, include_executor_context=False)
+        dialogue_history = session.get_history(max_messages=self.memory_window, include_task_context=False)
         internal_history = self.sessions.get_internal_messages(key, max_messages=self.memory_window)
         message_id = str(msg.metadata.get("message_id", "") or "").strip() or self._new_message_id()
         msg.metadata["message_id"] = message_id
         turn_metadata = self._build_turn_metadata(session=session, user_input=msg.content, message_id=message_id)
 
-        content, final_state = await run_turn_loop(
+        content, final_state = await run_turn_engine(
             user_input=msg.content,
             workspace=self.workspace,
             runtime=self,
@@ -282,7 +284,7 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         except Exception:
             pass
 
-    async def main_brain_deliberate(
+    async def brain_deliberate(
         self,
         *,
         user_input: str,
@@ -292,8 +294,8 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         channel: str = "",
         chat_id: str = "",
         session_id: str = "",
-    ) -> "MainBrainDeliberationPacket":
-        return await self.main_brain_service.deliberate(
+    ) -> "BrainDeliberationPacket":
+        return await self.brain_service.deliberate(
             user_input=user_input,
             history=dialogue_history,
             emotion=emotion,
@@ -303,26 +305,26 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
             session_id=session_id,
         )
 
-    async def main_brain_finalize(self, **kwargs) -> "MainBrainFinalizePacket":
-        return await self.main_brain_service.finalize(**kwargs)
+    async def brain_finalize(self, **kwargs) -> "BrainFinalizePacket":
+        return await self.brain_service.finalize(**kwargs)
 
-    def main_brain_decide_paused_execution(self, **kwargs):
-        return self.main_brain_service.decide_paused_execution(**kwargs)
+    def brain_decide_paused_task(self, **kwargs):
+        return self.brain_service.decide_paused_task(**kwargs)
 
-    def main_brain_control_after_deliberation(self, **kwargs):
-        return self.main_brain_service.control_after_deliberation(**kwargs)
+    def brain_control_after_deliberation(self, **kwargs):
+        return self.brain_service.control_after_deliberation(**kwargs)
 
-    def main_brain_control_after_finalize(self, **kwargs):
-        return self.main_brain_service.control_after_finalize(**kwargs)
+    def brain_control_after_finalize(self, **kwargs):
+        return self.brain_service.control_after_finalize(**kwargs)
 
-    def main_brain_control_stop_execution(self, **kwargs):
-        return self.main_brain_service.control_stop_execution(**kwargs)
+    def brain_control_stop_task(self, **kwargs):
+        return self.brain_service.control_stop_task(**kwargs)
 
-    def main_brain_build_executor_delegation(self, **kwargs):
-        return self.main_brain_service.build_executor_delegation(**kwargs)
+    def brain_build_task_delegation(self, **kwargs):
+        return self.brain_service.build_task_delegation(**kwargs)
 
-    async def run_executor_request(self, **kwargs) -> "ExecutorResultPacket":
-        return await self.executor_service.run_request(**kwargs)
+    async def run_central_task(self, **kwargs) -> "CentralResultPacket":
+        return await self.central_service.run_request(**kwargs)
 
     async def write_turn_reflection(self, state: dict):
         return await self.memory_service.write_turn_reflection(state)
@@ -425,3 +427,5 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
             self.subconscious.stop()
         if self.heartbeat:
             self.heartbeat.stop()
+
+
