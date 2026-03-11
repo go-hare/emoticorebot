@@ -39,12 +39,26 @@ class OutboundMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class TaskSignal:
+    """In-process staged task signal emitted by internal execution."""
+
+    session_id: str
+    message_id: str = ""
+    task_id: str = ""
+    event: str = "task.progress"
+    content: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
 class RuntimeEventBus:
     """Async bus for routing runtime ingress and egress messages."""
 
     def __init__(self):
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+        self._task_signal_subscribers: set[asyncio.Queue[TaskSignal]] = set()
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish an inbound message from a channel."""
@@ -62,6 +76,21 @@ class RuntimeEventBus:
         """Consume the next outbound message."""
         return await self.outbound.get()
 
+    async def publish_task_signal(self, signal: TaskSignal) -> None:
+        """Fan out a staged task signal to current in-process subscribers."""
+        for queue in list(self._task_signal_subscribers):
+            await queue.put(signal)
+
+    def subscribe_task_signals(self) -> asyncio.Queue[TaskSignal]:
+        """Subscribe to staged task signals for the current process."""
+        queue: asyncio.Queue[TaskSignal] = asyncio.Queue()
+        self._task_signal_subscribers.add(queue)
+        return queue
+
+    def unsubscribe_task_signals(self, queue: asyncio.Queue[TaskSignal]) -> None:
+        """Remove a staged task signal subscriber queue."""
+        self._task_signal_subscribers.discard(queue)
+
     @property
     def inbound_size(self) -> int:
         """Number of pending inbound messages."""
@@ -72,5 +101,10 @@ class RuntimeEventBus:
         """Number of pending outbound messages."""
         return self.outbound.qsize()
 
+    @property
+    def task_signal_subscriber_count(self) -> int:
+        """Number of active staged task signal subscribers."""
+        return len(self._task_signal_subscribers)
 
-__all__ = ["RuntimeEventBus", "InboundMessage", "OutboundMessage"]
+
+__all__ = ["RuntimeEventBus", "InboundMessage", "OutboundMessage", "TaskSignal"]

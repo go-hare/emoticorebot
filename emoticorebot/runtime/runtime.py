@@ -24,7 +24,7 @@ from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersC
 from emoticorebot.agent.context import ContextBuilder
 from emoticorebot.agent.model import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
-from emoticorebot.runtime.event_bus import InboundMessage, OutboundMessage, RuntimeEventBus
+from emoticorebot.runtime.event_bus import InboundMessage, OutboundMessage, RuntimeEventBus, TaskSignal
 from emoticorebot.runtime.execution_control import RuntimeExecutionControlMixin
 from emoticorebot.runtime.turn_engine import run_turn_engine
 from emoticorebot.runtime.turn_persistence import RuntimeTurnPersistenceMixin
@@ -33,11 +33,10 @@ from emoticorebot.session.manager import SessionManager
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
     from emoticorebot.agent.state import (
-        CentralResultPacket,
-        BrainDeliberationPacket,
-        BrainFinalizePacket,
+        BrainControlPacket,
     )
     from emoticorebot.cron.service import CronService
+    from emoticorebot.tasks import CentralResultPacket
 
 
 class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin):
@@ -84,7 +83,7 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         self.central_llm = factory.get_central()
         self.brain_llm = factory.get_brain()
 
-        self.brain_service = BrainService(self.brain_llm, self.context)
+        self.brain_service = BrainService(self.brain_llm, self.context, bus=self.bus)
         self.central_service = CentralAgentService(self.central_llm, None, self.context)
         self.memory_service = MemoryService(
             workspace,
@@ -92,10 +91,11 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
             self.sessions,
             central_mode.memory_window,
             reflection_llm=self.brain_llm,
-            deep_reflection_decider=self.brain_service.decide_deep_reflection,
+            deep_reflection_decider=self.brain_service._should_deep_reflect,
             memory_config=memory_config,
             providers_config=providers_config,
         )
+        self.brain_service.memory_service = self.memory_service
         self.tool_manager = ToolManager(
             workspace,
             exec_config or ExecToolConfig(),
@@ -284,54 +284,76 @@ class EmoticoreRuntime(RuntimeExecutionControlMixin, RuntimeTurnPersistenceMixin
         except Exception:
             pass
 
-    async def brain_deliberate(
+    async def brain_handle_user_turn(
         self,
         *,
         user_input: str,
         dialogue_history: list[dict[str, Any]],
         emotion: str,
         pad: dict[str, float],
+        paused_task: dict[str, Any] | None = None,
+        message_id: str = "",
         channel: str = "",
         chat_id: str = "",
         session_id: str = "",
-    ) -> "BrainDeliberationPacket":
-        return await self.brain_service.deliberate(
+    ) -> "BrainControlPacket":
+        return await self.brain_service.handle_user_turn(
             user_input=user_input,
             history=dialogue_history,
             emotion=emotion,
             pad=pad,
+            paused_task=paused_task,
+            message_id=message_id,
             channel=channel,
             chat_id=chat_id,
             session_id=session_id,
         )
 
-    async def brain_finalize(self, **kwargs) -> "BrainFinalizePacket":
-        return await self.brain_service.finalize(**kwargs)
-
-    def brain_decide_paused_task(self, **kwargs):
-        return self.brain_service.decide_paused_task(**kwargs)
-
-    def brain_control_after_deliberation(self, **kwargs):
-        return self.brain_service.control_after_deliberation(**kwargs)
-
-    def brain_control_after_finalize(self, **kwargs):
-        return self.brain_service.control_after_finalize(**kwargs)
-
-    def brain_control_stop_task(self, **kwargs):
-        return self.brain_service.control_stop_task(**kwargs)
-
-    def brain_build_task_delegation(self, **kwargs):
-        return self.brain_service.build_task_delegation(**kwargs)
+    async def brain_handle_task_signal(
+        self,
+        *,
+        signal: TaskSignal,
+        user_input: str,
+        dialogue_history: list[dict[str, Any]],
+        emotion: str,
+        pad: dict[str, float],
+        brain_intent: str,
+        brain_working_hypothesis: str,
+        loop_count: int,
+        max_loop_rounds: int,
+        task: dict[str, Any] | None = None,
+        channel: str = "",
+        chat_id: str = "",
+        session_id: str = "",
+    ) -> "BrainControlPacket":
+        return await self.brain_service.handle_task_signal(
+            signal=signal,
+            user_input=user_input,
+            history=dialogue_history,
+            emotion=emotion,
+            pad=pad,
+            brain_intent=brain_intent,
+            brain_working_hypothesis=brain_working_hypothesis,
+            loop_count=loop_count,
+            max_loop_rounds=max_loop_rounds,
+            task=task,
+            channel=channel,
+            chat_id=chat_id,
+            session_id=session_id,
+        )
 
     async def run_central_task(self, **kwargs) -> "CentralResultPacket":
         return await self.central_service.run_request(**kwargs)
 
+    async def publish_task_signal(self, signal: TaskSignal) -> None:
+        await self.bus.publish_task_signal(signal)
+
     async def write_turn_reflection(self, state: dict):
-        return await self.memory_service.write_turn_reflection(state)
+        return await self.brain_service.turn_reflect(state)
 
     async def run_deep_reflection(self, *, reason: str = "", warm_limit: int = 15):
         async with self._deep_reflection_lock:
-            return await self.memory_service.run_deep_reflection(reason=reason, warm_limit=warm_limit)
+            return await self.brain_service.deep_reflect(reason=reason, warm_limit=warm_limit)
 
     def _schedule_turn_reflection(self, *, session_key: str, state: dict[str, Any]) -> None:
         lock = self._reflection_locks.setdefault(session_key, asyncio.Lock())

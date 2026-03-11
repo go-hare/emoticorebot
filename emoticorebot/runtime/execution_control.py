@@ -75,6 +75,7 @@ class RuntimeExecutionControlMixin:
             updated = dict(task)
             updated["control_state"] = "stopped"
             updated["status"] = "failed" if str(updated.get("status", "") or "").strip() == "none" else updated.get("status", "failed")
+            updated["updated_at"] = datetime.now().isoformat()
             summary = str(updated.get("summary", "") or "").strip()
             if not summary:
                 updated["summary"] = "执行已被停止。"
@@ -93,10 +94,13 @@ class RuntimeExecutionControlMixin:
 
         self._mark_last_task_stopped(msg.session_key)
         task = self.get_task_state(msg.session_key)
-        control = self.brain_control_stop_task(
-            cancelled_tasks=cancelled,
-            task=task,
-        )
+        message = f"⏹ 已停止 {max(0, int(cancelled))} 个主任务。"
+        control = {
+            "action": "cancel_task",
+            "reason": "user_requested_stop",
+            "final_decision": "answer",
+            "message": message,
+        }
         brain_payload = {
             "task_action": str(control.get("action", "") or "").strip(),
             "task_reason": str(control.get("reason", "") or "").strip(),

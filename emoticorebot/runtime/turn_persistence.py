@@ -57,8 +57,13 @@ class RuntimeTurnPersistenceMixin:
         return any(
             [
                 bool(task.get("invoked")),
+                str(task.get("task_id", "") or "").strip(),
+                str(task.get("title", "") or "").strip(),
+                str(task.get("goal", "") or "").strip(),
                 str(task.get("thread_id", "") or "").strip(),
                 str(task.get("run_id", "") or "").strip(),
+                list(task.get("plan", []) or []),
+                list(task.get("artifacts", []) or []),
                 str(task.get("summary", "") or "").strip(),
                 list(task.get("missing", []) or []),
                 dict(task.get("pending_review", {}) or {}),
@@ -99,6 +104,13 @@ class RuntimeTurnPersistenceMixin:
         if task_state is not None:
             task_snapshot = {
                 "invoked": True,
+                "task_id": str(getattr(task_state, "task_id", "") or "").strip(),
+                "title": str(getattr(task_state, "title", "") or "").strip(),
+                "goal": str(getattr(task_state, "goal", "") or "").strip(),
+                "plan": list(getattr(task_state, "plan", []) or []),
+                "artifacts": list(getattr(task_state, "artifacts", []) or []),
+                "created_at": str(getattr(task_state, "created_at", "") or "").strip(),
+                "updated_at": str(getattr(task_state, "updated_at", "") or "").strip(),
                 "thread_id": str(getattr(task_state, "thread_id", "") or "").strip(),
                 "run_id": str(getattr(task_state, "run_id", "") or "").strip(),
                 "control_state": str(getattr(task_state, "control_state", "") or "idle").strip(),
@@ -111,8 +123,13 @@ class RuntimeTurnPersistenceMixin:
             }
             if any(
                 [
+                    task_snapshot["task_id"],
+                    task_snapshot["title"],
+                    task_snapshot["goal"],
                     task_snapshot["thread_id"],
                     task_snapshot["run_id"],
+                    task_snapshot["plan"],
+                    task_snapshot["artifacts"],
                     task_snapshot["summary"],
                     task_snapshot["missing"],
                     task_snapshot["pending_review"],
@@ -128,8 +145,13 @@ class RuntimeTurnPersistenceMixin:
 
         invoked = bool(base.get("invoked")) or any(
             [
+                str(base.get("task_id", "") or "").strip(),
+                str(base.get("title", "") or "").strip(),
+                str(base.get("goal", "") or "").strip(),
                 str(base.get("thread_id", "") or "").strip(),
                 str(base.get("run_id", "") or "").strip(),
+                list(base.get("plan", []) or []),
+                list(base.get("artifacts", []) or []),
                 str(base.get("summary", "") or "").strip(),
                 list(base.get("missing", []) or []),
                 dict(base.get("pending_review", {}) or {}),
@@ -138,6 +160,13 @@ class RuntimeTurnPersistenceMixin:
         )
         return {
             "invoked": invoked,
+            "task_id": str(base.get("task_id", "") or "").strip(),
+            "title": str(base.get("title", "") or "").strip(),
+            "goal": str(base.get("goal", "") or "").strip(),
+            "plan": list(base.get("plan", []) or []),
+            "artifacts": list(base.get("artifacts", []) or []),
+            "created_at": str(base.get("created_at", "") or "").strip(),
+            "updated_at": str(base.get("updated_at", "") or "").strip(),
             "thread_id": str(base.get("thread_id", "") or "").strip(),
             "run_id": str(base.get("run_id", "") or "").strip(),
             "control_state": str(base.get("control_state", "") or ("idle" if not invoked else "completed")).strip(),
@@ -241,6 +270,9 @@ class RuntimeTurnPersistenceMixin:
 
         if task.get("invoked") and not carried_paused_task:
             task_payload = {
+                "task_id": task.get("task_id", ""),
+                "title": task.get("title", ""),
+                "goal": task.get("goal", ""),
                 "control_state": task.get("control_state", "idle"),
                 "status": task.get("status", "none"),
                 "thread_id": task.get("thread_id", ""),
@@ -248,6 +280,14 @@ class RuntimeTurnPersistenceMixin:
                 "summary": task.get("summary", ""),
                 "missing": task.get("missing", []),
             }
+            if task.get("plan"):
+                task_payload["plan"] = task.get("plan", [])
+            if task.get("artifacts"):
+                task_payload["artifacts"] = task.get("artifacts", [])
+            if task.get("created_at"):
+                task_payload["created_at"] = task.get("created_at", "")
+            if task.get("updated_at"):
+                task_payload["updated_at"] = task.get("updated_at", "")
             if task.get("pending_review"):
                 task_payload["pending_review"] = task.get("pending_review", {})
             records.append(

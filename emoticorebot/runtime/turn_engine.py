@@ -1,37 +1,34 @@
-"""Explicit turn scheduler for the brain -> central loop."""
+"""Explicit turn scheduler for the brain -> task-system loop."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
+from emoticorebot.agent.brain_user_turn import build_default_task_brief
 from emoticorebot.agent.reply_utils import build_missing_info_prompt
 from emoticorebot.agent.state import (
-    TaskState,
-    BrainDeliberationPacket,
-    BrainFinalizePacket,
+    BrainControlPacket,
     BrainState,
     TurnState,
     create_turn_state,
 )
+from emoticorebot.runtime.event_bus import TaskSignal
+from emoticorebot.tasks import TaskState
 from emoticorebot.utils.llm_utils import json_text_block
 
 MAX_TURN_STEPS = 8
 MAX_LOOP_ROUNDS = 3
 
 
-def _task_request_ready(state: TurnState) -> bool:
-    task = state.get("task")
-    if task is None:
-        return False
-    request = str(getattr(task, "request", "") or "").strip()
-    control_state = str(getattr(task, "control_state", "") or "").strip()
+def _task_command_ready(state: TurnState) -> bool:
     metadata = state.get("metadata", {}) or {}
-    task_meta = metadata.get("task") if isinstance(metadata.get("task"), dict) else {}
-    return bool(request or task_meta) and control_state == "running"
+    pending = metadata.get("task_command") if isinstance(metadata.get("task_command"), dict) else {}
+    return bool(str(pending.get("action", "") or "").strip())
 
 
 async def run_turn_engine(
@@ -47,7 +44,7 @@ async def run_turn_engine(
     media: list[str] | None = None,
     on_progress=None,
 ) -> tuple[str, TurnState]:
-    """Run one explicit brain -> central scheduling loop."""
+    """Run one explicit brain -> task/bus scheduling loop."""
     state = create_turn_state(
         user_input=user_input,
         workspace=workspace,
@@ -67,8 +64,8 @@ async def run_turn_engine(
         if state.get("done"):
             return str(state.get("output", "") or ""), state
 
-        if _task_request_ready(state):
-            state = await _run_central_step(state, runtime)
+        if _task_command_ready(state):
+            state = await _run_task_step(state, runtime)
             if state.get("done"):
                 return str(state.get("output", "") or ""), state
             continue
@@ -101,188 +98,148 @@ async def _run_brain_step(state: TurnState, runtime) -> TurnState:
     brain.task_action = ""
     brain.task_reason = ""
 
-    paused_task = _extract_paused_task(metadata)
-    if paused_task and not _has_task_packet(task):
-        control = runtime.brain_decide_paused_task(
-            user_input=user_input,
-            task=paused_task,
-            emotion=brain.emotion,
-        )
-        brain.task_action = str(control.get("action", "") or "")
-        brain.task_reason = str(control.get("reason", "") or "")
-        if brain.task_action == "resume_task":
-            brain.task_request = str(
-                paused_task.get("summary", "") or brain.task_brief or "继续当前执行"
-            ).strip()
-            delegation = _build_task_delegation(
-                runtime,
-                action="resume_task",
-                user_input=user_input,
-                task_brief=brain.task_request,
-                intent=brain.intent,
-                working_hypothesis=brain.working_hypothesis,
-                session_id=state.get("session_id", ""),
-                loop_count=loop_count + 1,
-                task=dict(control.get("task", {}) or paused_task),
-            )
-            state["metadata"] = _set_task_metadata(
-                metadata,
-                dict(control.get("task", {}) or paused_task),
-                delegation=delegation,
-            )
-            _queue_task_resume(task, user_input=user_input, task_context=paused_task)
-            state["done"] = False
-            return state
-
-        state["metadata"] = _set_paused_task_metadata(
-            metadata,
-            dict(control.get("task", {}) or paused_task),
-        )
-        if brain.task_action == "defer":
-            metadata = state["metadata"]
-        else:
-            brain.final_decision = str(control.get("final_decision", "answer") or "answer")
-            brain.final_message = str(control.get("message", "") or "")
-            state["output"] = brain.final_message
-            state["done"] = True
-            return state
-
     if not _has_task_packet(task):
-        deliberation: BrainDeliberationPacket = await runtime.brain_deliberate(
+        paused_task = _extract_paused_task(metadata)
+        control: BrainControlPacket = await runtime.brain_handle_user_turn(
             user_input=user_input,
             dialogue_history=dialogue_history,
             emotion=brain.emotion,
             pad=brain.pad,
+            paused_task=paused_task or None,
+            message_id=str(metadata.get("message_id", "") or ""),
             channel=state.get("channel", ""),
             chat_id=state.get("chat_id", ""),
             session_id=state.get("session_id", ""),
         )
-        brain.intent = deliberation.get("intent", "")
-        brain.working_hypothesis = deliberation.get("working_hypothesis", "")
-        brain.retrieval_query = str(deliberation.get("retrieval_query", "") or user_input)
-        brain.retrieval_focus = [
-            str(item).strip()
-            for item in list(deliberation.get("retrieval_focus", []) or [])
-            if str(item).strip()
-        ]
-        brain.retrieved_memory_ids = [
-            str(item).strip()
-            for item in list(deliberation.get("retrieved_memory_ids", []) or [])
-            if str(item).strip()
-        ]
-        brain.task_brief = deliberation.get("task_brief", "")
-        brain.model_name = str(deliberation.get("model_name", "") or "")
-        brain.prompt_tokens = int(deliberation.get("prompt_tokens", 0) or 0)
-        brain.completion_tokens = int(deliberation.get("completion_tokens", 0) or 0)
-        brain.total_tokens = int(deliberation.get("total_tokens", 0) or 0)
+        if paused_task and str(control.get("action", "") or "").strip() == "defer":
+            state["metadata"] = _set_paused_task_metadata(
+                metadata,
+                dict(control.get("task", {}) or paused_task),
+            )
+            metadata = state["metadata"]
+            control = await runtime.brain_handle_user_turn(
+                user_input=user_input,
+                dialogue_history=dialogue_history,
+                emotion=brain.emotion,
+                pad=brain.pad,
+                paused_task=None,
+                message_id=str(metadata.get("message_id", "") or ""),
+                channel=state.get("channel", ""),
+                chat_id=state.get("chat_id", ""),
+                session_id=state.get("session_id", ""),
+            )
 
-        control = runtime.brain_control_after_deliberation(
-            deliberation=deliberation,
-            emotion=brain.emotion,
-        )
-        brain.task_action = str(control.get("action", "") or "")
-        brain.task_reason = str(control.get("reason", "") or "")
-
-        if brain.task_action == "create_task":
+        _apply_brain_control(brain, control, default_query=user_input)
+        if brain.task_action in {"create_task", "resume_task"}:
             question = str(control.get("task_brief", "") or brain.task_brief or "")
+            if brain.task_action == "resume_task":
+                task_context = dict(control.get("task", {}) or paused_task or {})
+                if not question:
+                    question = str(task_context.get("summary", "") or "继续当前执行").strip()
+                state["metadata"] = _set_pending_task_command(
+                    _set_task_metadata(
+                        metadata,
+                        task_context,
+                        delegation=_build_task_delegation(
+                            runtime,
+                            action="resume_task",
+                            user_input=user_input,
+                            task_brief=question,
+                            intent=brain.intent,
+                            working_hypothesis=brain.working_hypothesis,
+                            session_id=state.get("session_id", ""),
+                            loop_count=loop_count + 1,
+                            task=task_context,
+                        ),
+                    ),
+                    _build_pending_task_command(
+                        action="resume_task",
+                        user_input=user_input,
+                        task_brief=question,
+                    ),
+                )
+            else:
+                state["metadata"] = _set_pending_task_command(
+                    _merge_task_metadata(
+                        metadata,
+                        delegation=_build_task_delegation(
+                            runtime,
+                            action="create_task",
+                            user_input=user_input,
+                            task_brief=question,
+                            intent=brain.intent,
+                            working_hypothesis=brain.working_hypothesis,
+                            session_id=state.get("session_id", ""),
+                            loop_count=loop_count + 1,
+                        ),
+                    ),
+                    _build_pending_task_command(
+                        action="create_task",
+                        user_input=user_input,
+                        task_brief=question,
+                    ),
+                )
             brain.task_request = question
             brain.task_brief = question
-            delegation = _build_task_delegation(
-                runtime,
-                action="create_task",
-                user_input=user_input,
-                task_brief=question,
-                intent=brain.intent,
-                working_hypothesis=brain.working_hypothesis,
-                session_id=state.get("session_id", ""),
-                loop_count=loop_count + 1,
-            )
-            state["metadata"] = _merge_task_metadata(metadata, delegation=delegation)
-            _queue_task_request(task, question)
             state["loop_count"] = loop_count + 1
             state["done"] = False
             return state
 
-        brain.final_decision = str(control.get("final_decision", "answer") or "answer")
-        brain.final_message = str(control.get("message", "") or "")
+        if paused_task:
+            state["metadata"] = _set_paused_task_metadata(
+                metadata,
+                dict(control.get("task", {}) or paused_task),
+            )
         state["output"] = brain.final_message
         state["done"] = True
         return state
 
-    finalize: BrainFinalizePacket = await runtime.brain_finalize(
+    control = await runtime.brain_handle_task_signal(
+        signal=_build_task_result_signal(
+            task,
+            session_id=str(state.get("session_id", "") or ""),
+            message_id=str(metadata.get("message_id", "") or ""),
+        ),
         user_input=user_input,
-        history=dialogue_history,
+        dialogue_history=dialogue_history,
         emotion=brain.emotion,
         pad=brain.pad,
         brain_intent=brain.intent,
         brain_working_hypothesis=brain.working_hypothesis,
-        task_summary=runtime._build_task_summary({"task": task, "brain": brain}),
-        task_status=task.status,
-        task_missing=list(task.missing),
-        task_recommended_action=task.recommended_action,
         loop_count=loop_count,
+        max_loop_rounds=MAX_LOOP_ROUNDS,
+        task=_build_task_runtime_context(task),
         channel=state.get("channel", ""),
         chat_id=state.get("chat_id", ""),
         session_id=state.get("session_id", ""),
     )
-
-    brain.final_decision = str(finalize.get("decision", "") or "")
-    brain.final_message = str(finalize.get("message", "") or "")
-    brain.retrieval_query = str(finalize.get("retrieval_query", "") or brain.retrieval_query or user_input)
-    brain.retrieval_focus = [
-        str(item).strip()
-        for item in list(finalize.get("retrieval_focus", []) or brain.retrieval_focus or [])
-        if str(item).strip()
-    ]
-    brain.retrieved_memory_ids = [
-        str(item).strip()
-        for item in list(finalize.get("retrieved_memory_ids", []) or brain.retrieved_memory_ids or [])
-        if str(item).strip()
-    ]
-    brain.task_brief = str(finalize.get("task_brief", "") or "")
-    brain.model_name = str(finalize.get("model_name", "") or "")
-    brain.prompt_tokens = int(finalize.get("prompt_tokens", 0) or 0)
-    brain.completion_tokens = int(finalize.get("completion_tokens", 0) or 0)
-    brain.total_tokens = int(finalize.get("total_tokens", 0) or 0)
-
-    control = runtime.brain_control_after_finalize(
-        finalize=finalize,
-        loop_count=loop_count,
-        max_loop_rounds=MAX_LOOP_ROUNDS,
-        task_control_state=task.control_state,
-        task_status=task.status,
-        task_missing=list(task.missing),
-        task_analysis=task.analysis,
-        task_risks=list(task.risks),
-    )
-    brain.task_action = str(control.get("action", "") or "")
-    brain.task_reason = str(control.get("reason", "") or "")
-    brain.final_decision = str(control.get("final_decision", brain.final_decision) or brain.final_decision)
-    brain.final_message = str(control.get("message", brain.final_message) or brain.final_message)
-    brain.task_brief = str(
-        control.get("task_brief", brain.task_brief) or brain.task_brief
-    )
+    _apply_brain_control(brain, control, default_query=user_input)
 
     if brain.task_action == "continue_task":
         question = brain.task_brief
         brain.task_request = question
-        delegation = _build_task_delegation(
-            runtime,
-            action="continue_task",
-            user_input=user_input,
-            task_brief=question,
-            intent=brain.intent,
-            working_hypothesis=brain.working_hypothesis,
-            session_id=state.get("session_id", ""),
-            loop_count=loop_count + 1,
-            task=_build_task_runtime_context(task),
+        state["metadata"] = _set_pending_task_command(
+            _merge_task_metadata(
+                metadata,
+                delegation=_build_task_delegation(
+                    runtime,
+                    action="continue_task",
+                    user_input=user_input,
+                    task_brief=question,
+                    intent=brain.intent,
+                    working_hypothesis=brain.working_hypothesis,
+                    session_id=state.get("session_id", ""),
+                    loop_count=loop_count + 1,
+                    task=_build_task_runtime_context(task),
+                ),
+                task=_build_task_runtime_context(task),
+            ),
+            _build_pending_task_command(
+                action="continue_task",
+                user_input=user_input,
+                task_brief=question,
+            ),
         )
-        state["metadata"] = _merge_task_metadata(
-            metadata,
-            delegation=delegation,
-            task=_build_task_runtime_context(task),
-        )
-        _queue_task_request(task, question)
         state["loop_count"] = loop_count + 1
         state["done"] = False
         return state
@@ -297,42 +254,230 @@ async def _run_brain_step(state: TurnState, runtime) -> TurnState:
     return state
 
 
-async def _run_central_step(state: TurnState, runtime) -> TurnState:
+async def _run_task_step(state: TurnState, runtime) -> TurnState:
     task: TaskState = state["task"]
-    brain: BrainState = state["brain"]
-    question = str(task.request or "").strip()
     metadata = state.get("metadata", {}) or {}
+    pending = metadata.get("task_command") if isinstance(metadata.get("task_command"), dict) else {}
     task_context = metadata.get("task") if isinstance(metadata.get("task"), dict) else {}
+    action = str(pending.get("action", "") or "").strip()
+    task_brief = str(pending.get("task_brief", "") or "").strip()
+    if not action:
+        state["done"] = True
+        return state
+
+    question = _prepare_task_request(
+        task,
+        action=action,
+        task_brief=task_brief,
+        task_context=task_context,
+        user_input=str(state.get("user_input", "") or ""),
+    )
     if not question and not task_context:
         state["done"] = True
         return state
 
+    task_trace: list[dict[str, Any]] = []
+    signal_queue = runtime.bus.subscribe_task_signals()
+    signal_stop = False
+    signal_task = None
     on_progress = state.get("on_progress")
     message_id = str(metadata.get("message_id", "") or "").strip()
-
-    task.control_state = "running"
-    task.status = "none"
-    task_trace: list[dict[str, Any]] = []
-    request_timestamp = datetime.now().isoformat()
+    session_id = str(state.get("session_id", "") or "").strip()
 
     async def _on_trace(event: dict[str, Any]) -> None:
-        if isinstance(event, dict):
-            task_trace.append(dict(event))
+        await runtime.publish_task_signal(
+            _build_task_signal(
+                event,
+                session_id=session_id,
+                message_id=message_id,
+                task_id=str(task.task_id or ""),
+            )
+        )
 
-    result = await runtime.run_central_task(
-        request=question,
-        history=state.get("internal_history", []),
-        emotion=brain.emotion,
-        pad=brain.pad,
-        channel=state.get("channel", ""),
-        chat_id=state.get("chat_id", ""),
-        session_id=state.get("session_id", ""),
-        task_context=task_context,
-        media=state.get("media"),
-        on_progress=on_progress,
-        on_trace=_on_trace,
+    async def _relay_signals() -> None:
+        nonlocal signal_stop
+        while not signal_stop:
+            try:
+                signal = await asyncio.wait_for(signal_queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            if signal.session_id != session_id:
+                continue
+            if message_id and signal.message_id and signal.message_id != message_id:
+                continue
+            record = _task_trace_from_signal(signal)
+            if record:
+                task_trace.append(record)
+            producer = str((signal.payload or {}).get("producer", "") or "").strip().lower()
+            if producer != "brain" and str(signal.event or "").strip().lower() != "task.result":
+                await runtime.brain_handle_task_signal(
+                    signal=signal,
+                    user_input=str(state.get("user_input", "") or ""),
+                    dialogue_history=state.get("dialogue_history", []),
+                    emotion=state["brain"].emotion,
+                    pad=state["brain"].pad,
+                    brain_intent=state["brain"].intent,
+                    brain_working_hypothesis=state["brain"].working_hypothesis,
+                    loop_count=int(state.get("loop_count", 0) or 0),
+                    max_loop_rounds=MAX_LOOP_ROUNDS,
+                    task=_build_task_runtime_context(task),
+                    channel=state.get("channel", ""),
+                    chat_id=state.get("chat_id", ""),
+                    session_id=session_id,
+                )
+            if on_progress is not None and signal.content:
+                await on_progress(signal.content)
+
+    signal_task = asyncio.create_task(_relay_signals(), name=f"task-signals:{session_id or 'default'}")
+    try:
+        result = await runtime.run_central_task(
+            request=question,
+            history=state.get("internal_history", []),
+            emotion=state["brain"].emotion,
+            pad=state["brain"].pad,
+            channel=state.get("channel", ""),
+            chat_id=state.get("chat_id", ""),
+            session_id=session_id,
+            task_context=task_context,
+            media=state.get("media"),
+            on_progress=on_progress,
+            on_trace=_on_trace,
+        )
+        _apply_central_result(task, result)
+        await runtime.publish_task_signal(
+            _build_task_result_signal(
+                task,
+                session_id=session_id,
+                message_id=message_id,
+            )
+        )
+    finally:
+        signal_stop = True
+        if signal_task is not None:
+            try:
+                await signal_task
+            finally:
+                runtime.bus.unsubscribe_task_signals(signal_queue)
+
+    state["task_thread_id"] = task.thread_id
+    state["task_run_id"] = task.run_id
+    state["internal_history"] = _append_internal_history(
+        state.get("internal_history", []),
+        question=question,
+        result=result,
+        message_id=message_id,
+    )
+    state["task_trace"] = task_trace
+    if task.control_state == "paused":
+        state["metadata"] = _set_pending_task_command(
+            _set_paused_task_metadata(metadata, _build_task_runtime_context(task)),
+            None,
+        )
+    else:
+        state["metadata"] = _set_pending_task_command(
+            _set_task_metadata(metadata, _build_task_runtime_context(task)),
+            None,
+        )
+    return state
+
+
+def _apply_brain_control(brain: BrainState, control: BrainControlPacket, *, default_query: str) -> None:
+    brain.intent = str(control.get("intent", "") or brain.intent)
+    brain.working_hypothesis = str(control.get("working_hypothesis", "") or brain.working_hypothesis)
+    brain.task_action = str(control.get("action", "") or "")
+    brain.task_reason = str(control.get("reason", "") or "")
+    brain.final_decision = str(control.get("final_decision", "") or brain.final_decision)
+    brain.final_message = str(control.get("message", "") or brain.final_message)
+    brain.task_brief = str(control.get("task_brief", "") or brain.task_brief)
+    brain.retrieval_query = str(control.get("retrieval_query", "") or brain.retrieval_query or default_query)
+    brain.retrieval_focus = [
+        str(item).strip()
+        for item in list(control.get("retrieval_focus", []) or brain.retrieval_focus or [])
+        if str(item).strip()
+    ]
+    brain.retrieved_memory_ids = [
+        str(item).strip()
+        for item in list(control.get("retrieved_memory_ids", []) or brain.retrieved_memory_ids or [])
+        if str(item).strip()
+    ]
+    brain.model_name = str(control.get("model_name", "") or brain.model_name)
+    brain.prompt_tokens = int(control.get("prompt_tokens", brain.prompt_tokens) or brain.prompt_tokens)
+    brain.completion_tokens = int(control.get("completion_tokens", brain.completion_tokens) or brain.completion_tokens)
+    brain.total_tokens = int(control.get("total_tokens", brain.total_tokens) or brain.total_tokens)
+
+
+def _build_task_result_signal(
+    task: TaskState,
+    *,
+    session_id: str,
+    message_id: str,
+) -> TaskSignal:
+    payload = {
+        "producer": "task_system",
+        "control_state": str(task.control_state or "").strip(),
+        "status": str(task.status or "").strip(),
+        "analysis": str(task.analysis or "").strip(),
+        "summary": str(task.analysis or "").strip(),
+        "risks": list(task.risks or []),
+        "missing": [str(item).strip() for item in list(task.missing or []) if str(item).strip()],
+        "recommended_action": str(task.recommended_action or "").strip(),
+        "confidence": float(task.confidence or 0.0),
+        "pending_review": dict(task.pending_review or {}),
+    }
+    return TaskSignal(
+        session_id=session_id,
+        message_id=message_id,
+        task_id=str(task.task_id or "").strip(),
+        event="task.result",
+        content=str(task.analysis or "").strip(),
+        payload=payload,
     )
 
+
+def _prepare_task_request(
+    task: TaskState,
+    *,
+    action: str,
+    task_brief: str,
+    task_context: dict[str, Any],
+    user_input: str,
+) -> str:
+    now = datetime.now().isoformat()
+    if str(action or "").strip() == "resume_task":
+        request = str(user_input or "").strip()
+        if _is_plain_resume_signal(request):
+            request = ""
+        task.request = str(request or task_context.get("summary", "") or "继续上次执行").strip()
+        task.goal = task.request
+        task.task_id = str(task_context.get("task_id", "") or task.task_id or "")
+        task.title = str(task_context.get("title", "") or task.title or "")
+        task.thread_id = str(task_context.get("thread_id", "") or "")
+        task.run_id = str(task_context.get("run_id", "") or "")
+        task.plan = list(task_context.get("plan", []) or [])
+        task.artifacts = list(task_context.get("artifacts", []) or [])
+        task.created_at = str(task_context.get("created_at", "") or task.created_at or now)
+        task.missing = [
+            str(item).strip()
+            for item in (task_context.get("missing", []) or [])
+            if str(item).strip()
+        ]
+        task.pending_review = dict(task_context.get("pending_review", {}) or {})
+    else:
+        task.request = str(task_brief or "").strip()
+        task.goal = task.request
+    task.control_state = "running"
+    task.status = "none"
+    task.created_at = task.created_at or now
+    task.updated_at = now
+    task.analysis = ""
+    task.result_summary = ""
+    task.risks = []
+    task.recommended_action = ""
+    task.confidence = 0.0
+    return str(task.request or "").strip()
+
+
+def _apply_central_result(task: TaskState, result: dict[str, Any]) -> None:
     task.attempts = task.attempts + 1
     task.thread_id = str(result.get("thread_id", "") or task.thread_id or "")
     task.run_id = str(result.get("run_id", "") or task.run_id or "")
@@ -349,12 +494,19 @@ async def _run_central_step(state: TurnState, runtime) -> TurnState:
     task.prompt_tokens = int(result.get("prompt_tokens", 0) or 0)
     task.completion_tokens = int(result.get("completion_tokens", 0) or 0)
     task.total_tokens = int(result.get("total_tokens", 0) or 0)
-    result_timestamp = datetime.now().isoformat()
-    state["task_thread_id"] = task.thread_id
-    state["task_run_id"] = task.run_id
 
-    internal_history = list(state.get("internal_history", []) or [])
-    internal_history.extend(
+
+def _append_internal_history(
+    internal_history: list[dict[str, Any]] | None,
+    *,
+    question: str,
+    result: dict[str, Any],
+    message_id: str,
+) -> list[dict[str, Any]]:
+    request_timestamp = datetime.now().isoformat()
+    result_timestamp = datetime.now().isoformat()
+    history = list(internal_history or [])
+    history.extend(
         [
             {
                 "message_id": message_id,
@@ -390,9 +542,54 @@ async def _run_central_step(state: TurnState, runtime) -> TurnState:
             },
         ]
     )
-    state["internal_history"] = internal_history
-    state["task_trace"] = task_trace
-    return state
+    return history
+
+
+def _build_task_signal(
+    trace: dict[str, Any],
+    *,
+    session_id: str,
+    message_id: str,
+    task_id: str,
+) -> TaskSignal:
+    return TaskSignal(
+        session_id=session_id,
+        message_id=message_id,
+        task_id=task_id,
+        event=str(trace.get("event", "") or trace.get("phase", "") or "task.progress"),
+        content=str(trace.get("content", "") or "").strip(),
+        payload=dict(trace),
+    )
+
+
+def _task_trace_from_signal(signal: TaskSignal) -> dict[str, Any]:
+    payload = dict(signal.payload or {})
+    if payload:
+        payload.setdefault("timestamp", signal.timestamp.isoformat())
+        return payload
+    return {
+        "role": "assistant",
+        "phase": "task_trace",
+        "event": signal.event,
+        "content": signal.content,
+        "timestamp": signal.timestamp.isoformat(),
+    }
+
+
+def _is_plain_resume_signal(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    return lowered in {
+        "resume",
+        "continue",
+        "go ahead",
+        "继续",
+        "继续吧",
+        "继续执行",
+        "恢复",
+        "恢复执行",
+        "接着来",
+        "接着做",
+    }
 
 
 def _has_task_packet(task: TaskState) -> bool:
@@ -449,46 +646,33 @@ def _set_paused_task_metadata(metadata: dict[str, Any], task: dict[str, Any]) ->
     return updated
 
 
-def _queue_task_request(task: TaskState, question: str) -> None:
-    task.request = question
-    task.goal = question
-    task.control_state = "running"
-    task.status = "none"
-    task.analysis = ""
-    task.result_summary = ""
-    task.risks = []
-    task.recommended_action = ""
-    task.confidence = 0.0
-    task.missing = []
-    task.pending_review = {}
+def _set_pending_task_command(metadata: dict[str, Any], pending: dict[str, Any] | None) -> dict[str, Any]:
+    updated = dict(metadata or {})
+    if pending:
+        updated["task_command"] = dict(pending)
+    else:
+        updated.pop("task_command", None)
+    return updated
 
 
-def _queue_task_resume(task: TaskState, *, user_input: str, task_context: dict[str, Any]) -> None:
-    request = str(user_input or "").strip()
-    if _is_plain_resume_signal(request):
-        request = ""
-    task.request = str(request or task_context.get("summary", "") or "继续上次执行").strip()
-    task.goal = task.request
-    task.thread_id = str(task_context.get("thread_id", "") or "")
-    task.run_id = str(task_context.get("run_id", "") or "")
-    task.control_state = "running"
-    task.status = "none"
-    task.analysis = ""
-    task.result_summary = ""
-    task.risks = []
-    task.recommended_action = ""
-    task.confidence = 0.0
-    task.missing = [
-        str(item).strip()
-        for item in (task_context.get("missing", []) or [])
-        if str(item).strip()
-    ]
-    task.pending_review = dict(task_context.get("pending_review", {}) or {})
+def _build_pending_task_command(*, action: str, user_input: str, task_brief: str) -> dict[str, Any]:
+    return {
+        "action": str(action or "").strip(),
+        "user_input": str(user_input or "").strip(),
+        "task_brief": str(task_brief or "").strip(),
+    }
 
 
 def _build_task_runtime_context(task: TaskState) -> dict[str, Any]:
     return {
         "invoked": True,
+        "task_id": str(task.task_id or "").strip(),
+        "title": str(task.title or "").strip(),
+        "goal": str(task.goal or "").strip(),
+        "plan": list(task.plan or []),
+        "artifacts": list(task.artifacts or []),
+        "created_at": str(task.created_at or "").strip(),
+        "updated_at": str(task.updated_at or "").strip(),
         "thread_id": str(task.thread_id or "").strip(),
         "run_id": str(task.run_id or "").strip(),
         "control_state": str(task.control_state or "idle").strip(),
@@ -516,22 +700,6 @@ def _build_task_delegation(runtime, **kwargs) -> dict[str, Any]:
         "skill_hints": [],
         "success_criteria": [],
         "return_contract": {"mode": "final_only", "must_not": []},
-    }
-
-
-def _is_plain_resume_signal(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    return lowered in {
-        "resume",
-        "continue",
-        "go ahead",
-        "继续",
-        "继续吧",
-        "继续执行",
-        "恢复",
-        "恢复执行",
-        "接着来",
-        "接着做",
     }
 
 

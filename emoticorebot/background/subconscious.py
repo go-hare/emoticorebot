@@ -156,7 +156,7 @@ class SubconsciousDaemon:
         prompt = self._PROACTIVE_PROMPT.format(emotion_prompt=emotion_prompt)
         try:
             # 通过 BrainService 生成主动消息
-            content = await self.runtime.brain_service.generate_proactive(prompt)
+            content = await self.runtime.brain_service._generate_proactive(prompt)
             if not content:
                 return
 

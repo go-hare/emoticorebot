@@ -1,4 +1,4 @@
-"""Turn-loop state definitions aligned to brain / central / task semantics."""
+"""Brain-layer turn state definitions with task-model compatibility exports."""
 
 from __future__ import annotations
 
@@ -7,10 +7,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-TaskControlState = Literal["idle", "running", "paused", "stopped", "completed"]
-TaskStatus = Literal["none", "done", "need_more", "failed"]
-CentralPacketStatus = Literal["completed", "needs_input", "uncertain", "failed"]
-TaskRecommendedAction = Literal["", "answer", "ask_user", "continue_task"]
+from emoticorebot.tasks import (
+    CentralPacketStatus,
+    CentralResultPacket,
+    TaskControlState,
+    TaskRecommendedAction,
+    TaskState,
+    TaskStatus,
+)
+
 BrainFinalDecision = Literal["", "answer", "ask_user", "continue"]
 BrainTaskAction = Literal[
     "",
@@ -28,36 +33,13 @@ BrainTaskAction = Literal[
 ]
 
 
-class CentralResultPacket(TypedDict, total=False):
-    """Normalized central result packet returned into the turn loop."""
-
-    control_state: TaskControlState
-    status: TaskStatus
-    analysis: str
-    risks: list[str]
-    missing: list[str]
-    recommended_action: Literal["answer", "ask_user", "continue"]
-    confidence: float
-    pending_review: dict[str, Any]
-    thread_id: str
-    run_id: str
-    model_name: str
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-
-
-class BrainDeliberationPacket(TypedDict, total=False):
-    """Brain first-pass packet before deciding whether to create a task."""
+class BrainUnderstandingPacket(TypedDict, total=False):
+    """Brain understanding packet before deciding the next turn action."""
 
     intent: str
     working_hypothesis: str
-    task_action: Literal["none", "create_task"]
-    task_reason: str
-    final_decision: Literal["answer", "continue"]
-    needs_task: bool
-    task_brief: str
-    final_message: str
+    turn_path: Literal["answer", "task"]
+    path_reason: str
     retrieval_query: str
     retrieval_focus: list[str]
     retrieved_memory_ids: list[str]
@@ -93,53 +75,16 @@ class BrainControlPacket(TypedDict, total=False):
     message: str
     task_brief: str
     task: dict[str, Any]
-
-
-@dataclass
-class TaskState:
-    """Runtime state for the current task handled by central."""
-
-    task_id: str = ""
-    title: str = ""
-    goal: str = ""
-    brief: str = ""
-    owner_agent: str = "central"
-    created_by: str = "brain"
-    mode: Literal["sync", "async"] = "sync"
-    priority: str = "normal"
-    thread_id: str = ""
-    run_id: str = ""
-    control_state: TaskControlState = "idle"
-    status: TaskStatus = "none"
-    analysis: str = ""
-    result_summary: str = ""
-    risks: list[str] = field(default_factory=list)
-    recommended_action: TaskRecommendedAction = ""
-    confidence: float = 0.0
-    missing: list[str] = field(default_factory=list)
-    pending_review: dict[str, Any] = field(default_factory=dict)
-    need_user_input: bool = False
-    attempts: int = 0
-    model_name: str = ""
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-
-    @property
-    def request(self) -> str:
-        return self.brief
-
-    @request.setter
-    def request(self, value: str) -> None:
-        self.brief = str(value or "")
-
-    @property
-    def final_result(self) -> str:
-        return self.result_summary
-
-    @final_result.setter
-    def final_result(self, value: str) -> None:
-        self.result_summary = str(value or "")
+    intent: str
+    working_hypothesis: str
+    notify_user: bool
+    retrieval_query: str
+    retrieval_focus: list[str]
+    retrieved_memory_ids: list[str]
+    model_name: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
 
 
 @dataclass
@@ -259,7 +204,7 @@ __all__ = [
     "TaskRecommendedAction",
     "CentralResultPacket",
     "TaskState",
-    "BrainDeliberationPacket",
+    "BrainUnderstandingPacket",
     "BrainControlPacket",
     "BrainTaskAction",
     "BrainFinalizePacket",
