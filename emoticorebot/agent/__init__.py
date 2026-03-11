@@ -8,6 +8,7 @@ __all__ = [
     "BrainService",
     "CentralAgentService",
     "MemoryService",
+    "ReflectionCoordinator",
     "ToolManager",
 ]
 
@@ -25,6 +26,10 @@ def __getattr__(name: str) -> Any:
         from emoticorebot.agent.reflection import MemoryService
 
         return MemoryService
+    if name == "ReflectionCoordinator":
+        from emoticorebot.agent.reflection import ReflectionCoordinator
+
+        return ReflectionCoordinator
     if name == "ToolManager":
         from emoticorebot.agent.tool import ToolManager
 

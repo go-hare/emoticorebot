@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from loguru import logger
 
-from emoticorebot.tasks.task_context import build_task_context
+from emoticorebot.utils.task_context import build_task_context
 from emoticorebot.utils.helpers import ensure_dir, safe_filename
 from emoticorebot.utils.llm_utils import normalize_content_blocks
 

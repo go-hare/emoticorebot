@@ -6,8 +6,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from emoticorebot.agent.central.skills import BUILTIN_SKILLS_DIR
-from emoticorebot.checkpointing import PersistentMemorySaver
 from emoticorebot.utils.helpers import ensure_dir
+
+try:
+    from emoticorebot.checkpointing import PersistentMemorySaver
+except Exception:
+    PersistentMemorySaver = None
 
 try:
     from deepagents import create_deep_agent

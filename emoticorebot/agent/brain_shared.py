@@ -48,16 +48,8 @@ def extract_json_string_field(raw: str, field: str) -> str:
         return value.replace("\\n", "\n").replace('\\"', '"').strip()
 
 
-def extract_json_bool_field(raw: str, field: str) -> bool | None:
-    match = re.search(rf'"{re.escape(field)}"\s*:\s*(true|false)', raw, flags=re.IGNORECASE)
-    if not match:
-        return None
-    return match.group(1).lower() == "true"
-
-
 __all__ = [
     "compact_text",
     "parse_json_dict",
     "extract_json_string_field",
-    "extract_json_bool_field",
 ]

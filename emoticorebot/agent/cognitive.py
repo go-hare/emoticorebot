@@ -186,7 +186,7 @@ class CognitiveEvent:
                 for item in list(getattr(brain, "retrieved_memory_ids", []) or [])
                 if str(item).strip()
             ],
-            "task_request": str(getattr(brain, "task_request", "") or "").strip(),
+            "task_request": str(getattr(brain, "task_brief", "") or "").strip(),
             "task_action": str(getattr(brain, "task_action", "") or "").strip(),
             "task_reason": str(getattr(brain, "task_reason", "") or "").strip(),
             "final_decision": str(getattr(brain, "final_decision", "") or "").strip(),
@@ -290,4 +290,3 @@ class CognitiveEvent:
 
 
 __all__ = ["CognitiveEvent"]
-
