@@ -94,6 +94,7 @@ class SessionTaskSystem:
         self.context = context_builder
         self.tools = tool_registry
         self._central: "CentralAgentService | None" = None
+        self._on_progress: Callable[[str], Awaitable[None]] | None = None
 
     def _get_central(self) -> "CentralAgentService":
         if self._central is None:
@@ -273,6 +274,12 @@ class SessionTaskSystem:
         if payload:
             event["payload"] = dict(payload)
         await self.emit(task, **event)
+        # 同时调用直连模式的进度回调（如果存在）
+        if self._on_progress is not None and task.stage_info:
+            try:
+                await self._on_progress(task.stage_info)
+            except Exception:
+                pass
 
     async def request_input(self, task: TaskUnit, field: str, question: str) -> str:
         loop = asyncio.get_running_loop()

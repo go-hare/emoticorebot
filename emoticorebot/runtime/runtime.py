@@ -334,6 +334,8 @@ class EmoticoreRuntime:
             final_state["on_progress"] = on_progress
 
         task_system = self._get_task_system(session_id)
+        # 设置直连模式的进度回调
+        task_system._on_progress = on_progress
         result = await self.brain_service.handle_user_message(
             user_input=user_input,
             history=dialogue_history,
