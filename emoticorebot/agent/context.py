@@ -207,6 +207,12 @@ class ContextBuilder:
             return []
         items: list[dict[str, Any]] = []
         for path_str in media:
+            # Handle remote URLs (http/https) or data URIs directly
+            if path_str.startswith(("http://", "https://", "data:")):
+                items.append({"type": "image_url", "image_url": {"url": path_str}})
+                continue
+
+            # Handle local file paths
             path = Path(path_str)
             if not path.exists():
                 continue

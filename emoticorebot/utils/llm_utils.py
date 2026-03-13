@@ -104,4 +104,74 @@ def json_text_block(payload: Any) -> list[dict[str, Any]]:
     return [{"type": "text", "text": text}] if text else []
 
 
-__all__ = ["extract_message_text", "normalize_content_blocks", "extract_message_metrics", "json_text_block"]
+def blocks_to_llm_content(blocks: Any) -> str | list[dict[str, Any]]:
+    """Convert persisted block-array to LLM API content format.
+
+    - If blocks contain only text, returns a plain string for efficiency.
+    - If blocks contain media (image/file/audio), returns OpenAI-style content array.
+    - Converts internal {"type": "image", "url": ...} to {"type": "image_url", "image_url": {"url": ...}}.
+    """
+    if isinstance(blocks, str):
+        return blocks.strip()
+    if not isinstance(blocks, list) or not blocks:
+        return str(blocks) if blocks else ""
+
+    has_media = False
+    converted: list[dict[str, Any]] = []
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            text = str(block).strip()
+            if text:
+                converted.append({"type": "text", "text": text})
+            continue
+
+        block_type = block.get("type", "")
+
+        if block_type == "text":
+            text = str(block.get("text", "") or "").strip()
+            if text:
+                converted.append({"type": "text", "text": text})
+
+        elif block_type == "image":
+            url = block.get("url", "")
+            if url:
+                has_media = True
+                converted.append({"type": "image_url", "image_url": {"url": url}})
+
+        elif block_type == "image_url":
+            image_url = block.get("image_url")
+            if isinstance(image_url, dict) and image_url.get("url"):
+                has_media = True
+                converted.append(block)
+            elif isinstance(image_url, str) and image_url:
+                has_media = True
+                converted.append({"type": "image_url", "image_url": {"url": image_url}})
+
+        elif block_type in {"file", "audio"}:
+            url = block.get("url", "")
+            if url:
+                has_media = True
+                converted.append(block)
+
+        else:
+            text = str(block.get("text", "") or block.get("content", "") or "").strip()
+            if text:
+                converted.append({"type": "text", "text": text})
+
+    if not converted:
+        return ""
+
+    if not has_media:
+        return "\n".join(b.get("text", "") for b in converted if b.get("type") == "text").strip()
+
+    return converted
+
+
+__all__ = [
+    "extract_message_text",
+    "normalize_content_blocks",
+    "extract_message_metrics",
+    "json_text_block",
+    "blocks_to_llm_content",
+]

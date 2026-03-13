@@ -28,6 +28,14 @@ class TaskUnit:
     runner: asyncio.Task | None = None
     result: Any = None
     stage_info: str = ""
+    # 结构化结果字段（从 CentralResult 同步）
+    control_state: str = "running"
+    analysis: str = ""
+    pending_review: list[dict[str, Any]] = field(default_factory=list)
+    recommended_action: str = ""
+    confidence: float = 1.0
+    attempt_count: int = 1
+    task_trace: list[dict[str, Any]] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -40,7 +48,36 @@ class TaskUnit:
             "missing": list(self.missing),
             "input_request": dict(self.input_request or {}),
             "stage_info": self.stage_info,
+            "control_state": self.control_state,
+            "analysis": self.analysis,
+            "pending_review": list(self.pending_review),
+            "recommended_action": self.recommended_action,
+            "confidence": self.confidence,
+            "attempt_count": self.attempt_count,
+            "task_trace": list(self.task_trace),
         }
+    
+    def sync_from_result(self, result: Any) -> None:
+        """从 CentralResult 同步结构化字段到 TaskUnit"""
+        if not hasattr(result, "to_dict"):
+            return
+        
+        self.control_state = str(getattr(result, "control_state", "running") or "running")
+        self.analysis = str(getattr(result, "analysis", "") or "")
+        self.missing = list(getattr(result, "missing", []) or [])
+        self.pending_review = list(getattr(result, "pending_review", []) or [])
+        self.recommended_action = str(getattr(result, "recommended_action", "") or "")
+        self.task_trace = list(getattr(result, "task_trace", []) or [])
+        
+        try:
+            self.confidence = float(getattr(result, "confidence", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            self.confidence = 1.0
+        
+        try:
+            self.attempt_count = int(getattr(result, "attempt_count", 1) or 1)
+        except (TypeError, ValueError):
+            self.attempt_count = 1
 
 
 class SessionTaskSystem:
@@ -174,9 +211,22 @@ class SessionTaskSystem:
                 
                 # 处理结构化结果
                 if hasattr(result, "control_state"):
+                    # 同步结构化字段到 TaskUnit
+                    task.sync_from_result(result)
+                    
                     # CentralResult 结构化结果
                     if result.control_state == "waiting_input" and result.missing:
-                        # 需要补充信息，不自动完成
+                        # 需要补充信息，触发 need_input 事件
+                        task.status = "waiting_input"
+                        await self.emit(
+                            task,
+                            type="need_input",
+                            field=result.missing[0] if result.missing else "",
+                            question=result.recommended_action or "请补充以下信息",
+                            missing=list(result.missing),
+                            analysis=result.analysis,
+                            confidence=result.confidence,
+                        )
                         return
                     elif result.control_state == "failed":
                         await self.fail_task(task, reason=result.message or "执行失败")
@@ -264,34 +314,30 @@ class SessionTaskSystem:
     async def finish_task(self, task: TaskUnit, summary: str = "") -> None:
         was_waiting = task.status == "waiting_input"
         task.status = "done"
+        task.control_state = "completed"
         task.summary = str(summary or "").strip()
         task.error = ""
         if task.input_fut is not None and not task.input_fut.done():
             task.input_fut.cancel()
         task.input_fut = None
         task.input_request = None
-        task.missing = []
         
-        # 构建事件，包含结构化结果字段
-        event_data = {
+        # 构建事件，使用 TaskUnit 上已同步的结构化字段
+        event_data: dict[str, Any] = {
             "type": "done",
             "summary": task.summary,
+            "control_state": task.control_state,
+            "analysis": task.analysis,
+            "missing": list(task.missing),
+            "pending_review": list(task.pending_review),
+            "recommended_action": task.recommended_action,
+            "confidence": task.confidence,
+            "attempt_count": task.attempt_count,
+            "task_trace": list(task.task_trace),
         }
         
-        # 如果结果是结构化的，添加额外字段
-        if hasattr(task.result, "to_dict"):
-            result_dict = task.result.to_dict()
-            event_data.update({
-                "control_state": result_dict.get("control_state", "completed"),
-                "status": result_dict.get("status", "success"),
-                "analysis": result_dict.get("analysis", ""),
-                "recommended_action": result_dict.get("recommended_action", ""),
-                "confidence": result_dict.get("confidence", 1.0),
-                "task_trace": result_dict.get("task_trace", []),
-            })
-        elif hasattr(task.result, "task_trace"):
-            # Fallback: 直接从 result 对象获取 task_trace
-            event_data["task_trace"] = getattr(task.result, "task_trace", [])
+        # 完成后清空 missing（因为任务已完成）
+        task.missing = []
         
         await self.emit(task, **event_data)
         self._tasks.pop(task.task_id, None)
@@ -301,18 +347,29 @@ class SessionTaskSystem:
     async def fail_task(self, task: TaskUnit, reason: str = "") -> None:
         was_waiting = task.status == "waiting_input"
         task.status = "failed"
+        task.control_state = "failed"
         task.error = str(reason or "").strip()
         task.summary = ""
         if task.input_fut is not None and not task.input_fut.done():
             task.input_fut.cancel()
         task.input_fut = None
         task.input_request = None
+        
+        # 构建事件，包含结构化字段
+        event_data: dict[str, Any] = {
+            "type": "failed",
+            "reason": task.error,
+            "control_state": task.control_state,
+            "analysis": task.analysis,
+            "missing": list(task.missing),
+            "recommended_action": task.recommended_action,
+            "confidence": task.confidence,
+            "attempt_count": task.attempt_count,
+            "task_trace": list(task.task_trace),
+        }
+        
         task.missing = []
-        await self.emit(
-            task,
-            type="failed",
-            reason=task.error,
-        )
+        await self.emit(task, **event_data)
         self._tasks.pop(task.task_id, None)
         if was_waiting:
             await self._promote_blocked_input()

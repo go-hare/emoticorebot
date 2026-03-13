@@ -364,12 +364,20 @@ class ReflectionCoordinator:
             or task_metadata.get("recommended_action", "")
         ).strip()
 
+        try:
+            attempt_count = int(
+                (getattr(task, "attempt_count", 0) if task is not None else 0)
+                or task_metadata.get("attempt_count", 1)
+            )
+        except (TypeError, ValueError):
+            attempt_count = 1
+
         return {
             "invoked": True,
             "status": status if status in {"done", "need_more", "failed", "none"} else "none",
             "summary": summary,
             "confidence": confidence_value,
-            "attempt_count": int(getattr(task, "attempts", 0) if task is not None else 0),
+            "attempt_count": attempt_count,
             "missing": missing,
             "failure_reason": failure_reason,
             "recommended_action": recommended_action,

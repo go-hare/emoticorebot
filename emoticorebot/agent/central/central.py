@@ -10,6 +10,7 @@ from emoticorebot.agent.central import stream as central_stream
 from emoticorebot.agent.central.result import CentralResult, parse_agent_response
 from emoticorebot.agent.system import SessionTaskSystem, TaskUnit
 from emoticorebot.tools import ToolRegistry
+from emoticorebot.utils.llm_utils import blocks_to_llm_content
 
 if TYPE_CHECKING:
     from emoticorebot.agent.context import ContextBuilder
@@ -114,8 +115,9 @@ class CentralAgentService:
             role = str(turn.get("role", "") or "").strip()
             content = turn.get("content", "")
             if role in ("user", "assistant") and content:
-                text = content if isinstance(content, str) else str(content)
-                messages.append({"role": role, "content": text})
+                llm_content = blocks_to_llm_content(content)
+                if llm_content:
+                    messages.append({"role": role, "content": llm_content})
 
         user_parts = [request]
         if task_context:

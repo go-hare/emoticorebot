@@ -221,6 +221,7 @@ class EmoticoreRuntime:
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=content,
+            reply_to=str(msg.metadata.get("message_id", "") or "").strip() or None,
             metadata=msg.metadata or {},
         )
 
@@ -627,6 +628,25 @@ class EmoticoreRuntime:
                         task_status = "failed"
                         task_control_state = "failed"
                     
+                    # 从事件中提取所有结构化字段（由 system.py 填充）
+                    raw_missing = list(
+                        event.get("missing", [])
+                        or ([event.get("field")] if event.get("field") else [])
+                    )
+                    missing_list = [
+                        str(item).strip() for item in raw_missing if str(item).strip()
+                    ]
+                    
+                    try:
+                        confidence_val = float(event.get("confidence", 0.8))
+                    except (TypeError, ValueError):
+                        confidence_val = 0.8 if task_status == "done" else 0.5
+                    
+                    try:
+                        attempt_count_val = int(event.get("attempt_count", 1))
+                    except (TypeError, ValueError):
+                        attempt_count_val = 1
+                    
                     task_snapshot = {
                         "invoked": True,
                         "task_id": str(event.get("task_id", "") or "").strip(),
@@ -634,16 +654,12 @@ class EmoticoreRuntime:
                         "status": task_status,
                         "summary": str(event.get("summary", "") or event.get("message", "") or "").strip(),
                         "analysis": str(event.get("analysis", "") or "").strip(),
-                        "missing": [
-                            str(item).strip()
-                            for item in list(
-                                event.get("missing", [])
-                                or ([event.get("field")] if event.get("field") else [])
-                            )
-                            if str(item).strip()
-                        ],
+                        "missing": missing_list,
+                        "pending_review": list(event.get("pending_review", []) or []),
                         "recommended_action": str(event.get("recommended_action", "") or "").strip(),
-                        "confidence": float(event.get("confidence", 0.8 if task_status == "done" else 0.5)),
+                        "confidence": confidence_val,
+                        "attempt_count": attempt_count_val,
+                        "task_trace": list(event.get("task_trace", []) or []),
                     }
                     session.add_message(
                         "assistant",
@@ -674,10 +690,11 @@ class EmoticoreRuntime:
                                 "summary": task_snapshot.get("summary", ""),
                                 "analysis": task_snapshot.get("analysis", ""),
                                 "missing": task_snapshot.get("missing", []),
+                                "pending_review": task_snapshot.get("pending_review", []),
                                 "failure_reason": str(event.get("reason", "")).strip() if event_type == "failed" else "",
                                 "recommended_action": task_snapshot.get("recommended_action", ""),
-                                "confidence": task_snapshot.get("confidence", 0.5),
-                                "attempt_count": 1,
+                                "confidence": task_snapshot.get("confidence", 0.8),
+                                "attempt_count": task_snapshot.get("attempt_count", 1),
                             },
                         },
                         "task": task_snapshot,
@@ -712,16 +729,37 @@ class EmoticoreRuntime:
         
         # 构建任务快照
         task_status = "running"
-        task_control_state = "running"
+        task_control_state = str(event.get("control_state", "running") or "running").strip()
         if event_type == "need_input":
             task_status = "waiting_input"
             task_control_state = "waiting_input"
         elif event_type == "done":
             task_status = "done"
-            task_control_state = "completed"
+            task_control_state = str(event.get("control_state", "completed") or "completed").strip()
         elif event_type == "failed":
             task_status = "failed"
             task_control_state = "failed"
+        
+        # 从事件中提取结构化字段
+        raw_missing = list(
+            event.get("missing", [])
+            or ([event.get("field")] if event.get("field") else [])
+        )
+        missing_list = [str(item).strip() for item in raw_missing if str(item).strip()]
+        
+        try:
+            confidence_val = float(event.get("confidence", 0.8))
+        except (TypeError, ValueError):
+            confidence_val = 0.8 if task_status == "done" else 0.5
+        
+        try:
+            attempt_count_val = int(event.get("attempt_count", 1))
+        except (TypeError, ValueError):
+            attempt_count_val = 1
+        
+        recommended_action = str(event.get("recommended_action", "") or "").strip()
+        if not recommended_action:
+            recommended_action = self._get_task_recommended_action(event_type, task_status)
         
         task_snapshot = {
             "invoked": True,
@@ -729,14 +767,13 @@ class EmoticoreRuntime:
             "control_state": task_control_state,
             "status": task_status,
             "summary": str(event.get("summary", "") or event.get("message", "") or "").strip(),
-            "missing": [
-                str(item).strip()
-                for item in list(
-                    event.get("missing", [])
-                    or ([event.get("field")] if event.get("field") else [])
-                )
-                if str(item).strip()
-            ],
+            "analysis": str(event.get("analysis", "") or "").strip(),
+            "missing": missing_list,
+            "pending_review": list(event.get("pending_review", []) or []),
+            "recommended_action": recommended_action,
+            "confidence": confidence_val,
+            "attempt_count": attempt_count_val,
+            "task_trace": list(event.get("task_trace", []) or []),
         }
         
         # 调度反思
@@ -755,14 +792,17 @@ class EmoticoreRuntime:
                     "task_id": task_id,
                     "status": task_status,
                     "summary": task_snapshot.get("summary", ""),
+                    "analysis": task_snapshot.get("analysis", ""),
                     "missing": task_snapshot.get("missing", []),
+                    "pending_review": task_snapshot.get("pending_review", []),
                     "failure_reason": str(event.get("reason", "")).strip() if event_type == "failed" else "",
-                    "recommended_action": self._get_task_recommended_action(event_type, task_status),
-                    "confidence": 0.8 if task_status == "done" else 0.5,
-                    "attempt_count": 1,
+                    "recommended_action": task_snapshot.get("recommended_action", ""),
+                    "confidence": task_snapshot.get("confidence", 0.8),
+                    "attempt_count": task_snapshot.get("attempt_count", 1),
                 }
             },
             "task": task_snapshot,
+            "task_trace": task_snapshot.get("task_trace", []),
         }
         self._schedule_turn_reflection(session_key=session_id, state=task_state)
 

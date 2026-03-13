@@ -10,6 +10,7 @@ from langgraph.prebuilt import create_agent
 
 from emoticorebot.agent.context import ContextBuilder
 from emoticorebot.runtime.event_bus import RuntimeEventBus
+from emoticorebot.utils.llm_utils import blocks_to_llm_content
 
 if TYPE_CHECKING:
     from emoticorebot.agent.system import SessionTaskSystem
@@ -284,12 +285,14 @@ class BrainService:
             if text:
                 messages.append({"role": role, "content": text})
         
-        # Add dialogue history
-        for turn in history[-20:]:  # Limit history
+        # Add dialogue history (preserve multimodal content)
+        for turn in history[-20:]:
             role = turn.get("role", "user")
             content = turn.get("content", "")
             if role in ("user", "assistant") and content:
-                messages.append({"role": role, "content": str(content)})
+                llm_content = blocks_to_llm_content(content)
+                if llm_content:
+                    messages.append({"role": role, "content": llm_content})
         
         # Add current user input with multimodal media if available
         media_items = self.context.build_media_context(media)

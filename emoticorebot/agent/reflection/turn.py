@@ -379,7 +379,7 @@ class TurnReflectionService:
             }
         
         status = str(execution.get("status", "none")).strip().lower()
-        if status not in {"none", "done", "need_more", "failed"}:
+        if status not in {"none", "done", "need_more", "failed", "waiting_input", "running"}:
             status = "none"
         
         return {
