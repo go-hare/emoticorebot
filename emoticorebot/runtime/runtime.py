@@ -29,6 +29,7 @@ from emoticorebot.agent.model import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.runtime.event_bus import InboundMessage, OutboundMessage, RuntimeEventBus
 from emoticorebot.session.manager import SessionManager
+from emoticorebot.types import TaskSpec, TaskState
 
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
@@ -350,51 +351,42 @@ class EmoticoreRuntime:
             media=media,
         )
 
-        message = result.get("message", "")
+        message = str(result.get("final_message", "") or "").strip()
         if not message:
             message = "我先处理这件事。"
 
+        execution_summary = str(result.get("execution_summary", "") or "").strip()
+        task_action = str(result.get("task_action", "none") or "none").strip() or "none"
+        final_decision = str(result.get("final_decision", "answer") or "answer").strip() or "answer"
+
         final_state["output"] = message
-        final_state["execution_summary"] = result.get("execution_summary", "")
+        final_state["execution_summary"] = execution_summary
         final_state["done"] = True
+        final_state["brain"] = dict(result)
         
         # 构建完整的 metadata 结构供 reflection 使用
-        execution_summary = result.get("execution_summary", "")
-        brain_decision = "direct_reply" if not execution_summary else "task_delegated"
-        
         final_state["metadata"] = {
             "message_id": message_id,
             "execution": {
                 "summary": execution_summary,
-                "brain_decision": brain_decision,
+                "brain_decision": final_decision,
+                "task_action": task_action,
             },
             "channel": channel,
             "chat_id": chat_id,
         }
-        
-        # 如果委托了任务，添加 brain 决策信息
-        if execution_summary:
-            final_state["brain"] = {
-                "decision": "delegate_to_central",
-                "reasoning": execution_summary,
-            }
         
         # 如果有活跃任务，添加任务快照（供 reflection 使用）
         active_tasks = task_system.active_tasks()
         if active_tasks:
             # 取最近创建的任务
             latest_task = active_tasks[-1]
-            task_snapshot = latest_task.snapshot()
+            task_snapshot = self._compact_task_state_for_session(latest_task.snapshot())
             final_state["task"] = task_snapshot
-            final_state["metadata"]["task"] = {
-                "task_id": task_snapshot.get("task_id", ""),
-                "status": task_snapshot.get("status", "running"),
-                "summary": task_snapshot.get("summary", ""),
-                "missing": task_snapshot.get("missing", []),
-            }
+            final_state["metadata"]["task"] = dict(task_snapshot)
         
-        # 添加 task_trace（如果有的话，从 result 中获取）
-        final_state["task_trace"] = result.get("task_trace", [])
+        # 添加 task_trace（优先使用任务快照里的执行轨迹）
+        final_state["task_trace"] = list((final_state.get("task") or {}).get("task_trace", []) or [])
         
         return message, final_state
 
@@ -426,8 +418,12 @@ class EmoticoreRuntime:
                 "phase": "brain",
                 "event": "brain.decision",
                 "content": {
-                    "decision": brain_info.get("decision", "direct_reply"),
-                    "reasoning": brain_info.get("reasoning", execution_summary),
+                    "intent": brain_info.get("intent", ""),
+                    "working_hypothesis": brain_info.get("working_hypothesis", ""),
+                    "task_action": brain_info.get("task_action", "none"),
+                    "task_reason": brain_info.get("task_reason", ""),
+                    "final_decision": brain_info.get("final_decision", "answer"),
+                    "task_brief": brain_info.get("task_brief", ""),
                     "execution_summary": execution_summary,
                 },
             }
@@ -444,6 +440,7 @@ class EmoticoreRuntime:
                 "content": {
                     "task_id": (task_info or {}).get("task_id", "") or (metadata_task or {}).get("task_id", ""),
                     "status": (task_info or {}).get("status", "") or (metadata_task or {}).get("status", ""),
+                    "result_status": (task_info or {}).get("result_status", "") or (metadata_task or {}).get("result_status", ""),
                     "summary": (task_info or {}).get("summary", "") or (metadata_task or {}).get("summary", ""),
                     "missing": (task_info or {}).get("missing", []) or (metadata_task or {}).get("missing", []),
                 },
@@ -507,18 +504,132 @@ class EmoticoreRuntime:
         task_state = final_state.get("task")
         if not isinstance(task_state, dict) or not task_state:
             return {}
-        
-        task_id = str(task_state.get("task_id", "") or "").strip()
-        task_payload = {
-            "invoked": bool(task_id),
-            "task_id": task_id,
-            "status": str(task_state.get("status", "") or "").strip(),
-            "summary": str(
-                task_state.get("summary", "") or task_state.get("analysis", "") or ""
-            ).strip(),
+        compact = self._compact_task_state_for_session(task_state)
+        return {"task": compact} if compact else {}
+
+    @staticmethod
+    def _compact_task_spec_for_session(task_spec: dict[str, Any] | None) -> TaskSpec:
+        """Keep TaskSpec structured while stripping heavy history from dialogue persistence."""
+        if not isinstance(task_spec, dict):
+            return {}
+        compact: TaskSpec = {}
+        for key in (
+            "task_id",
+            "origin_message_id",
+            "title",
+            "request",
+            "goal",
+            "expected_output",
+            "history_context",
+            "channel",
+            "chat_id",
+            "session_id",
+        ):
+            value = str(task_spec.get(key, "") or "").strip()
+            if value:
+                compact[key] = value
+        for key in ("constraints", "success_criteria", "memory_bundle_ids", "skill_hints", "media"):
+            values = [str(item).strip() for item in list(task_spec.get(key, []) or []) if str(item).strip()]
+            if values:
+                compact[key] = values
+        task_context = task_spec.get("task_context")
+        if isinstance(task_context, dict) and task_context:
+            compact["task_context"] = dict(task_context)
+        return compact
+
+    def _compact_task_state_for_session(self, task_state: dict[str, Any] | None) -> TaskState:
+        """Persist a compact but fully structured TaskState into dialogue/session records."""
+        if not isinstance(task_state, dict):
+            return {}
+        compact: TaskState = {}
+        for key in (
+            "invoked",
+            "task_id",
+            "title",
+            "status",
+            "result_status",
+            "control_state",
+            "summary",
+            "analysis",
+            "error",
+            "stage_info",
+            "recommended_action",
+            "confidence",
+            "attempt_count",
+        ):
+            value = task_state.get(key)
+            if value not in ("", None, [], {}):
+                compact[key] = value
+        missing = [str(item).strip() for item in list(task_state.get("missing", []) or []) if str(item).strip()]
+        if missing:
+            compact["missing"] = missing
+        input_request = task_state.get("input_request")
+        if isinstance(input_request, dict) and input_request:
+            compact["input_request"] = {
+                "field": str(input_request.get("field", "") or "").strip(),
+                "question": str(input_request.get("question", "") or "").strip(),
+            }
+        pending_review = task_state.get("pending_review")
+        if isinstance(pending_review, list) and pending_review:
+            compact["pending_review"] = [item for item in pending_review if isinstance(item, dict)]
+        task_trace = task_state.get("task_trace")
+        if isinstance(task_trace, list) and task_trace:
+            compact["task_trace"] = [item for item in task_trace if isinstance(item, dict)]
+        params = task_state.get("params")
+        compact_params = self._compact_task_spec_for_session(params if isinstance(params, dict) else None)
+        if compact_params:
+            compact["params"] = compact_params
+        return compact
+
+    def _build_task_snapshot_from_event(
+        self,
+        *,
+        event: dict[str, Any],
+        status: str,
+        result_status: str,
+        control_state: str,
+        missing: list[str],
+        confidence: float,
+        attempt_count: int,
+    ) -> TaskState:
+        """Build a structured TaskState snapshot from a task event."""
+        raw_params = event.get("params")
+        params = self._compact_task_spec_for_session(raw_params if isinstance(raw_params, dict) else None)
+        input_request = {}
+        if status == "waiting_input":
+            field = str(event.get("field", "") or "").strip()
+            question = str(event.get("question", "") or "").strip()
+            if field or question:
+                input_request = {"field": field, "question": question}
+        event_type = str(event.get("type", "") or "").strip()
+        recommended_action = str(event.get("recommended_action", "") or "").strip()
+        if not recommended_action:
+            recommended_action = self._get_task_recommended_action(event_type, status)
+        task_snapshot: TaskState = {
+            "invoked": True,
+            "task_id": str(event.get("task_id", "") or "").strip(),
+            "title": str(event.get("title", "") or params.get("title", "") or "").strip(),
+            "status": status,
+            "result_status": result_status,
+            "control_state": control_state,
+            "summary": str(event.get("summary", "") or event.get("message", "") or "").strip(),
+            "analysis": str(event.get("analysis", "") or "").strip(),
+            "error": str(event.get("reason", "") or "").strip(),
+            "missing": missing,
+            "stage_info": str(event.get("message", "") or "").strip()
+            if event_type == "progress"
+            else "",
+            "pending_review": [item for item in list(event.get("pending_review", []) or []) if isinstance(item, dict)],
+            "recommended_action": recommended_action,
+            "confidence": confidence,
+            "attempt_count": attempt_count,
+            "task_trace": [item for item in list(event.get("task_trace", []) or []) if isinstance(item, dict)],
         }
-        cleaned = {k: v for k, v in task_payload.items() if v not in ("", None, False)}
-        return {"task": cleaned} if cleaned else {}
+        if params:
+            task_snapshot["params"] = params
+        if input_request:
+            task_snapshot["input_request"] = input_request
+        return task_snapshot
 
     def _get_task_system(self, session_id: str) -> SessionTaskSystem:
         key = str(session_id or "__default__").strip() or "__default__"
@@ -583,7 +694,7 @@ class EmoticoreRuntime:
                     "arousal": float(self.emotion_mgr.pad.arousal),
                     "dominance": float(self.emotion_mgr.pad.dominance),
                 }
-                content = await self.brain_service.handle_task_event(
+                brain_packet = await self.brain_service.handle_task_event(
                     event=event,
                     history=history,
                     emotion=self.emotion_mgr.get_emotion_label(),
@@ -593,6 +704,9 @@ class EmoticoreRuntime:
                     chat_id=chat_id,
                     session_id=session_id,
                 )
+                if not brain_packet:
+                    continue
+                content = str(brain_packet.get("final_message", "") or "").strip()
                 if not content:
                     continue
                 assistant_message_id = self._new_message_id()
@@ -619,16 +733,20 @@ class EmoticoreRuntime:
                     event_type = str(event.get("type", "") or "").strip().lower()
                     task_status = "running"
                     task_control_state = str(event.get("control_state", "running") or "").strip()
+                    task_result_status = str(event.get("result_status", "pending") or "pending").strip()
                     
                     if event_type == "need_input":
                         task_status = "waiting_input"
                         task_control_state = "waiting_input"
+                        task_result_status = str(event.get("result_status", "pending") or "pending").strip()
                     elif event_type == "done":
                         task_status = "done"
                         task_control_state = str(event.get("control_state", "completed") or "completed").strip()
+                        task_result_status = str(event.get("result_status", "success") or "success").strip()
                     elif event_type == "failed":
                         task_status = "failed"
                         task_control_state = "failed"
+                        task_result_status = "failed"
                     
                     # 从事件中提取所有结构化字段（由 system.py 填充）
                     raw_missing = list(
@@ -649,26 +767,22 @@ class EmoticoreRuntime:
                     except (TypeError, ValueError):
                         attempt_count_val = 1
                     
-                    task_snapshot = {
-                        "invoked": True,
-                        "task_id": str(event.get("task_id", "") or "").strip(),
-                        "control_state": task_control_state,
-                        "status": task_status,
-                        "summary": str(event.get("summary", "") or event.get("message", "") or "").strip(),
-                        "analysis": str(event.get("analysis", "") or "").strip(),
-                        "missing": missing_list,
-                        "pending_review": list(event.get("pending_review", []) or []),
-                        "recommended_action": str(event.get("recommended_action", "") or "").strip(),
-                        "confidence": confidence_val,
-                        "attempt_count": attempt_count_val,
-                        "task_trace": list(event.get("task_trace", []) or []),
-                    }
+                    task_snapshot = self._build_task_snapshot_from_event(
+                        event=event,
+                        status=task_status,
+                        result_status=task_result_status,
+                        control_state=task_control_state,
+                        missing=missing_list,
+                        confidence=confidence_val,
+                        attempt_count=attempt_count_val,
+                    )
                     session.add_message(
                         "assistant",
                         [{"type": "text", "text": content}],
                         message_id=assistant_message_id,
                         timestamp=assistant_timestamp,
                         task=task_snapshot,
+                        brain=dict(brain_packet),
                     )
                     self.sessions.save(session)
                     
@@ -677,27 +791,18 @@ class EmoticoreRuntime:
                         "user_input": str(event.get("summary", "") or event.get("question", "") or ""),
                         "output": content,
                         "session_id": session_id,
-                        "execution_summary": self._build_task_execution_summary(event, task_status),
+                        "execution_summary": str(brain_packet.get("execution_summary", "") or "").strip(),
+                        "brain": dict(brain_packet),
                         "metadata": {
                             "message_id": assistant_message_id,
                             "execution": {
-                                "summary": self._build_task_execution_summary(event, task_status),
-                                "brain_decision": "task_event",
+                                "summary": str(brain_packet.get("execution_summary", "") or "").strip(),
+                                "brain_decision": str(brain_packet.get("final_decision", "answer") or "answer").strip(),
+                                "task_action": str(brain_packet.get("task_action", "none") or "none").strip(),
                             },
                             "channel": channel,
                             "chat_id": chat_id,
-                            "task": {
-                                "task_id": task_snapshot.get("task_id", ""),
-                                "status": task_status,
-                                "summary": task_snapshot.get("summary", ""),
-                                "analysis": task_snapshot.get("analysis", ""),
-                                "missing": task_snapshot.get("missing", []),
-                                "pending_review": task_snapshot.get("pending_review", []),
-                                "failure_reason": str(event.get("reason", "")).strip() if event_type == "failed" else "",
-                                "recommended_action": task_snapshot.get("recommended_action", ""),
-                                "confidence": task_snapshot.get("confidence", 0.8),
-                                "attempt_count": task_snapshot.get("attempt_count", 1),
-                            },
+                            "task": dict(task_snapshot),
                         },
                         "task": task_snapshot,
                         "task_trace": list(event.get("task_trace", []) or []),
@@ -732,15 +837,19 @@ class EmoticoreRuntime:
         # 构建任务快照
         task_status = "running"
         task_control_state = str(event.get("control_state", "running") or "running").strip()
+        task_result_status = str(event.get("result_status", "pending") or "pending").strip()
         if event_type == "need_input":
             task_status = "waiting_input"
             task_control_state = "waiting_input"
+            task_result_status = str(event.get("result_status", "pending") or "pending").strip()
         elif event_type == "done":
             task_status = "done"
             task_control_state = str(event.get("control_state", "completed") or "completed").strip()
+            task_result_status = str(event.get("result_status", "success") or "success").strip()
         elif event_type == "failed":
             task_status = "failed"
             task_control_state = "failed"
+            task_result_status = "failed"
         
         # 从事件中提取结构化字段
         raw_missing = list(
@@ -759,24 +868,15 @@ class EmoticoreRuntime:
         except (TypeError, ValueError):
             attempt_count_val = 1
         
-        recommended_action = str(event.get("recommended_action", "") or "").strip()
-        if not recommended_action:
-            recommended_action = self._get_task_recommended_action(event_type, task_status)
-        
-        task_snapshot = {
-            "invoked": True,
-            "task_id": task_id,
-            "control_state": task_control_state,
-            "status": task_status,
-            "summary": str(event.get("summary", "") or event.get("message", "") or "").strip(),
-            "analysis": str(event.get("analysis", "") or "").strip(),
-            "missing": missing_list,
-            "pending_review": list(event.get("pending_review", []) or []),
-            "recommended_action": recommended_action,
-            "confidence": confidence_val,
-            "attempt_count": attempt_count_val,
-            "task_trace": list(event.get("task_trace", []) or []),
-        }
+        task_snapshot = self._build_task_snapshot_from_event(
+            event=event,
+            status=task_status,
+            result_status=task_result_status,
+            control_state=task_control_state,
+            missing=missing_list,
+            confidence=confidence_val,
+            attempt_count=attempt_count_val,
+        )
         
         # 调度反思
         task_state = {
@@ -790,18 +890,7 @@ class EmoticoreRuntime:
                     "summary": self._build_task_execution_summary(event, task_status),
                     "brain_decision": "internal_task_event",
                 },
-                "task": {
-                    "task_id": task_id,
-                    "status": task_status,
-                    "summary": task_snapshot.get("summary", ""),
-                    "analysis": task_snapshot.get("analysis", ""),
-                    "missing": task_snapshot.get("missing", []),
-                    "pending_review": task_snapshot.get("pending_review", []),
-                    "failure_reason": str(event.get("reason", "")).strip() if event_type == "failed" else "",
-                    "recommended_action": task_snapshot.get("recommended_action", ""),
-                    "confidence": task_snapshot.get("confidence", 0.8),
-                    "attempt_count": task_snapshot.get("attempt_count", 1),
-                }
+                "task": dict(task_snapshot)
             },
             "task": task_snapshot,
             "task_trace": task_snapshot.get("task_trace", []),
@@ -821,9 +910,14 @@ class EmoticoreRuntime:
             reason = str(event.get("reason", "")).strip()
             return f"任务 {task_id} 执行失败：{reason}" if reason else f"任务 {task_id} 执行失败"
         elif event_type == "need_input":
+            summary = str(event.get("summary", "")).strip()
             question = str(event.get("question", "")).strip()
             field = str(event.get("field", "")).strip()
-            if question:
+            if summary and question:
+                return f"任务 {task_id} 已完成部分结果：{summary}；仍需用户补充：{question}"
+            elif summary:
+                return f"任务 {task_id} 已完成部分结果：{summary}"
+            elif question:
                 return f"任务 {task_id} 需要用户提供信息：{question}"
             elif field:
                 return f"任务 {task_id} 需要用户提供：{field}"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from importlib.resources import files
@@ -14,7 +13,7 @@ from loguru import logger
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.memory import MemoryStore
 from emoticorebot.agent.reflection.skill import SkillMaterializer
-from emoticorebot.utils.llm_utils import extract_message_text
+from emoticorebot.types import DeepReflectionOutput
 
 
 @dataclass(frozen=True)
@@ -35,7 +34,7 @@ class DeepReflectionService:
     _PROMPT = """
 你是 `brain` 的深反思过程。
 
-只返回 JSON，不要输出任何额外说明。
+请严格按结构化字段填写，不要补充额外说明。
 
 任务：
 1. 阅读最近的 `cognitive_event`。
@@ -171,8 +170,8 @@ class DeepReflectionService:
 
         prompt = self._PROMPT.format(event_block=self._build_event_block(events))
         try:
-            response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
-            parsed = self._extract_json(extract_message_text(response))
+            structured_llm = self.llm.with_structured_output(DeepReflectionOutput)
+            parsed = await structured_llm.ainvoke(prompt)
         except Exception:
             parsed = None
 
@@ -415,12 +414,17 @@ class DeepReflectionService:
             assistant_output = str(event.get("assistant_output", "") or "").strip()
             turn_reflection = event.get("turn_reflection") if isinstance(event.get("turn_reflection"), dict) else {}
             task = event.get("task") if isinstance(event.get("task"), dict) else {}
+            lifecycle_status = str(task.get("status", "none") or "none").strip()
+            result_status = str(task.get("result_status", "") or "").strip()
+            execution_status = lifecycle_status
+            if result_status:
+                execution_status = f"{lifecycle_status}/{result_status}"
             lines.append(
                 "- "
                 f"{event_id} [{timestamp}] 用户={DeepReflectionService._compact(user_input, 80)} "
                 f"主脑回复={DeepReflectionService._compact(assistant_output, 80)} "
                 f"反思摘要={DeepReflectionService._compact(str(turn_reflection.get('summary', '') or ''), 80)} "
-                f"执行状态={str(task.get('status', 'none') or 'none')}"
+                f"执行状态={execution_status}"
             )
         return "\n".join(lines)
 
@@ -508,25 +512,6 @@ class DeepReflectionService:
         return compact[: limit - 1] + "…"
 
     @staticmethod
-    def _extract_json(text: str) -> dict[str, Any] | None:
-        raw = str(text or "").strip()
-        if not raw:
-            return None
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            pass
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
-            return None
-        try:
-            parsed = json.loads(match.group())
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            return None
-
-    @staticmethod
     def _safe_write_text(target: Path, content: str) -> bool:
         backup = target.with_suffix(target.suffix + ".bak")
         temp = target.with_suffix(target.suffix + ".tmp")
@@ -555,4 +540,3 @@ class DeepReflectionService:
 
 
 __all__ = ["DeepReflectionResult", "DeepReflectionService"]
-

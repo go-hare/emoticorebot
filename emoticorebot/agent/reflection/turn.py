@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Any
 
-from emoticorebot.agent.reflection.types import (
-    EmotionState,
-    ExecutionInfo,
-    TurnReflectionOutput,
-)
 from emoticorebot.models.emotion_state import EmotionStateManager
-from emoticorebot.utils.llm_utils import extract_message_text
+from emoticorebot.types import EmotionState, ExecutionInfo, TurnReflectionOutput
 
 
 @dataclass(frozen=True)
@@ -29,7 +23,7 @@ class TurnReflectionService:
     _PROMPT = """
 你是 `brain` 的逐轮反思环节。
 
-只返回 JSON，不要输出任何额外说明。
+请严格按结构化字段填写，不要补充额外说明。
 
 任务：
 1. 总结本轮发生了什么。
@@ -235,8 +229,8 @@ class TurnReflectionService:
             execution_json=json.dumps(normalized_execution, ensure_ascii=False),
         )
         try:
-            response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
-            parsed = self._extract_json(extract_message_text(response))
+            structured_llm = self.llm.with_structured_output(TurnReflectionOutput)
+            parsed = await structured_llm.ainvoke(prompt)
         except Exception:
             parsed = None
 
@@ -289,7 +283,7 @@ class TurnReflectionService:
         status = str(execution.get("status", "none") or "none")
         missing = self._normalize_str_list(execution.get("missing"))
         summary = self._compact(user_input or output, limit=90) or "本轮完成了一次正常对话。"
-        if invoked and status == "done":
+        if invoked and status in {"done", "completed"}:
             resolution = "执行已完成，并返回了可用结果。"
             outcome = "success"
         elif invoked and status == "failed":
@@ -379,7 +373,7 @@ class TurnReflectionService:
             }
         
         status = str(execution.get("status", "none")).strip().lower()
-        if status not in {"none", "done", "need_more", "failed", "waiting_input", "running"}:
+        if status not in {"none", "done", "need_more", "failed", "waiting_input", "running", "partial", "completed"}:
             status = "none"
         
         return {
@@ -501,7 +495,7 @@ class TurnReflectionService:
         if not execution.get("invoked"):
             return "none"
         status = str(execution.get("status", "none") or "none")
-        if status == "done":
+        if status in {"done", "completed"}:
             return "high"
         if status == "failed":
             return "low"
@@ -533,25 +527,4 @@ class TurnReflectionService:
             return compact
         return compact[: limit - 1] + "…"
 
-    @staticmethod
-    def _extract_json(text: str) -> dict[str, Any] | None:
-        raw = str(text or "").strip()
-        if not raw:
-            return None
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            pass
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
-            return None
-        try:
-            parsed = json.loads(match.group())
-            return parsed if isinstance(parsed, dict) else None
-        except Exception:
-            return None
-
-
 __all__ = ["TurnReflectionResult", "TurnReflectionService"]
-

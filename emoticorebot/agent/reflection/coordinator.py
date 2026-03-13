@@ -12,9 +12,9 @@ from emoticorebot.agent.cognitive import CognitiveEvent
 from emoticorebot.agent.reflection.deep import DeepReflectionResult, DeepReflectionService
 from emoticorebot.agent.reflection.memory import MemoryService
 from emoticorebot.agent.reflection.turn import TurnReflectionService
-from emoticorebot.agent.reflection.types import ExecutionInfo, TurnReflectionOutput
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.models.emotion_state import EmotionStateManager
+from emoticorebot.types import ExecutionInfo, TurnReflectionOutput
 
 
 @dataclass(frozen=True)
@@ -288,15 +288,22 @@ class ReflectionCoordinator:
             task_metadata = metadata.get("task") if isinstance(metadata.get("task"), dict) else {}
             
             if task_metadata:
+                execution_status = ReflectionCoordinator._normalize_execution_status(
+                    lifecycle_status=str(task_metadata.get("status", "done")).strip(),
+                    result_status=str(task_metadata.get("result_status", "")).strip(),
+                )
                 # 合并：使用 execution_summary 作为摘要，其他信息从 metadata.task 获取
                 return {
                     "invoked": True,
-                    "status": str(task_metadata.get("status", "done")).strip(),  # ✅ 使用真实状态
+                    "status": execution_status,
                     "summary": execution_summary,
                     "confidence": float(task_metadata.get("confidence", 0.8)),
                     "attempt_count": int(task_metadata.get("attempt_count", 1)),
                     "missing": list(task_metadata.get("missing", [])),
-                    "failure_reason": str(task_metadata.get("failure_reason", "")).strip(),
+                    "failure_reason": str(
+                        task_metadata.get("failure_reason", "")
+                        or task_metadata.get("error", "")
+                    ).strip(),
                     "recommended_action": str(task_metadata.get("recommended_action", "")).strip(),
                 }
             else:
@@ -327,46 +334,57 @@ class ReflectionCoordinator:
         if task is None and not task_metadata:
             return None
 
+        def _task_get(key: str, default: Any = "") -> Any:
+            if isinstance(task, dict):
+                return task.get(key, default)
+            if task is None:
+                return default
+            return getattr(task, key, default)
+
         summary = ""
         if task is not None:
-            summary = str(getattr(task, "analysis", "") or "").strip()
+            summary = str(_task_get("analysis", "") or "").strip()
         if not summary:
             summary = str(task_metadata.get("summary", "") or "").strip()
 
         try:
             confidence_value = float(
-                getattr(task, "confidence", 0.0)
+                _task_get("confidence", 0.0)
                 if task is not None
                 else task_metadata.get("confidence", 0.0)
             )
         except Exception:
             confidence_value = 0.0
 
-        status = str(
-            (getattr(task, "status", "") if task is not None else "")
+        lifecycle_status = str(
+            (_task_get("status", "") if task is not None else "")
             or task_metadata.get("status", "none")
+        ).strip()
+        result_status = str(
+            (_task_get("result_status", "") if task is not None else "")
+            or task_metadata.get("result_status", "")
         ).strip()
         
         missing = list(
-            (getattr(task, "missing", []) if task is not None else []) 
+            (_task_get("missing", []) if task is not None else []) 
             or task_metadata.get("missing", []) 
             or []
         )
         
         failure_reason = str(
-            (getattr(task, "error", "") if task is not None else "")
+            (_task_get("error", "") if task is not None else "")
             or task_metadata.get("failure_reason", "")
             or task_metadata.get("error", "")
         ).strip()
         
         recommended_action = str(
-            (getattr(task, "recommended_action", "") if task is not None else "")
+            (_task_get("recommended_action", "") if task is not None else "")
             or task_metadata.get("recommended_action", "")
         ).strip()
 
         try:
             attempt_count = int(
-                (getattr(task, "attempt_count", 0) if task is not None else 0)
+                (_task_get("attempt_count", 0) if task is not None else 0)
                 or task_metadata.get("attempt_count", 1)
             )
         except (TypeError, ValueError):
@@ -374,7 +392,10 @@ class ReflectionCoordinator:
 
         return {
             "invoked": True,
-            "status": status if status in {"done", "need_more", "failed", "none"} else "none",
+            "status": ReflectionCoordinator._normalize_execution_status(
+                lifecycle_status=lifecycle_status,
+                result_status=result_status,
+            ),
             "summary": summary,
             "confidence": confidence_value,
             "attempt_count": attempt_count,
@@ -382,6 +403,25 @@ class ReflectionCoordinator:
             "failure_reason": failure_reason,
             "recommended_action": recommended_action,
         }
+
+    @staticmethod
+    def _normalize_execution_status(*, lifecycle_status: str, result_status: str) -> str:
+        lifecycle = str(lifecycle_status or "").strip().lower()
+        result = str(result_status or "").strip().lower()
+
+        if lifecycle == "waiting_input":
+            return "waiting_input"
+        if lifecycle == "failed" or result == "failed":
+            return "failed"
+        if result == "partial":
+            return "partial"
+        if lifecycle == "done":
+            return "done"
+        if lifecycle in {"running", "completed"}:
+            return lifecycle
+        if result == "pending":
+            return "need_more"
+        return "none"
 
     @staticmethod
     def _default_deep_reflection_decision(
@@ -397,6 +437,12 @@ class ReflectionCoordinator:
         
         brain = state.get("brain")
         execution_review = turn_reflection.get("execution_review", {})
+        def _brain_get(key: str, default: Any = "") -> Any:
+            if isinstance(brain, dict):
+                return brain.get(key, default)
+            if brain is None:
+                return default
+            return getattr(brain, key, default)
         
         status = str(task.get("status", "")).strip().lower()
         missing = list(task.get("missing", []))
@@ -405,7 +451,7 @@ class ReflectionCoordinator:
         user_updates = list(turn_reflection.get("user_updates", []))
         soul_updates = list(turn_reflection.get("soul_updates", []))
         memory_candidates = list(turn_reflection.get("memory_candidates", []))
-        task_reason = str(getattr(brain, "task_reason", "") or "").strip() if brain is not None else ""
+        task_reason = str(_brain_get("task_reason", "") or "").strip()
 
         if task.get("invoked") and status in {"failed", "need_more"}:
             return True, f"task_requires_followup:{status}"

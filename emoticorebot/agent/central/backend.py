@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from langchain.agents.structured_output import ToolStrategy
+
 from emoticorebot.agent.central.skills import BUILTIN_SKILLS_DIR
+from emoticorebot.types import TaskExecutionResult
 from emoticorebot.utils.helpers import ensure_dir
 
 try:
@@ -53,6 +56,7 @@ def build_agent(service: "CentralAgentService") -> Any:
             "model": service.central_llm,
             "tools": tools,
             "system_prompt": build_agent_instructions(service),
+            "response_format": ToolStrategy(TaskExecutionResult),
         }
         if skills:
             kwargs["skills"] = skills
@@ -107,6 +111,17 @@ def build_agent_instructions(service: "CentralAgentService") -> str:
         "## 边界\n"
         "1. 不负责最终对用户表达，只返回执行结果。\n"
         "2. 不负责人格维护、情绪陪伴。\n"
+        "3. 不要输出原始日志、工具轨迹或 JSON 代码块。\n\n"
+        "## Task 结构化输出要求\n"
+        "系统会强制你输出 `TaskExecutionResult` 结构，不要在 `message` 或 `analysis` 中嵌 JSON。\n"
+        "- `control_state` 只能是 `completed`、`waiting_input`、`failed`。\n"
+        "- `status` 只能是 `success`、`partial`、`pending`、`failed`。\n"
+        "- 已完成任务：使用 `completed`，并在 `message` 中写最终可交付结果。\n"
+        "- 需要用户补充信息：使用 `waiting_input`，填写 `missing`，并把明确追问写入 `recommended_action`。\n"
+        "- 无法继续执行：使用 `failed`，在 `message` 或 `analysis` 中写明失败原因。\n"
+        "- `analysis` 只写紧凑结论，不展开冗长推理。\n"
+        "- `pending_review` 只有确实需要审核时才填写。\n"
+        "- `task_trace` 由系统补充，你不要自己展开执行轨迹。\n"
     )
 
 

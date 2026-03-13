@@ -214,7 +214,7 @@ class SkillMaterializer:
             "1. 先读取 `brain` 传入的 `goal`、`request`、`constraints` 与 `success_criteria`。",
             "2. 优先复用主脑传入的执行经验、工具经验和其他 `skill_hint`，不要自己检索长期 `memory`。",
             "3. 尽量在一次执行内收敛，只有在真的被阻塞时才返回 `missing` 或 `pending_review`。",
-            "4. 最终只返回协议要求的 JSON，交由 `brain` 做对外表达。",
+            "4. 最终按 task 协议返回结构化结果，交由 `brain` 做对外表达。",
             "",
             "## 边界",
             "",
@@ -234,4 +234,3 @@ class SkillMaterializer:
 
 
 __all__ = ["SkillMaterializationResult", "SkillMaterializer"]
-

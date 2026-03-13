@@ -170,38 +170,46 @@ class CognitiveEvent:
     def _build_brain_state(brain: Any) -> dict[str, Any]:
         if brain is None:
             return {}
+        def _brain_get(key: str, default: Any = "") -> Any:
+            if isinstance(brain, dict):
+                return brain.get(key, default)
+            return getattr(brain, key, default)
         return {
-            "emotion": str(getattr(brain, "emotion", "") or "平静").strip() or "平静",
-            "pad": dict(getattr(brain, "pad", {}) or {}),
-            "intent": str(getattr(brain, "intent", "") or "").strip(),
-            "working_hypothesis": str(getattr(brain, "working_hypothesis", "") or "").strip(),
-            "retrieval_query": str(getattr(brain, "retrieval_query", "") or "").strip(),
+            "emotion": str(_brain_get("emotion", "") or "平静").strip() or "平静",
+            "pad": dict(_brain_get("pad", {}) or {}),
+            "intent": str(_brain_get("intent", "") or "").strip(),
+            "working_hypothesis": str(_brain_get("working_hypothesis", "") or "").strip(),
+            "retrieval_query": str(_brain_get("retrieval_query", "") or "").strip(),
             "retrieval_focus": [
                 str(item).strip()
-                for item in list(getattr(brain, "retrieval_focus", []) or [])
+                for item in list(_brain_get("retrieval_focus", []) or [])
                 if str(item).strip()
             ],
             "retrieved_memory_ids": [
                 str(item).strip()
-                for item in list(getattr(brain, "retrieved_memory_ids", []) or [])
+                for item in list(_brain_get("retrieved_memory_ids", []) or [])
                 if str(item).strip()
             ],
-            "task_request": str(getattr(brain, "task_brief", "") or "").strip(),
-            "task_action": str(getattr(brain, "task_action", "") or "").strip(),
-            "task_reason": str(getattr(brain, "task_reason", "") or "").strip(),
-            "final_decision": str(getattr(brain, "final_decision", "") or "").strip(),
+            "task_request": str(_brain_get("task_brief", "") or "").strip(),
+            "task_action": str(_brain_get("task_action", "") or "").strip(),
+            "task_reason": str(_brain_get("task_reason", "") or "").strip(),
+            "final_decision": str(_brain_get("final_decision", "") or "").strip(),
         }
 
     @staticmethod
     def _build_retrieval(*, brain: Any, user_input: str) -> dict[str, Any]:
-        query = str(getattr(brain, "retrieval_query", "") or "").strip() if brain is not None else ""
+        def _brain_get(key: str, default: Any = "") -> Any:
+            if isinstance(brain, dict):
+                return brain.get(key, default)
+            return getattr(brain, key, default)
+        query = str(_brain_get("retrieval_query", "") or "").strip() if brain is not None else ""
         if not query:
             query = user_input
         memory_ids = []
         if brain is not None:
             memory_ids = [
                 str(item).strip()
-                for item in list(getattr(brain, "retrieved_memory_ids", []) or [])
+                for item in list(_brain_get("retrieved_memory_ids", []) or [])
                 if str(item).strip()
             ]
         return {"query": query, "memory_ids": memory_ids}
@@ -225,6 +233,7 @@ class CognitiveEvent:
 
         summary = str(task_dict.get("summary", "") or task_dict.get("analysis", "") or "").strip()
         status = str(task_dict.get("status", "") or "none").strip() or "none"
+        result_status = str(task_dict.get("result_status", "") or execution.get("result_status", "") or "").strip()
         if not summary:
             summary = str(execution.get("summary", "") or "").strip()
         if status == "none":
@@ -239,9 +248,13 @@ class CognitiveEvent:
         raw_missing = list(task_dict.get("missing", []) or execution.get("missing", []) or [])
         missing = [str(item).strip() for item in raw_missing if str(item).strip()]
 
+        task_action = str(execution.get("task_action", "") or "").strip()
+        used = bool(task_dict) or task_action in {"create_task", "fill_task"}
+
         return {
-            "used": bool(task_dict or execution),
+            "used": used,
             "status": status,
+            "result_status": result_status,
             "summary": summary,
             "control_state": control_state,
             "missing": missing,

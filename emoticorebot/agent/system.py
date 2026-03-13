@@ -6,6 +6,18 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from emoticorebot.types import (
+    ReviewItem,
+    TaskControlState,
+    TaskExecutionResult,
+    TaskInputRequest,
+    TaskLifecycleState,
+    TaskResultStatus,
+    TaskSpec,
+    TaskState,
+    TraceItem,
+)
+
 TaskWorker = Callable[["TaskUnit", "SessionTaskSystem"], Awaitable[Any]]
 
 if TYPE_CHECKING:
@@ -18,31 +30,35 @@ if TYPE_CHECKING:
 class TaskUnit:
     task_id: str
     title: str = ""
-    params: dict[str, Any] = field(default_factory=dict)
-    status: str = "running"
+    params: TaskSpec = field(default_factory=dict)
+    worker: TaskWorker | None = None
+    status: TaskLifecycleState = "running"
     summary: str = ""
     error: str = ""
     missing: list[str] = field(default_factory=list)
-    input_request: dict[str, Any] | None = None
+    input_request: TaskInputRequest | None = None
     input_fut: asyncio.Future | None = None
     runner: asyncio.Task | None = None
     result: Any = None
     stage_info: str = ""
-    # 结构化结果字段（从 CentralResult 同步）
-    control_state: str = "running"
+    # 结构化结果字段（从 TaskExecutionResult 同步）
+    control_state: TaskControlState = "running"
+    result_status: TaskResultStatus = "pending"
     analysis: str = ""
-    pending_review: list[dict[str, Any]] = field(default_factory=list)
+    pending_review: list[ReviewItem] = field(default_factory=list)
     recommended_action: str = ""
     confidence: float = 1.0
     attempt_count: int = 1
-    task_trace: list[dict[str, Any]] = field(default_factory=list)
+    task_trace: list[TraceItem] = field(default_factory=list)
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self) -> TaskState:
         return {
+            "invoked": True,
             "task_id": self.task_id,
             "title": self.title,
             "params": dict(self.params),
             "status": self.status,
+            "result_status": self.result_status,
             "summary": self.summary,
             "error": self.error,
             "missing": list(self.missing),
@@ -57,25 +73,29 @@ class TaskUnit:
             "task_trace": list(self.task_trace),
         }
     
-    def sync_from_result(self, result: Any) -> None:
-        """从 CentralResult 同步结构化字段到 TaskUnit"""
-        if not hasattr(result, "to_dict"):
+    def sync_from_result(self, result: TaskExecutionResult | dict[str, Any]) -> None:
+        """从 TaskExecutionResult 同步结构化字段到 TaskUnit"""
+        if not isinstance(result, dict):
             return
-        
-        self.control_state = str(getattr(result, "control_state", "running") or "running")
-        self.analysis = str(getattr(result, "analysis", "") or "")
-        self.missing = list(getattr(result, "missing", []) or [])
-        self.pending_review = list(getattr(result, "pending_review", []) or [])
-        self.recommended_action = str(getattr(result, "recommended_action", "") or "")
-        self.task_trace = list(getattr(result, "task_trace", []) or [])
-        
+
+        self.control_state = str(result.get("control_state", "running") or "running")
+        self.result_status = str(result.get("status", "pending") or "pending")
+        message = str(result.get("message", "") or "").strip()
+        if message:
+            self.summary = message
+        self.analysis = str(result.get("analysis", "") or "")
+        self.missing = list(result.get("missing", []) or [])
+        self.pending_review = list(result.get("pending_review", []) or [])
+        self.recommended_action = str(result.get("recommended_action", "") or "")
+        self.task_trace = list(result.get("task_trace", []) or [])
+
         try:
-            self.confidence = float(getattr(result, "confidence", 1.0) or 1.0)
+            self.confidence = float(result.get("confidence", 1.0) or 1.0)
         except (TypeError, ValueError):
             self.confidence = 1.0
-        
+
         try:
-            self.attempt_count = int(getattr(result, "attempt_count", 1) or 1)
+            self.attempt_count = int(result.get("attempt_count", 1) or 1)
         except (TypeError, ValueError):
             self.attempt_count = 1
 
@@ -145,13 +165,14 @@ class SessionTaskSystem:
         self,
         task_id: str,
         worker: TaskWorker,
-        params: dict[str, Any] | None = None,
+        params: TaskSpec | None = None,
         title: str = "",
     ) -> TaskUnit:
         task = TaskUnit(
             task_id=str(task_id or "").strip(),
             title=str(title or "").strip(),
             params=dict(params or {}),
+            worker=worker,
         )
         if not task.task_id:
             raise RuntimeError("task_id is required")
@@ -169,29 +190,42 @@ class SessionTaskSystem:
 
     async def create_central_task(
         self,
-        task_id: str,
-        *,
-        title: str = "",
-        request: str,
-        history: list[dict[str, Any]] | None = None,
-        task_context: dict[str, Any] | None = None,
-        media: list[str] | None = None,
-        channel: str = "",
-        chat_id: str = "",
-        session_id: str = "",
-        extra_params: dict[str, Any] | None = None,
+        task_spec: TaskSpec,
     ) -> TaskUnit:
-        params = {
-            "request": str(request or "").strip(),
-            "history": [dict(item) for item in list(history or []) if isinstance(item, dict)],
-            "task_context": dict(task_context or {}),
-            "media": list(media or []),
-            "channel": str(channel or "").strip(),
-            "chat_id": str(chat_id or "").strip(),
-            "session_id": str(session_id or "").strip(),
+        params: TaskSpec = {
+            "task_id": str(task_spec.get("task_id", "") or "").strip(),
+            "origin_message_id": str(task_spec.get("origin_message_id", "") or "").strip(),
+            "title": str(task_spec.get("title", "") or "").strip(),
+            "request": str(task_spec.get("request", "") or "").strip(),
+            "goal": str(task_spec.get("goal", "") or "").strip(),
+            "expected_output": str(task_spec.get("expected_output", "") or "").strip(),
+            "history_context": str(task_spec.get("history_context", "") or "").strip(),
+            "channel": str(task_spec.get("channel", "") or "").strip(),
+            "chat_id": str(task_spec.get("chat_id", "") or "").strip(),
+            "session_id": str(task_spec.get("session_id", "") or "").strip(),
+            "constraints": [str(item).strip() for item in list(task_spec.get("constraints", []) or []) if str(item).strip()],
+            "success_criteria": [
+                str(item).strip() for item in list(task_spec.get("success_criteria", []) or []) if str(item).strip()
+            ],
+            "memory_bundle_ids": [
+                str(item).strip() for item in list(task_spec.get("memory_bundle_ids", []) or []) if str(item).strip()
+            ],
+            "skill_hints": [str(item).strip() for item in list(task_spec.get("skill_hints", []) or []) if str(item).strip()],
+            "media": [str(item).strip() for item in list(task_spec.get("media", []) or []) if str(item).strip()],
         }
-        if extra_params:
-            params.update(dict(extra_params))
+        history = task_spec.get("history")
+        if isinstance(history, list):
+            params["history"] = [dict(item) for item in history if isinstance(item, dict)]
+        task_context = task_spec.get("task_context")
+        if isinstance(task_context, dict):
+            params["task_context"] = dict(task_context)
+
+        task_id = str(params.get("task_id", "") or "").strip()
+        title = str(params.get("title", "") or "").strip()
+        if not task_id:
+            raise RuntimeError("TaskSpec.task_id is required")
+        if not params.get("request"):
+            raise RuntimeError("TaskSpec.request is required")
 
         async def _worker(task: TaskUnit, system: "SessionTaskSystem") -> Any:
             return await self._get_central().run_task(task, system)
@@ -211,29 +245,27 @@ class SessionTaskSystem:
                 task.result = result
                 
                 # 处理结构化结果
-                if hasattr(result, "control_state"):
+                if isinstance(result, dict) and "control_state" in result:
                     # 同步结构化字段到 TaskUnit
                     task.sync_from_result(result)
                     
-                    # CentralResult 结构化结果
-                    if result.control_state == "waiting_input" and result.missing:
-                        # 需要补充信息，触发 need_input 事件
-                        task.status = "waiting_input"
-                        await self.emit(
+                    # TaskExecutionResult 结构化结果
+                    if task.control_state == "waiting_input" and task.missing:
+                        task.input_request = {
+                            "field": task.missing[0] if task.missing else "",
+                            "question": task.recommended_action or "请补充以下信息",
+                        }
+                        task.input_fut = None
+                        await self._activate_or_queue_waiting_task(task)
+                        return
+                    elif task.control_state == "failed":
+                        await self.fail_task(
                             task,
-                            type="need_input",
-                            field=result.missing[0] if result.missing else "",
-                            question=result.recommended_action or "请补充以下信息",
-                            missing=list(result.missing),
-                            analysis=result.analysis,
-                            confidence=result.confidence,
+                            reason=str(result.get("message", "") or "").strip() or "执行失败",
                         )
                         return
-                    elif result.control_state == "failed":
-                        await self.fail_task(task, reason=result.message or "执行失败")
-                        return
                     # completed 或其他状态，正常完成
-                    summary = result.message or str(result or "").strip()
+                    summary = str(result.get("message", "") or "").strip()
                 else:
                     # 字符串结果（向后兼容）
                     summary = str(result or "").strip()
@@ -260,7 +292,7 @@ class SessionTaskSystem:
             "task_id": task.task_id,
             "channel": str(task.params.get("channel", "") or "").strip(),
             "chat_id": str(task.params.get("chat_id", "") or "").strip(),
-            "message_id": str(task.params.get("message_id", "") or "").strip(),
+            "message_id": str(task.params.get("origin_message_id", "") or "").strip(),
             **dict(payload),
         }
         await self.to_main_queue.put(event)
@@ -289,32 +321,54 @@ class SessionTaskSystem:
             "question": str(question or "").strip(),
         }
         task.missing = [task.input_request["field"]] if task.input_request["field"] else []
-
-        if self.waiting_task() is None:
-            task.status = "waiting_input"
-            await self.emit(
-                task,
-                type="need_input",
-                field=task.input_request["field"],
-                question=task.input_request["question"],
-            )
-        else:
-            task.status = "blocked_input"
+        task.control_state = "waiting_input"
+        task.result_status = "pending"
+        await self._activate_or_queue_waiting_task(task)
 
         return await task.input_fut
 
-    async def answer(self, content: str, task_id: str | None = None) -> bool:
+    async def answer(
+        self,
+        content: str,
+        task_id: str | None = None,
+        *,
+        origin_message_id: str = "",
+    ) -> bool:
         task = self.get_task(task_id or "") if task_id else self.waiting_task()
-        if task is None or task.input_fut is None or task.status != "waiting_input":
+        if task is None or task.status != "waiting_input":
             return False
 
-        if not task.input_fut.done():
-            task.input_fut.set_result(content)
+        if origin_message_id:
+            task.params["origin_message_id"] = str(origin_message_id or "").strip()
+
+        self._merge_answer_into_task(task, content)
+
+        if task.input_fut is not None:
+            if not task.input_fut.done():
+                task.input_fut.set_result(content)
+
+            task.status = "running"
+            task.control_state = "running"
+            task.result_status = "pending"
+            task.error = ""
+            task.input_fut = None
+            task.input_request = None
+            task.missing = []
+            await self._promote_blocked_input()
+            return True
+
+        if task.worker is None:
+            return False
 
         task.status = "running"
+        task.control_state = "running"
+        task.result_status = "pending"
+        task.error = ""
         task.input_fut = None
-        task.input_request = None
         task.missing = []
+        task.input_request = None
+        task.stage_info = ""
+        await self._start_task(task, task.worker)
         await self._promote_blocked_input()
         return True
 
@@ -322,6 +376,8 @@ class SessionTaskSystem:
         was_waiting = task.status == "waiting_input"
         task.status = "done"
         task.control_state = "completed"
+        if task.result_status not in {"success", "partial"}:
+            task.result_status = "success"
         task.summary = str(summary or "").strip()
         task.error = ""
         if task.input_fut is not None and not task.input_fut.done():
@@ -332,8 +388,11 @@ class SessionTaskSystem:
         # 构建事件，使用 TaskUnit 上已同步的结构化字段
         event_data: dict[str, Any] = {
             "type": "done",
+            "title": task.title,
+            "params": dict(task.params),
             "summary": task.summary,
             "control_state": task.control_state,
+            "result_status": task.result_status,
             "analysis": task.analysis,
             "missing": list(task.missing),
             "pending_review": list(task.pending_review),
@@ -355,6 +414,7 @@ class SessionTaskSystem:
         was_waiting = task.status == "waiting_input"
         task.status = "failed"
         task.control_state = "failed"
+        task.result_status = "failed"
         task.error = str(reason or "").strip()
         task.summary = ""
         if task.input_fut is not None and not task.input_fut.done():
@@ -365,8 +425,11 @@ class SessionTaskSystem:
         # 构建事件，包含结构化字段
         event_data: dict[str, Any] = {
             "type": "failed",
+            "title": task.title,
+            "params": dict(task.params),
             "reason": task.error,
             "control_state": task.control_state,
+            "result_status": task.result_status,
             "analysis": task.analysis,
             "missing": list(task.missing),
             "recommended_action": task.recommended_action,
@@ -408,13 +471,83 @@ class SessionTaskSystem:
         blocked = self.blocked_task()
         if blocked is None or blocked.input_request is None:
             return
+        blocked.control_state = "waiting_input"
         blocked.status = "waiting_input"
-        await self.emit(
+        await self._emit_need_input(
             blocked,
-            type="need_input",
-            field=str(blocked.input_request.get("field", "") or "").strip(),
-            question=str(blocked.input_request.get("question", "") or "").strip(),
         )
+
+    async def _activate_or_queue_waiting_task(self, task: TaskUnit) -> None:
+        active_waiting = self.waiting_task()
+        if active_waiting is not None and active_waiting.task_id != task.task_id:
+            task.status = "blocked_input"
+            return
+        task.control_state = "waiting_input"
+        task.status = "waiting_input"
+        await self._emit_need_input(task)
+
+    async def _emit_need_input(self, task: TaskUnit) -> None:
+        input_request = dict(task.input_request or {})
+        await self.emit(
+            task,
+            type="need_input",
+            title=task.title,
+            params=dict(task.params),
+            field=str(input_request.get("field", "") or "").strip(),
+            question=str(input_request.get("question", "") or "").strip(),
+            summary=task.summary,
+            message=task.summary,
+            control_state="waiting_input",
+            result_status=task.result_status,
+            missing=list(task.missing),
+            analysis=task.analysis,
+            confidence=task.confidence,
+            attempt_count=task.attempt_count,
+            pending_review=list(task.pending_review),
+            recommended_action=task.recommended_action,
+            task_trace=list(task.task_trace),
+        )
+
+    @staticmethod
+    def _merge_answer_into_task(task: TaskUnit, content: str) -> None:
+        answer = str(content or "").strip()
+        if not answer:
+            return
+
+        input_request = dict(task.input_request or {})
+        field = str(input_request.get("field", "") or "").strip()
+        question = str(input_request.get("question", "") or "").strip()
+
+        history = [dict(item) for item in list(task.params.get("history", []) or []) if isinstance(item, dict)]
+        if question:
+            history.append({"role": "assistant", "content": question})
+        history.append({"role": "user", "content": answer})
+        task.params["history"] = history
+
+        task_context = dict(task.params.get("task_context") or {})
+        provided_inputs = dict(task_context.get("provided_inputs") or {})
+        if field:
+            provided_inputs[field] = answer
+        if provided_inputs:
+            task_context["provided_inputs"] = provided_inputs
+
+        follow_up_inputs = list(task_context.get("follow_up_inputs", []) or [])
+        follow_up_note = f"{field}: {answer}" if field else answer
+        if follow_up_note and follow_up_note not in follow_up_inputs:
+            follow_up_inputs.append(follow_up_note)
+        if follow_up_inputs:
+            task_context["follow_up_inputs"] = follow_up_inputs[-8:]
+
+        task.params["task_context"] = task_context
+
+        existing_context = str(task.params.get("history_context", "") or "").strip()
+        answer_line = (
+            f"用户补充信息 - {field}: {answer}"
+            if field
+            else f"用户补充信息: {answer}"
+        )
+        context_lines = [line for line in [existing_context, answer_line] if line]
+        task.params["history_context"] = "\n".join(context_lines)
 
 
 __all__ = ["SessionTaskSystem", "TaskUnit"]
