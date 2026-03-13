@@ -26,7 +26,6 @@ from emoticorebot.agent.tool import ToolManager
 from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersConfig
 from emoticorebot.agent.context import ContextBuilder
 from emoticorebot.agent.model import LLMFactory
-from emoticorebot.agent.brain_types import BrainControlPacket
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.runtime.event_bus import InboundMessage, OutboundMessage, RuntimeEventBus
 from emoticorebot.session.manager import SessionManager
@@ -34,6 +33,7 @@ from emoticorebot.session.manager import SessionManager
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
     from emoticorebot.cron.service import CronService
+    from emoticorebot.session.manager import Session
 
 
 class EmoticoreRuntime:
@@ -112,9 +112,6 @@ class EmoticoreRuntime:
         self._task_systems: dict[str, SessionTaskSystem] = {}
         self._task_consumers: dict[str, asyncio.Task] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
-        self._reflection_locks: dict[str, asyncio.Lock] = {}
-        self._reflection_tasks: dict[str, list[asyncio.Task]] = {}
-        self._deep_reflection_lock = asyncio.Lock()
 
         self.subconscious = None
         self.heartbeat = None
@@ -183,13 +180,11 @@ class EmoticoreRuntime:
         internal_history = self.sessions.get_internal_messages(key, max_messages=self.memory_window)
         message_id = str(msg.metadata.get("message_id", "") or "").strip() or self._new_message_id()
         msg.metadata["message_id"] = message_id
-        turn_metadata = self._build_turn_metadata(session=session, user_input=msg.content, message_id=message_id)
-
         content, final_state = await self._run_user_message(
             user_input=msg.content,
             dialogue_history=dialogue_history,
             internal_history=internal_history,
-            metadata=turn_metadata,
+            message_id=message_id,
             channel=msg.channel,
             chat_id=msg.chat_id,
             session_id=key,
@@ -251,6 +246,10 @@ class EmoticoreRuntime:
         """停止 Runtime"""
         self._running = False
 
+    async def run_deep_reflection(self, *, reason: str = "", warm_limit: int = 15) -> Any:
+        """运行深反思（供周期性触发或外部调用）"""
+        return await self.reflection_coordinator.run_deep_reflection(reason=reason, warm_limit=warm_limit)
+
     def _save_proactive_target(self, channel: str, chat_id: str) -> None:
         """保存主动对话目标（供潜意识服务使用）"""
         target_file = self.workspace / "subconscious_target.json"
@@ -261,6 +260,13 @@ class EmoticoreRuntime:
             )
         except Exception:
             pass
+
+    @staticmethod
+    def _help_text() -> str:
+        """返回帮助信息"""
+        return """可用命令：
+/new - 开始新对话
+/help - 显示此帮助信息"""
 
     @staticmethod
     def _load_pad_from_workspace(workspace: Path) -> dict[str, float]:
@@ -301,7 +307,7 @@ class EmoticoreRuntime:
         user_input: str,
         dialogue_history: list[dict[str, Any]],
         internal_history: list[dict[str, Any]],
-        metadata: dict[str, Any] | None,
+        message_id: str,
         channel: str,
         chat_id: str,
         session_id: str,
@@ -314,7 +320,7 @@ class EmoticoreRuntime:
             "user_input": user_input,
             "dialogue_history": dialogue_history,
             "internal_history": internal_history,
-            "metadata": dict(metadata or {}),
+            "message_id": message_id,
             "media": list(media or []),
             "workspace": str(self.workspace),
             "session_id": session_id,
@@ -327,42 +333,67 @@ class EmoticoreRuntime:
             final_state["on_progress"] = on_progress
 
         task_system = self._get_task_system(session_id)
-        self._ensure_task_consumer(
-            session_id=session_id,
-            channel=channel,
-            chat_id=chat_id,
-            message_id=str((final_state.get("metadata") or {}).get("message_id", "") or ""),
-        )
-        brain_result = await self.brain_service.handle_user_message(
+        result = await self.brain_service.handle_user_message(
             user_input=user_input,
             history=dialogue_history,
+            internal_history=internal_history,
             emotion=emotion,
             pad=pad,
             task_system=task_system,
-            message_id=str((final_state.get("metadata") or {}).get("message_id", "") or ""),
+            message_id=message_id,
             channel=channel,
             chat_id=chat_id,
             session_id=session_id,
+            media=media,
         )
 
-        final_state["brain"] = self.brain_service.build_runtime_brain_snapshot(
-            control=brain_result,
-            emotion=emotion,
-            pad=pad,
-            default_query=user_input,
-        )
-
-        message = str(brain_result.get("message", "") or "").strip()
+        message = result.get("message", "")
         if not message:
-            message = str(getattr(final_state.get("brain"), "final_message", "") or "").strip() or "我先处理这件事。"
+            message = "我先处理这件事。"
 
         final_state["output"] = message
+        final_state["execution_summary"] = result.get("execution_summary", "")
         final_state["done"] = True
+        
+        # 构建完整的 metadata 结构供 reflection 使用
+        execution_summary = result.get("execution_summary", "")
+        brain_decision = "direct_reply" if not execution_summary else "task_delegated"
+        
+        final_state["metadata"] = {
+            "message_id": message_id,
+            "execution": {
+                "summary": execution_summary,
+                "brain_decision": brain_decision,
+            },
+            "channel": channel,
+            "chat_id": chat_id,
+        }
+        
+        # 如果委托了任务，添加 brain 决策信息
+        if execution_summary:
+            final_state["brain"] = {
+                "decision": "delegate_to_central",
+                "reasoning": execution_summary,
+            }
+        
+        # 如果有活跃任务，添加任务快照（供 reflection 使用）
+        active_tasks = task_system.active_tasks()
+        if active_tasks:
+            # 取最近创建的任务
+            latest_task = active_tasks[-1]
+            task_snapshot = latest_task.snapshot()
+            final_state["task"] = task_snapshot
+            final_state["metadata"]["task"] = {
+                "task_id": task_snapshot.get("task_id", ""),
+                "status": task_snapshot.get("status", "running"),
+                "summary": task_snapshot.get("summary", ""),
+                "missing": task_snapshot.get("missing", []),
+            }
+        
+        # 添加 task_trace（如果有的话，从 result 中获取）
+        final_state["task_trace"] = result.get("task_trace", [])
+        
         return message, final_state
-
-    def _build_turn_metadata(self, *, session, user_input: str, message_id: str) -> dict[str, Any]:
-        del session, user_input
-        return {"message_id": message_id}
 
     def _build_internal_turn_records(
         self,
@@ -372,34 +403,94 @@ class EmoticoreRuntime:
         message_id: str,
         existing_internal_count: int = 0,
     ) -> list[dict[str, Any]]:
-        del existing_internal_count
-        brain = final_state.get("brain")
-        if brain is None:
-            return []
-        brain_payload = {
-            "intent": str(getattr(brain, "intent", "") or "").strip(),
-            "working_hypothesis": str(getattr(brain, "working_hypothesis", "") or "").strip(),
-            "task_brief": str(getattr(brain, "task_brief", "") or "").strip(),
-            "final_decision": str(getattr(brain, "final_decision", "") or "").strip(),
-            "final_message": str(getattr(brain, "final_message", "") or "").strip(),
-            "task_action": str(getattr(brain, "task_action", "") or "").strip(),
-            "task_reason": str(getattr(brain, "task_reason", "") or "").strip(),
+        """构建内部历史记录，包含完整的执行上下文"""
+        records: list[dict[str, Any]] = []
+        
+        # 基础记录
+        base_record = {
+            "message_id": message_id,
+            "role": "assistant",
+            "timestamp": assistant_timestamp,
+            "source": "runtime",
         }
-        brain_payload = {key: value for key, value in brain_payload.items() if value}
-        if not brain_payload:
-            return []
-        return [
-            {
-                "message_id": message_id,
-                "role": "assistant",
+        
+        # Brain 决策记录
+        brain_info = final_state.get("brain", {})
+        execution_summary = final_state.get("execution_summary", "")
+        if brain_info or execution_summary:
+            brain_record = {
+                **base_record,
+                "phase": "brain",
+                "event": "brain.decision",
+                "content": {
+                    "decision": brain_info.get("decision", "direct_reply"),
+                    "reasoning": brain_info.get("reasoning", execution_summary),
+                    "execution_summary": execution_summary,
+                },
+            }
+            records.append(brain_record)
+        
+        # Task 记录（如果有）
+        task_info = final_state.get("task")
+        metadata_task = (final_state.get("metadata", {}) or {}).get("task")
+        if task_info or metadata_task:
+            task_record = {
+                **base_record,
+                "phase": "task",
+                "event": "task.executed",
+                "content": {
+                    "task_id": (task_info or {}).get("task_id", "") or (metadata_task or {}).get("task_id", ""),
+                    "status": (task_info or {}).get("status", "") or (metadata_task or {}).get("status", ""),
+                    "summary": (task_info or {}).get("summary", "") or (metadata_task or {}).get("summary", ""),
+                    "missing": (task_info or {}).get("missing", []) or (metadata_task or {}).get("missing", []),
+                },
+            }
+            records.append(task_record)
+        
+        # Task trace 记录（如果有）
+        task_trace = final_state.get("task_trace", [])
+        if task_trace and isinstance(task_trace, list):
+            trace_record = {
+                **base_record,
+                "phase": "execution",
+                "event": "execution.trace",
+                "content": {
+                    "trace_count": len(task_trace),
+                    "trace_summary": self._summarize_trace(task_trace),
+                },
+            }
+            records.append(trace_record)
+        
+        # 如果没有任何特殊记录，至少保留一个占位符
+        if not records:
+            records.append({
+                **base_record,
                 "phase": "brain",
                 "event": "brain.turn.summary",
-                "source": "runtime",
-                "content": json.dumps(brain_payload, ensure_ascii=False),
-                "brain": brain_payload,
-                "timestamp": assistant_timestamp,
-            }
-        ]
+                "content": {"output": final_state.get("output", "")},
+            })
+        
+        return records
+    
+    @staticmethod
+    def _summarize_trace(trace: list[dict[str, Any]]) -> str:
+        """总结执行追踪"""
+        if not trace:
+            return ""
+        
+        tool_calls = [t for t in trace if t.get("type") == "tool_call"]
+        if not tool_calls:
+            return f"{len(trace)} 个执行步骤"
+        
+        tool_names = []
+        for call in tool_calls:
+            name = call.get("tool_name") or call.get("name") or ""
+            if name and name not in tool_names:
+                tool_names.append(name)
+        
+        if tool_names:
+            return f"调用了 {len(tool_calls)} 次工具: {', '.join(tool_names[:5])}"
+        return f"{len(tool_calls)} 次工具调用"
 
     def _build_user_message_content(self, content: str, media: list[str] | None) -> list[dict[str, Any]]:
         media_items = self.context.build_media_context(media)
@@ -410,38 +501,21 @@ class EmoticoreRuntime:
         return f"msg_{uuid4().hex[:16]}"
 
     def _build_assistant_session_fields(self, final_state: dict[str, Any]) -> dict[str, Any]:
-        brain = final_state.get("brain")
-        fields: dict[str, Any] = {}
-        if brain is not None:
-            for key in ("model_name", "prompt_tokens", "completion_tokens", "total_tokens"):
-                value = getattr(brain, key, None)
-                if value not in (None, "", 0):
-                    fields[key] = value
-
         task_state = final_state.get("task")
-        metadata = final_state.get("metadata") if isinstance(final_state.get("metadata"), dict) else {}
-        task_payload = metadata.get("task") if isinstance(metadata.get("task"), dict) else None
-        if task_payload is None and task_state is not None:
-            task_payload = {
-                "invoked": bool(str(getattr(task_state, "task_id", "") or "").strip()),
-                "task_id": str(getattr(task_state, "task_id", "") or "").strip(),
-                "title": str(getattr(task_state, "title", "") or "").strip(),
-                "goal": str(getattr(task_state, "goal", "") or "").strip(),
-                "thread_id": str(getattr(task_state, "thread_id", "") or "").strip(),
-                "run_id": str(getattr(task_state, "run_id", "") or "").strip(),
-                "control_state": str(getattr(task_state, "control_state", "") or "").strip(),
-                "status": str(getattr(task_state, "status", "") or "").strip(),
-                "summary": str(getattr(task_state, "analysis", "") or "").strip(),
-                "recommended_action": str(getattr(task_state, "recommended_action", "") or "").strip(),
-                "confidence": float(getattr(task_state, "confidence", 0.0) or 0.0),
-                "missing": list(getattr(task_state, "missing", []) or []),
-                "pending_review": dict(getattr(task_state, "pending_review", {}) or {}),
-            }
-        if isinstance(task_payload, dict) and task_payload:
-            cleaned = {key: value for key, value in task_payload.items() if value not in ("", [], {}, None, False)}
-            if cleaned:
-                fields["task"] = cleaned
-        return fields
+        if not isinstance(task_state, dict) or not task_state:
+            return {}
+        
+        task_id = str(task_state.get("task_id", "") or "").strip()
+        task_payload = {
+            "invoked": bool(task_id),
+            "task_id": task_id,
+            "status": str(task_state.get("status", "") or "").strip(),
+            "summary": str(
+                task_state.get("summary", "") or task_state.get("analysis", "") or ""
+            ).strip(),
+        }
+        cleaned = {k: v for k, v in task_payload.items() if v not in ("", None, False)}
+        return {"task": cleaned} if cleaned else {}
 
     def _get_task_system(self, session_id: str) -> SessionTaskSystem:
         key = str(session_id or "__default__").strip() or "__default__"
@@ -453,51 +527,48 @@ class EmoticoreRuntime:
                 tool_registry=self.tool_manager.get_registry(),
             )
             self._task_systems[key] = system
+            self._start_task_consumer(session_id=key)
         return system
 
-    def _ensure_task_consumer(
-        self,
-        *,
-        session_id: str,
-        channel: str,
-        chat_id: str,
-        message_id: str,
-    ) -> None:
-        key = str(session_id or "__default__").strip() or "__default__"
-        existing = self._task_consumers.get(key)
+    def _start_task_consumer(self, session_id: str) -> None:
+        """启动任务事件消费者"""
+        existing = self._task_consumers.get(session_id)
         if existing is not None and not existing.done():
             return
 
         task = asyncio.create_task(
-            self._consume_task_events(
-                session_id=key,
-                channel=channel,
-                chat_id=chat_id,
-                message_id=message_id,
-            ),
-            name=f"task-consumer:{key}",
+            self._consume_task_events(session_id=session_id),
+            name=f"task-consumer:{session_id}",
         )
-        self._task_consumers[key] = task
+        self._task_consumers[session_id] = task
 
-        def _cleanup(done_task: asyncio.Task, consumer_key: str = key) -> None:
+        def _cleanup(done_task: asyncio.Task, consumer_key: str = session_id) -> None:
             current = self._task_consumers.get(consumer_key)
             if current is done_task:
                 self._task_consumers.pop(consumer_key, None)
 
         task.add_done_callback(_cleanup)
 
-    async def _consume_task_events(
-        self,
-        *,
-        session_id: str,
-        channel: str,
-        chat_id: str,
-        message_id: str,
-    ) -> None:
+    async def _consume_task_events(self, session_id: str) -> None:
+        """消费任务事件并发送回复"""
         system = self._get_task_system(session_id)
         while True:
             event = await system.to_main_queue.get()
             try:
+                # 从事件中获取路由信息
+                channel = str(event.get("channel", "") or "").strip()
+                chat_id = str(event.get("chat_id", "") or "").strip()
+                task_id = str(event.get("task_id", "") or "").strip()
+                event_type = str(event.get("type", "") or "").strip()
+                
+                # 如果缺少路由信息，记录内部状态但不发送消息
+                if not channel or not chat_id:
+                    # 仍然更新内部状态和反思
+                    session = self.sessions.get(session_id)
+                    if session is not None:
+                        await self._handle_task_event_internal(session, event, session_id)
+                    continue
+                
                 session = self.sessions.get(session_id)
                 history = (
                     session.get_history(max_messages=self.memory_window, include_task_context=False)
@@ -509,31 +580,33 @@ class EmoticoreRuntime:
                     "arousal": float(self.emotion_mgr.pad.arousal),
                     "dominance": float(self.emotion_mgr.pad.dominance),
                 }
-                control = await self.brain_service.handle_task_event(
+                content = await self.brain_service.handle_task_event(
                     event=event,
                     history=history,
                     emotion=self.emotion_mgr.get_emotion_label(),
                     pad=pad,
-                    message_id=message_id,
+                    task_system=system,
                     channel=channel,
                     chat_id=chat_id,
                     session_id=session_id,
                 )
-                content = str(control.get("message", "") or "").strip()
                 if not content:
                     continue
                 assistant_message_id = self._new_message_id()
+                task_id = str(event.get("task_id", "") or "").strip()
 
+                origin_message_id = str(event.get("message_id", "") or "").strip()
                 await self.bus.publish_outbound(
                     OutboundMessage(
                         channel=channel,
                         chat_id=chat_id,
                         content=content,
-                        reply_to=message_id or None,
+                        reply_to=origin_message_id or None,
                         metadata={
-                            "task_id": str(event.get("task_id", "") or "").strip(),
+                            "task_id": task_id,
                             "task_event": str(event.get("type", "") or "").strip(),
                             "producer": "task_system",
+                            "message_id": origin_message_id,
                         },
                     )
                 )
@@ -542,22 +615,25 @@ class EmoticoreRuntime:
                     assistant_timestamp = datetime.now().isoformat()
                     event_type = str(event.get("type", "") or "").strip().lower()
                     task_status = "running"
-                    task_control_state = "running"
+                    task_control_state = str(event.get("control_state", "running") or "").strip()
+                    
                     if event_type == "need_input":
                         task_status = "waiting_input"
                         task_control_state = "waiting_input"
                     elif event_type == "done":
                         task_status = "done"
-                        task_control_state = "completed"
+                        task_control_state = str(event.get("control_state", "completed") or "completed").strip()
                     elif event_type == "failed":
                         task_status = "failed"
                         task_control_state = "failed"
+                    
                     task_snapshot = {
                         "invoked": True,
                         "task_id": str(event.get("task_id", "") or "").strip(),
                         "control_state": task_control_state,
                         "status": task_status,
                         "summary": str(event.get("summary", "") or event.get("message", "") or "").strip(),
+                        "analysis": str(event.get("analysis", "") or "").strip(),
                         "missing": [
                             str(item).strip()
                             for item in list(
@@ -566,6 +642,8 @@ class EmoticoreRuntime:
                             )
                             if str(item).strip()
                         ],
+                        "recommended_action": str(event.get("recommended_action", "") or "").strip(),
+                        "confidence": float(event.get("confidence", 0.8 if task_status == "done" else 0.5)),
                     }
                     session.add_message(
                         "assistant",
@@ -575,48 +653,158 @@ class EmoticoreRuntime:
                         task=task_snapshot,
                     )
                     self.sessions.save(session)
+                    
+                    # 任务事件也需要反思
+                    task_state = {
+                        "user_input": str(event.get("summary", "") or event.get("question", "") or ""),
+                        "output": content,
+                        "session_id": session_id,
+                        "execution_summary": self._build_task_execution_summary(event, task_status),
+                        "metadata": {
+                            "message_id": assistant_message_id,
+                            "execution": {
+                                "summary": self._build_task_execution_summary(event, task_status),
+                                "brain_decision": "task_event",
+                            },
+                            "channel": channel,
+                            "chat_id": chat_id,
+                            "task": {
+                                "task_id": task_snapshot.get("task_id", ""),
+                                "status": task_status,
+                                "summary": task_snapshot.get("summary", ""),
+                                "analysis": task_snapshot.get("analysis", ""),
+                                "missing": task_snapshot.get("missing", []),
+                                "failure_reason": str(event.get("reason", "")).strip() if event_type == "failed" else "",
+                                "recommended_action": task_snapshot.get("recommended_action", ""),
+                                "confidence": task_snapshot.get("confidence", 0.5),
+                                "attempt_count": 1,
+                            },
+                        },
+                        "task": task_snapshot,
+                        "task_trace": list(event.get("task_trace", []) or []),
+                    }
+                    self._schedule_turn_reflection(session_key=session_id, state=task_state)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("Task consumer failed for {}: {}", session_id, exc)
 
-    async def run_deep_reflection(self, *, reason: str = "", warm_limit: int = 15):
-        async with self._deep_reflection_lock:
-            return await self.reflection_coordinator.run_deep_reflection(reason=reason, warm_limit=warm_limit)
-
     def _schedule_turn_reflection(self, *, session_key: str, state: dict[str, Any]) -> None:
-        lock = self._reflection_locks.setdefault(session_key, asyncio.Lock())
-        task = asyncio.create_task(
-            self._run_turn_reflection(session_key=session_key, state=dict(state), lock=lock),
-            name=f"reflection:{session_key}",
-        )
-        self._reflection_tasks.setdefault(session_key, []).append(task)
-
-        def _cleanup(done_task: asyncio.Task, key: str = session_key) -> None:
-            tasks = self._reflection_tasks.get(key, [])
-            if done_task in tasks:
-                tasks.remove(done_task)
-            if not tasks:
-                self._reflection_tasks.pop(key, None)
-
-        task.add_done_callback(_cleanup)
-
-    async def _run_turn_reflection(
-        self,
-        *,
-        session_key: str,
-        state: dict[str, Any],
-        lock: asyncio.Lock,
-    ) -> None:
-        try:
-            async with lock:
+        """异步调度反思，不阻塞主流程"""
+        async def _run():
+            try:
                 result = await self.reflection_coordinator.write_turn_reflection(state)
                 if result and getattr(result, "should_run_deep_reflection", False):
-                    await self.run_deep_reflection(
+                    await self.reflection_coordinator.run_deep_reflection(
                         reason=str(getattr(result, "deep_reflection_reason", "") or ""),
                     )
-        except Exception as exc:
-            logger.warning("Turn reflection failed for {}: {}", session_key, exc)
+            except Exception as exc:
+                logger.warning("Reflection failed for {}: {}", session_key, exc)
+        
+        asyncio.create_task(_run(), name=f"reflection:{session_key}")
+
+    async def _handle_task_event_internal(
+        self, session: "Session", event: dict[str, Any], session_id: str
+    ) -> None:
+        """处理缺少路由信息的任务事件（仅内部状态更新）"""
+        event_type = str(event.get("type", "") or "").strip().lower()
+        task_id = str(event.get("task_id", "") or "").strip()
+        
+        # 构建任务快照
+        task_status = "running"
+        task_control_state = "running"
+        if event_type == "need_input":
+            task_status = "waiting_input"
+            task_control_state = "waiting_input"
+        elif event_type == "done":
+            task_status = "done"
+            task_control_state = "completed"
+        elif event_type == "failed":
+            task_status = "failed"
+            task_control_state = "failed"
+        
+        task_snapshot = {
+            "invoked": True,
+            "task_id": task_id,
+            "control_state": task_control_state,
+            "status": task_status,
+            "summary": str(event.get("summary", "") or event.get("message", "") or "").strip(),
+            "missing": [
+                str(item).strip()
+                for item in list(
+                    event.get("missing", [])
+                    or ([event.get("field")] if event.get("field") else [])
+                )
+                if str(item).strip()
+            ],
+        }
+        
+        # 调度反思
+        task_state = {
+            "user_input": str(event.get("summary", "") or event.get("question", "") or ""),
+            "output": f"[内部任务事件] {task_snapshot.get('summary', '')}",
+            "session_id": session_id,
+            "execution_summary": self._build_task_execution_summary(event, task_status),
+            "metadata": {
+                "message_id": f"internal_{task_id}_{event_type}",
+                "execution": {
+                    "summary": self._build_task_execution_summary(event, task_status),
+                    "brain_decision": "internal_task_event",
+                },
+                "task": {
+                    "task_id": task_id,
+                    "status": task_status,
+                    "summary": task_snapshot.get("summary", ""),
+                    "missing": task_snapshot.get("missing", []),
+                    "failure_reason": str(event.get("reason", "")).strip() if event_type == "failed" else "",
+                    "recommended_action": self._get_task_recommended_action(event_type, task_status),
+                    "confidence": 0.8 if task_status == "done" else 0.5,
+                    "attempt_count": 1,
+                }
+            },
+            "task": task_snapshot,
+        }
+        self._schedule_turn_reflection(session_key=session_id, state=task_state)
+
+    @staticmethod
+    def _build_task_execution_summary(event: dict[str, Any], status: str) -> str:
+        """构建任务执行摘要"""
+        event_type = str(event.get("type", "")).strip()
+        task_id = str(event.get("task_id", "")).strip()
+        
+        if event_type == "done":
+            summary = str(event.get("summary", "")).strip()
+            return f"任务 {task_id} 已完成：{summary}" if summary else f"任务 {task_id} 已完成"
+        elif event_type == "failed":
+            reason = str(event.get("reason", "")).strip()
+            return f"任务 {task_id} 执行失败：{reason}" if reason else f"任务 {task_id} 执行失败"
+        elif event_type == "need_input":
+            question = str(event.get("question", "")).strip()
+            field = str(event.get("field", "")).strip()
+            if question:
+                return f"任务 {task_id} 需要用户提供信息：{question}"
+            elif field:
+                return f"任务 {task_id} 需要用户提供：{field}"
+            return f"任务 {task_id} 需要更多信息"
+        elif event_type == "progress":
+            message = str(event.get("message", "")).strip()
+            return f"任务 {task_id} 进展：{message}" if message else f"任务 {task_id} 执行中"
+        else:
+            return f"任务 {task_id} 状态更新"
+
+    @staticmethod
+    def _get_task_recommended_action(event_type: str, status: str) -> str:
+        """获取任务的建议操作"""
+        if event_type == "need_input":
+            return "等待用户提供所需信息"
+        elif event_type == "failed":
+            return "分析失败原因，考虑重试或调整策略"
+        elif event_type == "done":
+            return ""
+        elif status == "waiting_input":
+            return "等待用户补充信息"
+        else:
+            return ""
 
     def initialize_subconscious(self, enable_reflection: bool = True, enable_heartbeat: bool = False) -> None:
         """初始化潜意识守护进程和心跳服务"""

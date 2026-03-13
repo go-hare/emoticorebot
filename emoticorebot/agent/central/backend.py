@@ -97,52 +97,16 @@ def build_interrupt_on() -> dict[str, Any]:
 
 def build_agent_instructions(service: "CentralAgentService") -> str:
     workspace = Path(service.context.workspace).expanduser().resolve()
-    base = (
-        "你是 `central`，负责复杂问题的规划、执行、核查与结果收口。\n"
-        "你处理的是 `brain -> central` 这条内部执行链路，不负责对用户做最终表达。\n\n"
-        f"当前工作区目录是 `{workspace}`。\n"
-        "工作区虚拟路径通过 `/state/` 暴露，技能目录通过 `/skills/workspace/` 与 `/skills/builtin/` 暴露。\n"
-        "与任务相关的执行经验、工具经验、skill 提示，会由 brain 直接放进委托上下文。\n\n"
-        "## 职责\n"
-        "1. 接收 brain 委托的问题并转成可执行步骤。\n"
-        "2. 必要时拆分步骤、调用工具、使用 skills，并在单个执行内完成汇总。\n"
-        "3. 在单次执行链路内尽量收敛，减少无意义的中间汇报。\n"
-        "4. 给出清晰结论、风险、缺失信息和下一步建议。\n"
-        "5. 只关注把事情做对，不模仿主脑的陪伴语气。\n\n"
-        "## 边界\n"
-        "1. 不负责最终对用户表达。\n"
-        "2. 不把内部分析伪装成用户可见对话。\n"
-        "3. 不负责关系判断、人格维护、情绪陪伴和主脑反思。\n"
-        "4. 不更新 `SOUL.md`、`USER.md`，也不负责 `turn_reflection` / `deep_reflection`。\n"
-        "5. 不直接检索、读写长期 `memory`，也不假设自己拥有长期解释权。\n"
-        "6. 不保留临时草稿、一次性中间产物、原始噪声输出。\n\n"
-        "## 输出规则\n"
-        "1. 最终只输出协议要求的 JSON。\n"
-        "2. JSON 只包含 status、analysis、risks、missing、recommended_action、confidence，以及确有必要时的 pending_review。\n"
-        "3. 优先返回最终结果；只有在真的被阻塞时才返回缺失信息或待审批动作。"
-    )
-    skills_context = build_internal_skill_context(service)
-    extras = [section for section in (skills_context,) if section]
-    if not extras:
-        return base
-    return f"{base}\n\n" + "\n\n".join(extras)
-
-
-def build_internal_skill_context(service: "CentralAgentService") -> str:
-    skills_loader = getattr(service.context, "skills", None)
-    if skills_loader is None:
-        return ""
-
-    skills_summary = skills_loader.build_skills_summary()
-    if not skills_summary:
-        return ""
-
     return (
-        "## Skills\n\n"
-        "以下技能同时来自工作区 `skills/` 与内置 `emoticorebot/skills/`。\n"
-        "如果当前问题需要某个 skill，先读取对应 `SKILL.md`，再按其中流程执行。\n"
-        "工作区同名 skill 优先覆盖内置 skill。\n\n"
-        f"{skills_summary}"
+        "你是 `central`，负责复杂问题的规划、执行与结果收口。\n"
+        f"当前工作区目录是 `{workspace}`。\n\n"
+        "## 职责\n"
+        "1. 接收委托的问题并执行。\n"
+        "2. 必要时调用工具，在单次执行内完成任务。\n"
+        "3. 给出清晰结论。\n\n"
+        "## 边界\n"
+        "1. 不负责最终对用户表达，只返回执行结果。\n"
+        "2. 不负责人格维护、情绪陪伴。\n"
     )
 
 
@@ -179,9 +143,60 @@ def build_backend(service: "CentralAgentService") -> Any | None:
 
 
 def build_tools(service: "CentralAgentService") -> list[Any]:
-    if service.tools is None:
-        return []
-    return build_registry_tools(service, service.tools.tool_names)
+    tools: list[Any] = []
+    stage_tool = build_stage_report_tool(service)
+    if stage_tool is not None:
+        tools.append(stage_tool)
+    if service.tools is not None:
+        tools.extend(build_registry_tools(service, service.tools.tool_names))
+    return tools
+
+
+def build_stage_report_tool(service: "CentralAgentService") -> Any | None:
+    """构建阶段性汇报工具，让 agent 可以主动汇报进展。"""
+    try:
+        from langchain_core.tools import StructuredTool
+        from pydantic import BaseModel, Field
+    except Exception:
+        return None
+
+    class StageReportArgs(BaseModel):
+        summary: str = Field(description="阶段性进展摘要，简要说明当前完成了什么")
+        progress: float = Field(default=0.5, ge=0.0, le=1.0, description="完成度 0-1")
+        next_step: str = Field(default="", description="下一步计划，可选")
+
+    async def report_stage(summary: str, progress: float = 0.5, next_step: str = "") -> str:
+        system = getattr(service, "_current_system", None)
+        task = getattr(service, "_current_task", None)
+        if system is None or task is None:
+            return "当前无法汇报（未在执行中）"
+
+        text = str(summary or "").strip()
+        if not text:
+            return "汇报内容为空"
+
+        await system.report_progress(
+            task,
+            text,
+            event="task.stage",
+            producer="central",
+            phase="stage",
+            payload={
+                "progress": max(0.0, min(1.0, float(progress))),
+                "next_step": str(next_step or "").strip(),
+            },
+        )
+        return f"已汇报: {text}"
+
+    return StructuredTool.from_function(
+        coroutine=report_stage,
+        name="report_stage",
+        description=(
+            "向主脑汇报当前阶段性进展。当你完成了一个重要步骤、发现重要信息、"
+            "或即将开始耗时操作时使用。不要频繁调用，只在关键节点汇报。"
+        ),
+        args_schema=StageReportArgs,
+    )
 
 
 def build_registry_tools(service: "CentralAgentService", names: list[str]) -> list[Any]:

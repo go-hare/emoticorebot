@@ -211,31 +211,40 @@ class CognitiveEvent:
         task = state.get("task")
         metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
         execution = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
-        summary = ""
-        status = "none"
-        if task is not None:
-            summary = str(getattr(task, "analysis", "") or "").strip()
-            status = str(getattr(task, "status", "") or "none").strip() or "none"
+
+        task_dict: dict[str, Any] = {}
+        if isinstance(task, dict):
+            task_dict = task
+        elif task is not None:
+            task_dict = {
+                "summary": str(getattr(task, "summary", "") or getattr(task, "analysis", "") or ""),
+                "status": str(getattr(task, "status", "") or ""),
+                "control_state": str(getattr(task, "control_state", "") or ""),
+                "missing": list(getattr(task, "missing", []) or []),
+            }
+
+        summary = str(task_dict.get("summary", "") or task_dict.get("analysis", "") or "").strip()
+        status = str(task_dict.get("status", "") or "none").strip() or "none"
         if not summary:
             summary = str(execution.get("summary", "") or "").strip()
         if status == "none":
             status = str(execution.get("status", "") or "none").strip() or "none"
+
+        control_state = str(
+            task_dict.get("control_state", "")
+            or execution.get("control_state", "")
+            or "idle"
+        ).strip()
+
+        raw_missing = list(task_dict.get("missing", []) or execution.get("missing", []) or [])
+        missing = [str(item).strip() for item in raw_missing if str(item).strip()]
+
         return {
-            "used": bool(task is not None or execution),
+            "used": bool(task_dict or execution),
             "status": status,
             "summary": summary,
-            "control_state": str(
-                (getattr(task, "control_state", "") if task is not None else "")
-                or execution.get("control_state", "")
-                or "idle"
-            ).strip(),
-            "missing": [
-                str(item).strip()
-                for item in list(
-                    (getattr(task, "missing", []) if task is not None else []) or execution.get("missing", []) or []
-                )
-                if str(item).strip()
-            ],
+            "control_state": control_state,
+            "missing": missing,
         }
 
     @staticmethod

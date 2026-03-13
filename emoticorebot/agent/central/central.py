@@ -1,14 +1,13 @@
-"""Central execution module driven by `agent.system`."""
+"""Central execution module - 直接调用 Deep Agent 执行任务。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from emoticorebot.agent.central import backend as central_backend
-from emoticorebot.agent.central import prompt as central_prompt
-from emoticorebot.agent.central import result as central_result
 from emoticorebot.agent.central import stream as central_stream
+from emoticorebot.agent.central.result import CentralResult, parse_agent_response
 from emoticorebot.agent.system import SessionTaskSystem, TaskUnit
 from emoticorebot.tools import ToolRegistry
 
@@ -16,30 +15,8 @@ if TYPE_CHECKING:
     from emoticorebot.agent.context import ContextBuilder
 
 
-@dataclass
-class CentralRunState:
-    request: str
-    history: list[dict[str, Any]] = field(default_factory=list)
-    task_context: dict[str, Any] = field(default_factory=dict)
-    media: list[str] = field(default_factory=list)
-    channel: str = ""
-    chat_id: str = ""
-    session_id: str = ""
-    thread_id: str = ""
-    run_id: str = ""
-    round_index: int = 0
-    latest_summary: str = ""
-    latest_question: str = ""
-    trace_log: list[dict[str, Any]] = field(default_factory=list)
-
-
 class CentralAgentService:
-    """Central executor with internal per-task state.
-
-    `system.py` owns task lifecycle.
-    `central` only runs execution, decides whether to notify staged outcomes,
-    and asks the task system for more input when needed.
-    """
+    """Central executor - 直接调用 Deep Agent，由 agent 内部处理工具循环。"""
 
     def __init__(
         self,
@@ -52,161 +29,168 @@ class CentralAgentService:
         self.context = context_builder
         self._agent: Any | None = None
         self._checkpointer: Any | None = None
-        self._runs: dict[str, CentralRunState] = {}
-        self.max_rounds = 4
+        self._current_system: SessionTaskSystem | None = None
+        self._current_task: TaskUnit | None = None
+        self._trace_log: list[dict[str, Any]] = []
 
-    async def run_task(self, task: TaskUnit, system: SessionTaskSystem) -> str:
-        state = self._runs.get(task.task_id)
-        if state is None:
-            state = self._create_run_state(task)
-            self._runs[task.task_id] = state
-
-        try:
-            while True:
-                state.round_index += 1
-                await self._emit_progress(
-                    system,
-                    task,
-                    message="正在规划内部执行" if state.round_index == 1 else "继续内部执行",
-                    event="task.progress",
-                    phase="scheduler",
-                )
-
-                result = await self._run_single_round(task, state)
-
-                if central_result.should_notify_stage(result, previous=state.latest_summary):
-                    await self._emit_progress(
-                        system,
-                        task,
-                        message=result.get("analysis", "") or "",
-                        event="task.stage",
-                        phase="stage",
-                        payload=central_result.build_stage_payload(result),
-                    )
-                    state.latest_summary = str(result.get("analysis", "") or "").strip()
-
-                if central_result.should_request_input(result):
-                    question = central_result.build_input_question(result)
-                    field = central_result.pick_input_field(result)
-                    state.latest_question = question
-                    answer = await system.request_input(task, field=field, question=question)
-                    state.history.extend(
-                        [
-                            {"role": "assistant", "content": question},
-                            {"role": "user", "content": answer},
-                        ]
-                    )
-                    state.task_context = central_result.merge_task_context(state.task_context, result)
-                    state.task_context["resume_payload"] = {"field": field, "answer": answer}
-                    state.request = central_result.build_resume_request(field=field, answer=answer)
-                    continue
-
-                if central_result.should_continue(result):
-                    state.history.extend(
-                        [
-                            {"role": "user", "content": state.request},
-                            {"role": "assistant", "content": str(result.get("analysis", "") or "").strip()},
-                        ]
-                    )
-                    state.task_context = central_result.merge_task_context(state.task_context, result)
-                    if state.round_index >= self.max_rounds:
-                        return central_result.build_round_limit_summary(result, rounds=state.round_index)
-                    state.request = central_result.build_followup_request(result, previous=state.request)
-                    continue
-
-                return str(result.get("analysis", "") or "").strip()
-        finally:
-            self._runs.pop(task.task_id, None)
-
-    def _create_run_state(self, task: TaskUnit) -> CentralRunState:
-        params = dict(task.params or {})
-        return CentralRunState(
-            request=str(params.get("request", "") or "").strip(),
-            history=[dict(item) for item in list(params.get("history", []) or []) if isinstance(item, dict)],
-            task_context=dict(params.get("task_context", {}) or {}),
-            media=list(params.get("media", []) or []),
-            channel=str(params.get("channel", "") or "").strip(),
-            chat_id=str(params.get("chat_id", "") or "").strip(),
-            session_id=str(params.get("session_id", "") or "").strip(),
-        )
-
-    async def _run_single_round(
-        self,
-        task: TaskUnit,
-        state: CentralRunState,
-    ) -> central_result.CentralRoundResult:
+    async def run_task(self, task: TaskUnit, system: SessionTaskSystem) -> CentralResult:
+        """执行任务 - 一次调用，Deep Agent 内部自动循环处理工具调用。"""
         if not central_backend.deep_agents_available():
-            return central_result.failed_result(
-                "Deep Agents 依赖尚未安装，central 当前无法执行内部任务。"
-            )
+            result = CentralResult()
+            result.control_state = "failed"
+            result.status = "failed"
+            result.message = "Deep Agents 依赖尚未安装，central 当前无法执行内部任务。"
+            result.analysis = "系统缺少 deepagents 依赖"
+            result.confidence = 0.0
+            return result
 
-        request = str(state.request or "").strip()
+        params = dict(task.params or {})
+        request = str(params.get("request", "") or "").strip()
         if not request:
-            return central_result.failed_result("central 未收到有效请求。")
-
-        prompt = central_prompt.build_request_prompt(
-            request=request,
-            history=state.history,
-            task_context=state.task_context,
-            media=state.media,
-        )
+            result = CentralResult()
+            result.control_state = "failed"
+            result.status = "failed"
+            result.message = "central 未收到有效请求。"
+            result.analysis = "任务请求为空"
+            result.confidence = 0.0
+            return result
 
         agent = central_backend.ensure_agent(self)
-        state.run_id = central_stream.new_run_id()
-        if not state.thread_id:
-            state.thread_id = central_stream.build_thread_id(
-                channel=state.channel,
-                chat_id=state.chat_id,
-                session_id=state.session_id,
-                run_id=task.task_id,
+        thread_id = self._build_thread_id(params, task.task_id)
+        run_id = f"run_{uuid4().hex[:12]}"
+
+        self._current_system = system
+        self._current_task = task
+        self._trace_log = []
+
+        history = [
+            item for item in list(params.get("history") or [])
+            if isinstance(item, dict)
+        ]
+        media = list(params.get("media") or [])
+        task_context = dict(params.get("task_context") or {})
+
+        try:
+            await system.report_progress(
+                task, "正在执行内部任务",
+                event="task.progress", producer="central", phase="stage",
             )
 
-        async def _capture_trace(event: dict[str, Any]) -> None:
-            normalized = central_result.normalize_trace_event(event)
-            if normalized:
-                state.trace_log.append(normalized)
+            agent_result = await self._invoke_agent(
+                agent, request, thread_id, run_id,
+                history=history, media=media, task_context=task_context,
+            )
+            raw_message = self._extract_response(agent_result)
+            
+            # 解析为结构化结果
+            return parse_agent_response(raw_message, self._trace_log)
+        finally:
+            self._current_system = None
+            self._current_task = None
 
-        raw_result = await central_stream.invoke_agent(
-            self,
-            agent,
-            prompt,
-            channel=state.channel,
-            chat_id=state.chat_id,
-            session_id=state.session_id,
-            thread_id=state.thread_id,
-            run_id=state.run_id,
-            on_trace=_capture_trace,
-            resume_value=central_result.build_resume_value(state.task_context),
-        )
+    def _build_thread_id(self, params: dict[str, Any], task_id: str) -> str:
+        session_id = str(params.get("session_id", "") or "").strip()
+        if session_id:
+            return f"central:{session_id}:{task_id}"
+        channel = str(params.get("channel", "") or "").strip()
+        chat_id = str(params.get("chat_id", "") or "").strip()
+        base = f"{channel}:{chat_id}" if channel or chat_id else "default"
+        return f"central:{base}:{task_id}"
 
-        return central_result.normalize_round_result(
-            raw_result,
-            task_context=state.task_context,
-            thread_id=state.thread_id,
-            run_id=state.run_id,
-        )
-
-    async def _emit_progress(
+    async def _invoke_agent(
         self,
-        system: SessionTaskSystem,
-        task: TaskUnit,
+        agent: Any,
+        request: str,
+        thread_id: str,
+        run_id: str,
         *,
-        message: str,
-        event: str,
-        phase: str,
-        payload: dict[str, Any] | None = None,
-    ) -> None:
-        text = str(message or "").strip()
-        if not text:
-            return
-        await system.report_progress(
-            task,
-            text,
-            event=event,
-            producer="central",
-            phase=phase,
-            payload=dict(payload or {}),
-        )
+        history: list[dict[str, Any]] | None = None,
+        media: list[str] | None = None,
+        task_context: dict[str, Any] | None = None,
+    ) -> Any:
+        """直接调用 Deep Agent - agent 内部自动处理工具循环。"""
+        messages: list[dict[str, Any]] = []
+        for turn in (history or [])[-10:]:
+            role = str(turn.get("role", "") or "").strip()
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                text = content if isinstance(content, str) else str(content)
+                messages.append({"role": role, "content": text})
+
+        user_parts = [request]
+        if task_context:
+            ctx_text = str(task_context.get("history_context", "") or "").strip()
+            if ctx_text:
+                user_parts.append(f"\n\n补充上下文：{ctx_text}")
+
+        media_items = self.context.build_media_context(media) if self.context else []
+        if media_items:
+            user_content: Any = [
+                {"type": "text", "text": "".join(user_parts)},
+                *media_items,
+            ]
+            messages.append({"role": "user", "content": user_content})
+        else:
+            if media:
+                user_parts.append(f"\n\n[附件: {', '.join(media)}]")
+            messages.append({"role": "user", "content": "".join(user_parts)})
+
+        payload = {"messages": messages}
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "metadata": {"assistant_id": "emoticorebot-central", "run_id": run_id},
+        }
+
+        if hasattr(agent, "astream"):
+            return await self._stream_invoke(agent, payload, config)
+        if hasattr(agent, "ainvoke"):
+            return await agent.ainvoke(payload, config=config)
+        if hasattr(agent, "invoke"):
+            return agent.invoke(payload, config=config)
+        raise RuntimeError("Deep Agent does not expose invoke/ainvoke/astream")
+
+    async def _stream_invoke(
+        self, agent: Any, payload: dict[str, Any], config: dict[str, Any]
+    ) -> Any:
+        """流式调用，捕获 trace 用于调试。"""
+        last_values: Any = None
+        async for item in agent.astream(
+            payload,
+            config=config,
+            stream_mode=["values", "updates", "messages", "custom"],
+            subgraphs=True,
+        ):
+            namespace, mode, data = central_stream.unpack_stream_item(item)
+            if mode == "values":
+                last_values = data
+                continue
+            for record in central_stream.build_trace_records(
+                mode=mode, namespace=namespace, data=data
+            ):
+                self._trace_log.append(record)
+
+        if last_values is None:
+            raise RuntimeError("Deep Agent stream did not produce final state")
+        return last_values
+
+    def _extract_response(self, result: Any) -> str:
+        """从 agent 结果中提取最终回复文本。"""
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict):
+            messages = result.get("messages")
+            if isinstance(messages, list) and messages:
+                last = messages[-1]
+                if isinstance(last, dict):
+                    return str(last.get("content", "") or "")
+                content = getattr(last, "content", "")
+                if isinstance(content, list):
+                    return " ".join(str(item) for item in content if item)
+                return str(content or "")
+        content = getattr(result, "content", "")
+        if content:
+            return str(content)
+        return str(result)
 
 
-__all__ = ["CentralAgentService", "CentralRunState"]
+__all__ = ["CentralAgentService"]

@@ -1,283 +1,22 @@
-"""Thin main-brain service with a small public API."""
+"""Brain service using LangGraph agent with tools."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from emoticorebot.agent.brain_shared import compact_text, extract_json_string_field, parse_json_dict
-from emoticorebot.agent.brain_types import BrainControlPacket
+from langchain_core.tools import tool
+from langgraph.prebuilt import create_agent
+
 from emoticorebot.agent.context import ContextBuilder
-from emoticorebot.agent.reply_utils import build_companion_prompt
 from emoticorebot.runtime.event_bus import RuntimeEventBus
-from emoticorebot.utils.llm_utils import extract_message_metrics, extract_message_text
 
 if TYPE_CHECKING:
     from emoticorebot.agent.system import SessionTaskSystem
 
 
-BRAIN_MESSAGE_RETRIEVAL_FOCUS = ["user", "relationship", "goal", "constraint", "tool", "skill"]
-
-
-def build_default_brain_task_brief(*, working_hypothesis: str, intent: str) -> str:
-    if working_hypothesis:
-        return (
-            "Analyze the current working hypothesis, identify evidence, risks, "
-            f"and the best next action: {working_hypothesis}"
-        )
-    if intent:
-        return f"Analyze this user intent, identify evidence, risks, and the best next action: {intent}"
-    return "Analyze the current internal question and return evidence, risks, and the best next action."
-
-
-def _build_brain_message_prompt(
-    *,
-    user_input: str,
-    has_waiting_task: bool,
-    waiting_task_hint: dict[str, Any] | None,
-) -> str:
-    waiting_block = "当前没有等待补充参数的任务。"
-    if has_waiting_task:
-        hint = dict(waiting_task_hint or {})
-        missing = [str(item).strip() for item in list(hint.get("missing", []) or []) if str(item).strip()]
-        question = str(hint.get("question", "") or "").strip()
-        waiting_block = (
-            "当前存在一个等待补充参数的任务。\n"
-            f"- 缺少信息：{missing or []}\n"
-            f"- 当前追问：{question or '（空）'}"
-        )
-
-    return f"""
-你是 `brain`，现在只做一件事：收到用户消息后，直接判断这一轮该怎么走。
-
-你只允许做三种动作：
-- `none`：这轮由 brain 直接回复用户，属于普通聊天、解释、澄清或直接回答。
-- `create_task`：这轮需要创建一个新的 `central` 任务。
-- `fill_task`：这轮用户输入是在补充当前等待任务所缺的参数或信息。
-
-任务系统状态：
-{waiting_block}
-
-判断规则：
-1. 先理解用户这一轮真正想做什么。
-2. 如果用户是在补充当前等待任务，就选 `fill_task`。
-3. 如果是新的复杂问题、需要执行、查找、分析、多步处理，就选 `create_task`。
-4. 其余情况选 `none`。
-5. 不要同时做多个动作。
-6. 只有 `none` 时，`message` 才必须是对用户可见的话。
-7. `create_task` 或 `fill_task` 时，`message` 可以为空字符串。
-8. `create_task` 时，`task_brief` 必须非空；否则必须为空字符串。
-
-你必须只返回一个 JSON 对象，不能输出解释、前言、Markdown、代码块、补充说明。
-
-标准结构：
-{{
-  "intent": "...",
-  "working_hypothesis": "...",
-  "action": "none|create_task|fill_task",
-  "reason": "...",
-  "final_decision": "answer|ask_user|continue",
-  "message": "...",
-  "task_brief": "..."
-}}
-
-字段约束：
-- `intent`：你对当前轮用户意图的简要理解。
-- `working_hypothesis`：你的当前工作性判断。
-- `action=none` 时：`final_decision` 只能是 `answer` 或 `ask_user`。
-- `action=create_task` 时：`final_decision` 必须是 `continue`。
-- `action=fill_task` 时：`final_decision` 必须是 `answer`。
-
-用户输入：{user_input}
-""".strip()
-
-
-def _extract_string_fields(
-    raw: str,
-    *,
-    fields: tuple[str, ...],
-    lowercase: tuple[str, ...] = (),
-) -> dict[str, str]:
-    cleaned = raw.strip()
-    payload: dict[str, str] = {}
-    for field in fields:
-        value = extract_json_string_field(cleaned, field)
-        payload[field] = value.lower() if field in lowercase else value
-    return payload
-
-
-def _normalize_brain_control_payload(
-    parsed: dict[str, Any],
-    *,
-    has_waiting_task: bool,
-) -> BrainControlPacket | None:
-    if not isinstance(parsed, dict):
-        return None
-
-    intent = str(parsed.get("intent", "") or "").strip()
-    working_hypothesis = str(parsed.get("working_hypothesis", "") or "").strip()
-    action = str(parsed.get("action", "") or "").strip().lower()
-    reason = str(parsed.get("reason", "") or "").strip()
-    final_decision = str(parsed.get("final_decision", "") or "").strip().lower()
-    message = str(parsed.get("message", "") or "").strip()
-    task_brief = str(parsed.get("task_brief", "") or "").strip()
-
-    if action not in {"none", "create_task", "fill_task"}:
-        return None
-    if not intent and not working_hypothesis:
-        return None
-    if not reason:
-        return None
-
-    if action == "fill_task":
-        if not has_waiting_task or final_decision != "answer":
-            return None
-        return {
-            "intent": intent,
-            "working_hypothesis": working_hypothesis,
-            "action": "fill_task",
-            "reason": reason,
-            "final_decision": "answer",
-            "message": "",
-            "task_brief": "",
-        }
-
-    if action == "create_task":
-        if final_decision != "continue":
-            return None
-        if not task_brief:
-            task_brief = build_default_brain_task_brief(
-                working_hypothesis=working_hypothesis,
-                intent=intent,
-            )
-        return {
-            "intent": intent,
-            "working_hypothesis": working_hypothesis,
-            "action": "create_task",
-            "reason": reason,
-            "final_decision": "continue",
-            "message": message,
-            "task_brief": task_brief,
-        }
-
-    if final_decision not in {"answer", "ask_user"}:
-        return None
-    if not message:
-        return None
-    return {
-        "intent": intent,
-        "working_hypothesis": working_hypothesis,
-        "action": "none",
-        "reason": reason,
-        "final_decision": final_decision,
-        "message": message,
-        "task_brief": "",
-    }
-
-
-def _fallback_brain_control(*, user_input: str, emotion: str) -> BrainControlPacket:
-    return {
-        "intent": compact_text(user_input, limit=80) or "普通交流",
-        "working_hypothesis": "这轮先由 brain 直接承接。",
-        "action": "none",
-        "reason": "fallback_direct_answer",
-        "final_decision": "answer",
-        "message": build_companion_prompt(
-            user_input="",
-            emotion=emotion,
-            short=True,
-        ),
-        "task_brief": "",
-    }
-
-
-async def decide_brain_message(
-    service: "BrainService",
-    *,
-    user_input: str,
-    history: list[dict[str, Any]],
-    emotion: str,
-    pad: dict[str, float],
-    has_waiting_task: bool,
-    waiting_task_hint: dict[str, Any] | None,
-    channel: str,
-    chat_id: str,
-    session_id: str,
-) -> BrainControlPacket:
-    prompt = _build_brain_message_prompt(
-        user_input=user_input,
-        has_waiting_task=has_waiting_task,
-        waiting_task_hint=waiting_task_hint,
-    )
-    raw_text, metrics = await service._run_brain_task(
-        history=history,
-        current_message=prompt,
-        current_emotion=emotion,
-        pad_state=(pad.get("pleasure", 0.0), pad.get("arousal", 0.5), pad.get("dominance", 0.5)),
-        internal_task_summaries=None,
-        channel=channel,
-        chat_id=chat_id,
-        session_id=session_id,
-        query=user_input,
-        retrieval_focus=BRAIN_MESSAGE_RETRIEVAL_FOCUS,
-    )
-    result = _normalize_brain_control_payload(parse_json_dict(raw_text) or {}, has_waiting_task=has_waiting_task)
-    if result is None:
-        result = _normalize_brain_control_payload(
-            _extract_string_fields(
-                raw_text,
-                fields=("intent", "working_hypothesis", "action", "reason", "final_decision", "message", "task_brief"),
-                lowercase=("action", "final_decision"),
-            ),
-            has_waiting_task=has_waiting_task,
-        )
-    if result is None:
-        result = _fallback_brain_control(user_input=user_input, emotion=emotion)
-    result.update(metrics)
-    return result
-
-
-TASK_EVENT_SPECS: dict[str, dict[str, str]] = {
-    "need_input": {
-        "field": "question",
-        "fallback": "继续之前我需要你补充一些信息。",
-        "reason": "task_needs_input",
-        "final_decision": "ask_user",
-    },
-    "done": {
-        "field": "summary",
-        "fallback": "已经处理完成。",
-        "reason": "task_completed",
-        "final_decision": "answer",
-    },
-    "failed": {
-        "field": "reason",
-        "fallback": "执行出了点问题。",
-        "reason": "task_failed",
-        "final_decision": "answer",
-    },
-}
-
-
-def _should_forward_task_stage_event(event: dict[str, Any]) -> bool:
-    payload = dict(event.get("payload", {}) or {})
-    signal_event = str(payload.get("event", "") or event.get("event", "") or "").strip().lower()
-    phase = str(payload.get("phase", "") or "").strip().lower()
-    if signal_event == "task.stage":
-        return True
-    return phase == "stage"
-
-
-def _normalize_brain_message_metadata(control: BrainControlPacket, *, user_input: str) -> BrainControlPacket:
-    control["retrieval_query"] = str(control.get("retrieval_query", "") or user_input)
-    control["retrieval_focus"] = list(control.get("retrieval_focus", []) or BRAIN_MESSAGE_RETRIEVAL_FOCUS)
-    control["retrieved_memory_ids"] = list(control.get("retrieved_memory_ids", []) or [])
-    return control
-
-
 class BrainService:
-    """Brain entrypoints: runtime message, task event, human interaction."""
+    """Brain agent with task management tools."""
 
     def __init__(
         self,
@@ -289,166 +28,215 @@ class BrainService:
         self.brain_llm = brain_llm
         self.context = context_builder
         self.bus = bus
+        self._task_system: SessionTaskSystem | None = None
+        self._current_context: dict[str, Any] = {}
 
-    @staticmethod
-    def build_runtime_brain_snapshot(
+    def _build_tools(self, channel: str = "", chat_id: str = "", session_id: str = ""):
+        """Build tools that have access to task_system and context."""
+        task_system = self._task_system
+        current_context = self._current_context
+
+        @tool
+        async def create_task(task_description: str, task_title: str = "", history_context: str = "") -> str:
+            """创建一个复杂任务，委托给 central 执行。
+            
+            当用户请求需要多步骤处理、工具调用、信息查询等复杂操作时使用。
+            
+            Args:
+                task_description: 任务描述，说明需要完成什么
+                task_title: 任务标题，简短描述任务（如"查天气"、"搜索资料"）
+                history_context: 相关的历史上下文（可选）
+            """
+            if task_system is None:
+                return "任务系统未初始化"
+            
+            task_id = f"task_{uuid4().hex[:12]}"
+            title = str(task_title or "").strip() or task_description[:20]
+            
+            # 从当前上下文获取完整的会话信息
+            history = current_context.get("history", [])
+            media = current_context.get("media", [])
+            message_id = current_context.get("message_id", "")
+            
+            await task_system.create_central_task(
+                task_id,
+                title=title,
+                request=task_description,
+                history=history,
+                task_context={"history_context": history_context} if history_context else {},
+                media=media,
+                channel=channel,
+                chat_id=chat_id,
+                session_id=session_id,
+                extra_params={"message_id": message_id} if message_id else {},
+            )
+            return f"已创建任务「{title}」({task_id})，正在处理中"
+
+        @tool
+        async def fill_task(answer: str, task_id: str = "") -> str:
+            """补充当前等待任务所需的信息。
+            
+            当有任务正在等待用户提供额外信息时，使用此工具提交用户的回答。
+            
+            Args:
+                answer: 用户提供的信息/回答
+                task_id: 任务ID（可选，默认补充当前等待的任务）
+            """
+            if task_system is None:
+                return "任务系统未初始化"
+            
+            waiting = task_system.waiting_task()
+            if waiting is None:
+                return "当前没有等待信息的任务"
+            
+            target_id = task_id or waiting.task_id
+            success = await task_system.answer(answer, target_id)
+            if success:
+                return f"已提交信息到任务 {target_id}，继续处理中"
+            return "提交信息失败"
+
+        @tool
+        async def cancel_task(task_id: str = "") -> str:
+            """取消一个任务。
+            
+            当用户明确表示不想继续某个任务时调用。
+            
+            Args:
+                task_id: 要取消的任务ID（可选，默认取消当前等待的任务）
+            """
+            if task_system is None:
+                return "任务系统未初始化"
+            
+            waiting = task_system.waiting_task()
+            if waiting is None and not task_id:
+                return "当前没有可取消的任务"
+            
+            target = task_system.get_task(task_id) if task_id else waiting
+            if target is None:
+                return f"找不到任务 {task_id}"
+            
+            await task_system.fail_task(target, reason="用户取消")
+            return f"已取消任务 {target.task_id}"
+
+        @tool
+        async def query_task(task_id: str = "", task_title: str = "") -> str:
+            """查询任务状态。
+            
+            当用户询问任务进度、状态时使用。
+            不传参数则返回所有执行中任务的信息。
+            
+            Args:
+                task_id: 任务ID（可选）
+                task_title: 任务标题（可选，支持模糊匹配）
+            """
+            if task_system is None:
+                return "任务系统未初始化"
+            
+            if task_id:
+                task = task_system.get_task(task_id)
+                if task is None:
+                    return f"找不到任务 {task_id}"
+                status_text = {
+                    "running": "执行中",
+                    "waiting_input": "等待补充信息",
+                    "blocked_input": "排队等待",
+                    "done": "已完成",
+                    "failed": "失败",
+                }.get(task.status, task.status)
+                result = f"任务「{task.title or task.task_id}」: {status_text}"
+                if task.stage_info:
+                    result += f"\n当前进度: {task.stage_info}"
+                return result
+            
+            if task_title:
+                task = task_system.find_task_by_title(task_title)
+                if task is None:
+                    return f"找不到标题包含「{task_title}」的任务"
+                status_text = {
+                    "running": "执行中",
+                    "waiting_input": "等待补充信息",
+                    "blocked_input": "排队等待",
+                    "done": "已完成",
+                    "failed": "失败",
+                }.get(task.status, task.status)
+                result = f"任务「{task.title or task.task_id}」: {status_text}"
+                if task.stage_info:
+                    result += f"\n当前进度: {task.stage_info}"
+                return result
+            
+            return task_system.get_tasks_summary()
+
+        return [create_task, fill_task, cancel_task, query_task]
+
+    def _build_state_modifier(
+        self,
         *,
-        control: BrainControlPacket,
         emotion: str,
         pad: dict[str, float],
-        default_query: str,
-    ) -> Any:
-        return SimpleNamespace(
-            emotion=str(emotion or "平静").strip() or "平静",
-            pad=dict(pad or {}),
-            intent=str(control.get("intent", "") or ""),
-            working_hypothesis=str(control.get("working_hypothesis", "") or ""),
-            retrieval_query=str(control.get("retrieval_query", "") or default_query),
-            retrieval_focus=[
-                str(item).strip()
-                for item in list(control.get("retrieval_focus", []) or [])
-                if str(item).strip()
-            ],
-            retrieved_memory_ids=[
-                str(item).strip()
-                for item in list(control.get("retrieved_memory_ids", []) or [])
-                if str(item).strip()
-            ],
-            task_brief=str(control.get("task_brief", "") or ""),
-            final_decision=str(control.get("final_decision", "") or ""),
-            final_message=str(control.get("message", "") or ""),
-            task_action=str(control.get("action", "") or ""),
-            task_reason=str(control.get("reason", "") or ""),
-            model_name=str(control.get("model_name", "") or ""),
-            prompt_tokens=int(control.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(control.get("completion_tokens", 0) or 0),
-            total_tokens=int(control.get("total_tokens", 0) or 0),
+        waiting_task_info: str = "",
+        user_query: str = "",
+    ) -> str:
+        """Build system prompt with current state."""
+        base = self.context.build_brain_system_prompt(
+            query=user_query,  # 使用当前用户输入作为记忆检索查询
+            current_emotion=emotion,
+            pad_state=(
+                pad.get("pleasure", 0.0),
+                pad.get("arousal", 0.5),
+                pad.get("dominance", 0.5),
+            ),
         )
+        
+        parts = [base]
+        
+        if waiting_task_info:
+            parts.append(f"\n\n## 当前等待用户补充信息的任务\n{waiting_task_info}")
+            parts.append("\n如果用户的回复是在补充上述信息，请调用 fill_task 工具。")
+            parts.append("如果用户说不想继续或取消，请调用 cancel_task 工具。")
+            parts.append("如果用户在说其他事情，正常回复即可。")
+        
+        # 添加 JSON 输出格式要求
+        parts.append("\n\n## 输出格式要求")
+        parts.append("\n你的回复必须是 JSON 格式：")
+        parts.append("\n```json")
+        parts.append('\n{')
+        parts.append('\n  "message": "给用户的回复内容",')
+        parts.append('\n  "execution_summary": "简要说明本轮做了什么（调用了什么工具、目的是什么、预期结果）"')
+        parts.append('\n}')
+        parts.append("\n```")
+        parts.append("\n**注意**：")
+        parts.append("\n- message: 用自然语言回复用户")
+        parts.append("\n- execution_summary: 一句话总结你的操作，如果没有调用工具则填空字符串")
+        
+        return "".join(parts)
 
-    async def _handle_fill_task_action(
-        self,
-        *,
-        control: BrainControlPacket,
-        user_input: str,
-        waiting_task,
-        task_system: "SessionTaskSystem",
-        session_id: str,
-        message_id: str,
-        channel: str,
-        chat_id: str,
-    ) -> BrainControlPacket | None:
-        answered = await task_system.answer(user_input, waiting_task.task_id)
-        if not answered:
-            return None
-        message = await self.handle_human_interaction(
-            content=str(control.get("message", "") or "").strip() or "收到，我继续处理。",
-            session_id=session_id,
-            message_id=message_id,
-            task_id=waiting_task.task_id,
-            channel=channel,
-            chat_id=chat_id,
-            event="brain.message",
-            payload={
-                "producer": "brain",
-                "final_decision": "answer",
-                "reason": "user_provided_waiting_task_input",
-            },
-        )
-        return {
-            "action": "none",
-            "reason": "user_provided_waiting_task_input",
-            "final_decision": "answer",
-            "message": message,
-            "intent": str(control.get("intent", "") or ""),
-            "working_hypothesis": str(control.get("working_hypothesis", "") or ""),
-            "retrieval_query": str(control.get("retrieval_query", "") or user_input),
-            "retrieval_focus": list(control.get("retrieval_focus", []) or BRAIN_MESSAGE_RETRIEVAL_FOCUS),
-            "retrieved_memory_ids": list(control.get("retrieved_memory_ids", []) or []),
-        }
-
-    async def _handle_create_task_action(
-        self,
-        *,
-        control: BrainControlPacket,
-        history: list[dict[str, Any]],
-        task_system: "SessionTaskSystem",
-        session_id: str,
-        message_id: str,
-        channel: str,
-        chat_id: str,
-    ) -> BrainControlPacket:
-        task_brief = str(control.get("task_brief", "") or "").strip() or build_default_brain_task_brief(
-            working_hypothesis=str(control.get("working_hypothesis", "") or ""),
-            intent=str(control.get("intent", "") or ""),
-        )
-        task_id = f"task_{uuid4().hex[:12]}"
-        await task_system.create_central_task(
-            task_id,
-            request=task_brief,
-            history=history,
-            task_context=dict(control.get("task", {}) or {}),
-            channel=channel,
-            chat_id=chat_id,
-            session_id=session_id,
-        )
-        ack = str(control.get("message", "") or "").strip() or "好，我来处理这件事，先开始做。"
-        ack = await self.handle_human_interaction(
-            content=ack,
-            session_id=session_id,
-            message_id=message_id,
-            task_id=task_id,
-            channel=channel,
-            chat_id=chat_id,
-            event="brain.message",
-            payload={
-                "producer": "brain",
-                "final_decision": "answer",
-                "reason": str(control.get("reason", "") or "created_task"),
-            },
-        )
-        control["action"] = "none"
-        control["reason"] = str(control.get("reason", "") or "created_task")
-        control["final_decision"] = "answer"
-        control["message"] = ack
-        control["task"] = {"task_id": task_id}
-        return control
-
-    async def _finalize_brain_message(
-        self,
-        *,
-        control: BrainControlPacket,
-        session_id: str,
-        message_id: str,
-        channel: str,
-        chat_id: str,
-    ) -> BrainControlPacket:
-        decision = str(control.get("final_decision", "") or "").strip()
-        if decision not in {"answer", "ask_user"}:
-            return control
-        message = str(control.get("message", "") or "").strip()
-        if not message:
-            return control
-        control["message"] = await self.handle_human_interaction(
-            content=message,
-            session_id=session_id,
-            message_id=message_id,
-            task_id=str((control.get("task", {}) or {}).get("task_id", "") or ""),
-            channel=channel,
-            chat_id=chat_id,
-            event="brain.message",
-            payload={
-                "producer": "brain",
-                "final_decision": decision,
-                "reason": str(control.get("reason", "") or ""),
-            },
-        )
-        return control
+    def _get_waiting_task_info(self) -> str:
+        """Get waiting task info for system prompt."""
+        if self._task_system is None:
+            return ""
+        
+        waiting = self._task_system.waiting_task()
+        if waiting is None:
+            return ""
+        
+        input_request = getattr(waiting, "input_request", None) or {}
+        missing = list(getattr(waiting, "missing", []) or [])
+        question = str(input_request.get("question", "") or "")
+        
+        lines = [f"- 任务ID: {waiting.task_id}"]
+        if missing:
+            lines.append(f"- 缺少信息: {missing}")
+        if question:
+            lines.append(f"- 追问内容: {question}")
+        
+        return "\n".join(lines)
 
     async def handle_user_message(
         self,
         *,
         user_input: str,
         history: list[dict[str, Any]],
+        internal_history: list[dict[str, Any]] | None = None,
         emotion: str,
         pad: dict[str, float],
         task_system: "SessionTaskSystem | None" = None,
@@ -456,63 +244,150 @@ class BrainService:
         channel: str = "",
         chat_id: str = "",
         session_id: str = "",
-    ) -> BrainControlPacket:
-        waiting_task = task_system.waiting_task() if task_system is not None else None
-        control = _normalize_brain_message_metadata(
-            await decide_brain_message(
-            self,
-            user_input=user_input,
-            history=history,
+        media: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Handle user message through the agent. Returns message and execution summary."""
+        self._task_system = task_system
+        
+        # 保存当前上下文供工具使用
+        self._current_context = {
+            "history": history,
+            "media": media or [],
+            "message_id": message_id,
+            "channel": channel,
+            "chat_id": chat_id,
+            "session_id": session_id,
+        }
+        
+        system_prompt = self._build_state_modifier(
             emotion=emotion,
             pad=pad,
-            has_waiting_task=waiting_task is not None,
-            waiting_task_hint={
-                "missing": list(getattr(waiting_task, "missing", []) or []),
-                "question": str((((getattr(waiting_task, "input_request", None) or {}).get("question", "")) or "")),
-            }
-            if waiting_task is not None
-            else None,
-            channel=channel,
-            chat_id=chat_id,
-            session_id=session_id,
-            ),
-            user_input=user_input,
+            waiting_task_info=self._get_waiting_task_info(),
+            user_query=user_input,
         )
+        
+        # Build messages
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        internal = internal_history or []
+        for turn in internal[-10:]:
+            role = turn.get("role", "user")
+            if role not in ("user", "assistant"):
+                continue
+            content = turn.get("content", "")
+            if not content:
+                continue
+            if isinstance(content, dict):
+                text = self._serialize_internal_content(turn)
+            else:
+                text = str(content)
+            if text:
+                messages.append({"role": role, "content": text})
+        
+        # Add dialogue history
+        for turn in history[-20:]:  # Limit history
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": str(content)})
+        
+        # Add current user input with multimodal media if available
+        media_items = self.context.build_media_context(media)
+        if media_items:
+            user_content: list[dict[str, Any]] = [
+                {"type": "text", "text": user_input},
+                *media_items,
+            ]
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": "user", "content": user_input})
+        
+        # Create agent with current context
+        tools = self._build_tools(channel=channel, chat_id=chat_id, session_id=session_id)
+        agent = create_agent(model=self.brain_llm, tools=tools)
+        result = await agent.ainvoke({"messages": messages})
+        
+        response_messages = result.get("messages", [])
+        raw_message = response_messages[-1].content if response_messages else ""
+        
+        # Parse JSON response
+        parsed = self._parse_brain_response(raw_message)
+        
+        return {
+            "message": parsed.get("message", raw_message),
+            "execution_summary": parsed.get("execution_summary", ""),
+        }
+    
+    @staticmethod
+    def _serialize_internal_content(record: dict[str, Any]) -> str:
+        """Convert structured internal history record to readable text for LLM context."""
+        content = record.get("content", {})
+        if not isinstance(content, dict):
+            return str(content) if content else ""
 
-        if str(control.get("action", "") or "") == "fill_task" and waiting_task is not None and task_system is not None:
-            filled = await self._handle_fill_task_action(
-                control=control,
-                user_input=user_input,
-                waiting_task=waiting_task,
-                task_system=task_system,
-                session_id=session_id,
-                message_id=message_id,
-                channel=channel,
-                chat_id=chat_id,
+        event = str(record.get("event", "") or "").strip()
+        phase = str(record.get("phase", "") or "").strip()
+
+        parts: list[str] = []
+        if phase:
+            parts.append(f"[{phase}]")
+
+        if event == "brain.decision":
+            decision = str(content.get("decision", "") or "").strip()
+            reasoning = str(content.get("reasoning", "") or "").strip()
+            if decision:
+                parts.append(f"决策: {decision}")
+            if reasoning:
+                parts.append(f"原因: {reasoning}")
+        elif event == "task.executed":
+            status = str(content.get("status", "") or "").strip()
+            summary = str(content.get("summary", "") or "").strip()
+            if status:
+                parts.append(f"任务状态: {status}")
+            if summary:
+                parts.append(summary)
+        elif event == "execution.trace":
+            trace_summary = str(content.get("trace_summary", "") or "").strip()
+            if trace_summary:
+                parts.append(trace_summary)
+        elif event == "brain.turn.summary":
+            output = str(content.get("output", "") or "").strip()
+            if output:
+                parts.append(output[:200])
+        else:
+            flat = "; ".join(
+                f"{k}: {v}" for k, v in content.items()
+                if v and str(v).strip()
             )
-            if filled is not None:
-                return filled
+            if flat:
+                parts.append(flat)
 
-        action = str(control.get("action", "") or "").strip()
+        return " ".join(parts) if parts else ""
 
-        if action == "create_task" and task_system is not None:
-            return await self._handle_create_task_action(
-                control=control,
-                history=history,
-                task_system=task_system,
-                session_id=session_id,
-                message_id=message_id,
-                channel=channel,
-                chat_id=chat_id,
-            )
-
-        return await self._finalize_brain_message(
-            control=control,
-            session_id=session_id,
-            message_id=message_id,
-            channel=channel,
-            chat_id=chat_id,
-        )
+    def _parse_brain_response(self, raw_message: str) -> dict[str, Any]:
+        """Parse JSON response from Brain."""
+        import json
+        import re
+        
+        # Try to extract JSON from message
+        # Look for ```json ... ``` or { ... }
+        json_match = re.search(r'```json\s*(\{[\s\S]*?\})\s*```', raw_message)
+        if not json_match:
+            json_match = re.search(r'(\{[\s\S]*?\})', raw_message)
+        
+        if json_match:
+            try:
+                parsed = json.loads(json_match.group(1))
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        
+        # Fallback: treat entire message as user message
+        return {
+            "message": raw_message,
+            "execution_summary": "",
+        }
 
     async def handle_task_event(
         self,
@@ -521,131 +396,67 @@ class BrainService:
         history: list[dict[str, Any]],
         emotion: str,
         pad: dict[str, float],
-        message_id: str = "",
+        task_system: "SessionTaskSystem | None" = None,
         channel: str = "",
         chat_id: str = "",
         session_id: str = "",
-    ) -> BrainControlPacket:
+    ) -> str | None:
+        """Handle task event (from Central) through the agent. Returns response text or None if ignored."""
+        if task_system is not None:
+            self._task_system = task_system
+
         event_type = str(event.get("type", "") or "").strip()
         task_id = str(event.get("task_id", "") or "").strip()
-
-        spec = TASK_EVENT_SPECS.get(event_type)
-        if spec is not None:
-            content = str(event.get(spec["field"], "") or "").strip() or spec["fallback"]
-            message = await self.handle_human_interaction(
-                content=content,
-                session_id=session_id,
-                message_id=message_id,
-                task_id=task_id,
-                channel=channel,
-                chat_id=chat_id,
-                event="brain.task_event",
-                payload={"producer": "brain", "event_type": event_type},
-            )
-            return {
-                "action": "none",
-                "reason": spec["reason"],
-                "final_decision": spec["final_decision"],
-                "message": message,
-            }
-
-        if event_type == "progress" and _should_forward_task_stage_event(event):
-            message = str(event.get("message", "") or event.get("content", "") or "").strip()
-            if message:
-                forwarded = await self.handle_human_interaction(
-                    content=message,
-                    session_id=session_id,
-                    message_id=message_id,
-                    task_id=task_id,
-                    channel=channel,
-                    chat_id=chat_id,
-                    event="brain.task_event",
-                    payload={"producer": "brain", "event_type": event_type},
-                )
-                return {
-                    "action": "none",
-                    "reason": "task_stage_shared",
-                    "final_decision": "answer",
-                    "message": forwarded,
-                    "notify_user": True,
-                }
-
-        return {
-            "action": "none",
-            "reason": "task_event_ignored",
-        }
-
-    async def handle_human_interaction(
-        self,
-        *,
-        content: str,
-        session_id: str,
-        message_id: str = "",
-        task_id: str = "",
-        channel: str = "",
-        chat_id: str = "",
-        event: str = "brain.human_interaction",
-        payload: dict[str, Any] | None = None,
-    ) -> str:
-        del session_id, message_id, task_id, channel, chat_id, event, payload
-        return str(content or "").strip()
-
-    async def _generate_proactive(
-        self,
-        prompt: str,
-        *,
-        channel: str = "",
-        chat_id: str = "",
-        session_id: str = "",
-    ) -> str:
-        del channel, chat_id, session_id
-        system_prompt = self.context.build_brain_system_prompt(query=prompt)
-        response = await self.brain_llm.ainvoke(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ]
+        
+        # Format event as natural language input
+        if event_type == "done":
+            summary = str(event.get("summary", "") or "").strip()
+            content = f"[任务 {task_id} 完成] {summary or '处理完成'}"
+        elif event_type == "failed":
+            reason = str(event.get("reason", "") or "").strip()
+            content = f"[任务 {task_id} 失败] {reason or '执行出错'}"
+        elif event_type == "need_input":
+            question = str(event.get("question", "") or "").strip()
+            content = f"[任务 {task_id} 需要信息] {question or '需要更多信息才能继续'}"
+        elif event_type == "progress":
+            message = str(event.get("message", "") or "").strip()
+            payload = event.get("payload", {}) or {}
+            phase = str(payload.get("phase", "") or "").strip()
+            if phase == "stage" and message:
+                content = f"[任务 {task_id} 进度] {message}"
+            else:
+                return None  # Ignore non-stage progress events
+        else:
+            return None  # Ignore unknown events
+        
+        system_prompt = self._build_state_modifier(
+            emotion=emotion,
+            pad=pad,
+            waiting_task_info=self._get_waiting_task_info(),
+            user_query=content,
         )
-        return extract_message_text(response).strip()
-
-    async def _run_brain_task(
-        self,
-        *,
-        history: list[dict[str, Any]],
-        current_message: str,
-        current_emotion: str,
-        pad_state: tuple[float, float, float] | None,
-        internal_task_summaries: list[str] | None,
-        channel: str,
-        chat_id: str,
-        session_id: str,
-        query: str,
-        retrieval_focus: list[str] | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        del channel, chat_id, session_id
-        records = self.context.query_brain_memories(query=query, limit=8)
-        messages = self.context.build_messages(
-            history=history,
-            current_message=current_message,
-            current_emotion=current_emotion,
-            pad_state=pad_state,
-            internal_task_summaries=internal_task_summaries,
-            query=query,
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        for turn in history[-10:]:
+            role = turn.get("role", "user")
+            turn_content = turn.get("content", "")
+            if role in ("user", "assistant") and turn_content:
+                messages.append({"role": role, "content": str(turn_content)})
+        messages.append({"role": "user", "content": content})
+        
+        ev_channel = channel or str(event.get("channel", "") or "").strip()
+        ev_chat_id = chat_id or str(event.get("chat_id", "") or "").strip()
+        tools = self._build_tools(
+            channel=ev_channel, chat_id=ev_chat_id, session_id=session_id,
         )
-        response = await self.brain_llm.ainvoke(messages)
-        metrics = extract_message_metrics(response)
-        metrics.update(
-            {
-                "retrieval_query": query,
-                "retrieval_focus": list(retrieval_focus or []),
-                "retrieved_memory_ids": [
-                    str(record.get("id", "") or "")
-                    for record in records
-                    if str(record.get("id", "") or "")
-                ],
-            }
-        )
-        return extract_message_text(response), metrics
+        agent = create_agent(model=self.brain_llm, tools=tools)
+        result = await agent.ainvoke({"messages": messages})
+        response_messages = result.get("messages", [])
+        if response_messages:
+            raw = response_messages[-1].content
+            parsed = self._parse_brain_response(raw)
+            return parsed.get("message", raw)
+        return ""
 
 
 __all__ = ["BrainService"]

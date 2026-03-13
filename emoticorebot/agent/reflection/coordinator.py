@@ -12,13 +12,15 @@ from emoticorebot.agent.cognitive import CognitiveEvent
 from emoticorebot.agent.reflection.deep import DeepReflectionResult, DeepReflectionService
 from emoticorebot.agent.reflection.memory import MemoryService
 from emoticorebot.agent.reflection.turn import TurnReflectionService
+from emoticorebot.agent.reflection.types import ExecutionInfo, TurnReflectionOutput
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.models.emotion_state import EmotionStateManager
 
 
 @dataclass(frozen=True)
 class TurnReflectionWriteResult:
-    turn_reflection: dict[str, Any] = field(default_factory=dict)
+    """逐轮反思写入结果"""
+    turn_reflection: TurnReflectionOutput = field(default_factory=dict)  # 使用类型定义
     event_count: int = 0
     memory_ids: list[str] = field(default_factory=list)
     memory_count: int = 0
@@ -71,14 +73,14 @@ class ReflectionCoordinator:
         self.emotion_mgr.update_from_conversation(user_input, output)
         snapshot = self.emotion_mgr.snapshot()
         importance = CognitiveEvent.estimate_importance(user_input, output)
-        task = self._extract_task_snapshot_from_state(state)
+        
+        # Extract task info from tool_calls or task_system
+        task = self._extract_task_info_from_state(state)
 
         reflection = await self.turn_reflection.reflect_turn(
             user_input=user_input,
             output=output,
-            emotion_label=str(snapshot.get("emotion_label", "平静") or "平静"),
-            pad=dict(snapshot.get("pad", {}) or {}),
-            drives=dict(snapshot.get("drives", {}) or {}),
+            emotion=snapshot,  # 直接传入完整的 emotion 快照
             execution=task,
         )
 
@@ -275,14 +277,55 @@ class ReflectionCoordinator:
         return names[:6]
 
     @staticmethod
-    def _extract_task_snapshot_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    def _extract_task_info_from_state(state: dict[str, Any]) -> ExecutionInfo | None:
+        """从 state 中提取执行信息"""
+        # 优先使用 Brain 的 execution_summary
+        execution_summary = state.get("execution_summary", "")
+        
+        if execution_summary:
+            # 如果有 metadata.task，合并使用
+            metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+            task_metadata = metadata.get("task") if isinstance(metadata.get("task"), dict) else {}
+            
+            if task_metadata:
+                # 合并：使用 execution_summary 作为摘要，其他信息从 metadata.task 获取
+                return {
+                    "invoked": True,
+                    "status": str(task_metadata.get("status", "done")).strip(),  # ✅ 使用真实状态
+                    "summary": execution_summary,
+                    "confidence": float(task_metadata.get("confidence", 0.8)),
+                    "attempt_count": int(task_metadata.get("attempt_count", 1)),
+                    "missing": list(task_metadata.get("missing", [])),
+                    "failure_reason": str(task_metadata.get("failure_reason", "")).strip(),
+                    "recommended_action": str(task_metadata.get("recommended_action", "")).strip(),
+                }
+            else:
+                # Brain 直接执行的情况（没有 task metadata）
+                return {
+                    "invoked": True,
+                    "status": "done",
+                    "summary": execution_summary,
+                    "confidence": 0.8,
+                    "attempt_count": 1,
+                    "missing": [],
+                    "failure_reason": "",
+                    "recommended_action": "",
+                }
+        
+        # Fallback：从 task 对象或 metadata 提取
+        return ReflectionCoordinator._extract_task_snapshot_from_state(state)
+    
+    @staticmethod
+    def _extract_task_snapshot_from_state(state: dict[str, Any]) -> ExecutionInfo | None:
+        """从 task 对象或 metadata 中提取执行信息"""
         task = state.get("task")
         metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
         task_metadata = metadata.get("task") if isinstance(metadata.get("task"), dict) else {}
         if not task_metadata:
             task_metadata = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
+        
         if task is None and not task_metadata:
-            return {}
+            return None
 
         summary = ""
         if task is not None:
@@ -299,39 +342,37 @@ class ReflectionCoordinator:
         except Exception:
             confidence_value = 0.0
 
+        status = str(
+            (getattr(task, "status", "") if task is not None else "")
+            or task_metadata.get("status", "none")
+        ).strip()
+        
+        missing = list(
+            (getattr(task, "missing", []) if task is not None else []) 
+            or task_metadata.get("missing", []) 
+            or []
+        )
+        
+        failure_reason = str(
+            (getattr(task, "error", "") if task is not None else "")
+            or task_metadata.get("failure_reason", "")
+            or task_metadata.get("error", "")
+        ).strip()
+        
+        recommended_action = str(
+            (getattr(task, "recommended_action", "") if task is not None else "")
+            or task_metadata.get("recommended_action", "")
+        ).strip()
+
         return {
-            "invoked": task is not None or bool(task_metadata),
-            "thread_id": str(
-                (getattr(task, "thread_id", "") if task is not None else "")
-                or task_metadata.get("thread_id", "")
-            ).strip(),
-            "run_id": str(
-                (getattr(task, "run_id", "") if task is not None else "")
-                or task_metadata.get("run_id", "")
-            ).strip(),
-            "control_state": str(
-                (getattr(task, "control_state", "") if task is not None else "")
-                or task_metadata.get("control_state", "idle")
-            ).strip(),
-            "status": str(
-                (getattr(task, "status", "") if task is not None else "")
-                or task_metadata.get("status", "none")
-            ).strip(),
+            "invoked": True,
+            "status": status if status in {"done", "need_more", "failed", "none"} else "none",
             "summary": summary,
-            "missing": list(
-                (getattr(task, "missing", []) if task is not None else []) or task_metadata.get("missing", []) or []
-            ),
-            "pending_review": dict(
-                (getattr(task, "pending_review", {}) if task is not None else {})
-                or task_metadata.get("pending_review", {})
-                or {}
-            ),
-            "recommended_action": str(
-                (getattr(task, "recommended_action", "") if task is not None else "")
-                or task_metadata.get("recommended_action", "")
-            ).strip(),
             "confidence": confidence_value,
             "attempt_count": int(getattr(task, "attempts", 0) if task is not None else 0),
+            "missing": missing,
+            "failure_reason": failure_reason,
+            "recommended_action": recommended_action,
         }
 
     @staticmethod
@@ -339,30 +380,29 @@ class ReflectionCoordinator:
         *,
         state: dict[str, Any],
         importance: float,
-        task: dict[str, Any],
-        turn_reflection: dict[str, Any],
+        task: ExecutionInfo | None,
+        turn_reflection: TurnReflectionOutput,
     ) -> tuple[bool, str]:
+        """判断是否需要触发深度反思"""
+        if not task:
+            task = {}
+        
         brain = state.get("brain")
-        execution_review = (
-            turn_reflection.get("execution_review")
-            if isinstance(turn_reflection, dict) and isinstance(turn_reflection.get("execution_review"), dict)
-            else {}
-        )
-        status = str(task.get("status", "") or "").strip().lower()
-        control_state = str(task.get("control_state", "") or "").strip().lower()
-        missing = [str(item).strip() for item in list(task.get("missing", []) or []) if str(item).strip()]
-        pending_review = task.get("pending_review") if isinstance(task.get("pending_review"), dict) else {}
-        effectiveness = str((execution_review or {}).get("effectiveness", "none") or "none").strip().lower()
-        failure_reason = str((execution_review or {}).get("main_failure_reason", "") or "").strip()
-        user_updates = [str(item).strip() for item in list(turn_reflection.get("user_updates", []) or []) if str(item).strip()]
-        soul_updates = [str(item).strip() for item in list(turn_reflection.get("soul_updates", []) or []) if str(item).strip()]
-        memory_candidates = list(turn_reflection.get("memory_candidates", []) or []) if isinstance(turn_reflection, dict) else []
+        execution_review = turn_reflection.get("execution_review", {})
+        
+        status = str(task.get("status", "")).strip().lower()
+        missing = list(task.get("missing", []))
+        effectiveness = str(execution_review.get("effectiveness", "none")).strip().lower()
+        failure_reason = str(execution_review.get("main_failure_reason", "")).strip()
+        user_updates = list(turn_reflection.get("user_updates", []))
+        soul_updates = list(turn_reflection.get("soul_updates", []))
+        memory_candidates = list(turn_reflection.get("memory_candidates", []))
         task_reason = str(getattr(brain, "task_reason", "") or "").strip() if brain is not None else ""
 
-        if task.get("invoked") and (status in {"failed", "need_more"} or control_state == "paused"):
-            return True, f"task_requires_followup:{control_state or status}"
-        if task.get("invoked") and (missing or pending_review):
-            return True, "task_blocked_or_waiting_review"
+        if task.get("invoked") and status in {"failed", "need_more"}:
+            return True, f"task_requires_followup:{status}"
+        if task.get("invoked") and missing:
+            return True, "task_blocked_missing_info"
         if task.get("invoked") and effectiveness in {"low", "medium"} and failure_reason:
             return True, f"task_review:{failure_reason}"
         if importance >= 0.82 and (user_updates or soul_updates):

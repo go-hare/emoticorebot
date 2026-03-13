@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 @dataclass
 class TaskUnit:
     task_id: str
+    title: str = ""
     params: dict[str, Any] = field(default_factory=dict)
     status: str = "running"
     summary: str = ""
@@ -26,16 +27,19 @@ class TaskUnit:
     input_fut: asyncio.Future | None = None
     runner: asyncio.Task | None = None
     result: Any = None
+    stage_info: str = ""
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
+            "title": self.title,
             "params": dict(self.params),
             "status": self.status,
             "summary": self.summary,
             "error": self.error,
             "missing": list(self.missing),
             "input_request": dict(self.input_request or {}),
+            "stage_info": self.stage_info,
         }
 
 
@@ -47,8 +51,7 @@ class SessionTaskSystem:
         context_builder: "ContextBuilder | None" = None,
         tool_registry: "ToolRegistry | None" = None,
     ):
-        self.current: TaskUnit | None = None
-        self.prev: TaskUnit | None = None
+        self._tasks: dict[str, TaskUnit] = {}
         self.to_main_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.central_llm = central_llm
         self.context = context_builder
@@ -65,20 +68,20 @@ class SessionTaskSystem:
         return self._central
 
     def tasks(self) -> list[TaskUnit]:
-        return [task for task in (self.prev, self.current) if task is not None]
+        return list(self._tasks.values())
 
     def active_tasks(self) -> list[TaskUnit]:
-        return [task for task in self.tasks() if task.status not in {"done", "failed"}]
+        return [task for task in self._tasks.values() if task.status not in {"done", "failed"}]
 
     def waiting_task(self) -> TaskUnit | None:
-        for task in (self.prev, self.current):
-            if task is not None and task.status == "waiting_input":
+        for task in self._tasks.values():
+            if task.status == "waiting_input":
                 return task
         return None
 
     def blocked_task(self) -> TaskUnit | None:
-        for task in (self.prev, self.current):
-            if task is not None and task.status == "blocked_input":
+        for task in self._tasks.values():
+            if task.status == "blocked_input":
                 return task
         return None
 
@@ -86,8 +89,17 @@ class SessionTaskSystem:
         wanted = str(task_id or "").strip()
         if not wanted:
             return None
-        for task in (self.prev, self.current):
-            if task is not None and task.task_id == wanted:
+        return self._tasks.get(wanted)
+
+    def find_task_by_title(self, title: str) -> TaskUnit | None:
+        wanted = str(title or "").strip().lower()
+        if not wanted:
+            return None
+        for task in self._tasks.values():
+            if task.title.lower() == wanted:
+                return task
+        for task in self._tasks.values():
+            if wanted in task.title.lower():
                 return task
         return None
 
@@ -96,25 +108,22 @@ class SessionTaskSystem:
         task_id: str,
         worker: TaskWorker,
         params: dict[str, Any] | None = None,
+        title: str = "",
     ) -> TaskUnit:
-        if len(self.active_tasks()) >= 2:
-            raise RuntimeError("at most two active tasks")
-
-        task = TaskUnit(task_id=str(task_id or "").strip(), params=dict(params or {}))
+        task = TaskUnit(
+            task_id=str(task_id or "").strip(),
+            title=str(title or "").strip(),
+            params=dict(params or {}),
+        )
         if not task.task_id:
             raise RuntimeError("task_id is required")
 
-        if self.current is None or self.current.status in {"done", "failed"}:
-            self.current = task
-        elif self.prev is None or self.prev.status in {"done", "failed"}:
-            self.prev = self.current
-            self.current = task
-        else:
-            raise RuntimeError("at most two active tasks")
+        self._tasks[task.task_id] = task
 
         await self.emit(
             task,
             type="created",
+            title=task.title,
             params=dict(task.params),
         )
         await self._start_task(task, worker)
@@ -124,6 +133,7 @@ class SessionTaskSystem:
         self,
         task_id: str,
         *,
+        title: str = "",
         request: str,
         history: list[dict[str, Any]] | None = None,
         task_context: dict[str, Any] | None = None,
@@ -148,7 +158,7 @@ class SessionTaskSystem:
         async def _worker(task: TaskUnit, system: "SessionTaskSystem") -> Any:
             return await self._get_central().run_task(task, system)
 
-        return await self.create_task(task_id=task_id, worker=_worker, params=params)
+        return await self.create_task(task_id=task_id, worker=_worker, params=params, title=title)
 
     def update_params(self, task: TaskUnit, **params: Any) -> None:
         task.params.update(params)
@@ -161,8 +171,24 @@ class SessionTaskSystem:
             try:
                 result = await worker(task, self)
                 task.result = result
+                
+                # 处理结构化结果
+                if hasattr(result, "control_state"):
+                    # CentralResult 结构化结果
+                    if result.control_state == "waiting_input" and result.missing:
+                        # 需要补充信息，不自动完成
+                        return
+                    elif result.control_state == "failed":
+                        await self.fail_task(task, reason=result.message or "执行失败")
+                        return
+                    # completed 或其他状态，正常完成
+                    summary = result.message or str(result or "").strip()
+                else:
+                    # 字符串结果（向后兼容）
+                    summary = str(result or "").strip()
+                
                 if task.status in {"running", "blocked_input"}:
-                    await self.finish_task(task, summary=str(result or "").strip())
+                    await self.finish_task(task, summary=summary)
             except asyncio.CancelledError:
                 if task.status in {"running", "waiting_input", "blocked_input"}:
                     await self.fail_task(task, reason="cancelled")
@@ -181,14 +207,18 @@ class SessionTaskSystem:
     async def emit(self, task: TaskUnit, /, **payload: Any) -> None:
         event = {
             "task_id": task.task_id,
+            "channel": str(task.params.get("channel", "") or "").strip(),
+            "chat_id": str(task.params.get("chat_id", "") or "").strip(),
+            "message_id": str(task.params.get("message_id", "") or "").strip(),
             **dict(payload),
         }
         await self.to_main_queue.put(event)
 
     async def report_progress(self, task: TaskUnit, message: str, **payload: Any) -> None:
+        task.stage_info = str(message or "").strip()
         event: dict[str, Any] = {
             "type": "progress",
-            "message": str(message or "").strip(),
+            "message": task.stage_info,
         }
         if payload:
             event["payload"] = dict(payload)
@@ -241,11 +271,30 @@ class SessionTaskSystem:
         task.input_fut = None
         task.input_request = None
         task.missing = []
-        await self.emit(
-            task,
-            type="done",
-            summary=task.summary,
-        )
+        
+        # 构建事件，包含结构化结果字段
+        event_data = {
+            "type": "done",
+            "summary": task.summary,
+        }
+        
+        # 如果结果是结构化的，添加额外字段
+        if hasattr(task.result, "to_dict"):
+            result_dict = task.result.to_dict()
+            event_data.update({
+                "control_state": result_dict.get("control_state", "completed"),
+                "status": result_dict.get("status", "success"),
+                "analysis": result_dict.get("analysis", ""),
+                "recommended_action": result_dict.get("recommended_action", ""),
+                "confidence": result_dict.get("confidence", 1.0),
+                "task_trace": result_dict.get("task_trace", []),
+            })
+        elif hasattr(task.result, "task_trace"):
+            # Fallback: 直接从 result 对象获取 task_trace
+            event_data["task_trace"] = getattr(task.result, "task_trace", [])
+        
+        await self.emit(task, **event_data)
+        self._tasks.pop(task.task_id, None)
         if was_waiting:
             await self._promote_blocked_input()
 
@@ -264,34 +313,32 @@ class SessionTaskSystem:
             type="failed",
             reason=task.error,
         )
+        self._tasks.pop(task.task_id, None)
         if was_waiting:
             await self._promote_blocked_input()
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "current": self.current.snapshot() if self.current is not None else None,
-            "prev": self.prev.snapshot() if self.prev is not None else None,
+            "tasks": {tid: t.snapshot() for tid, t in self._tasks.items()},
         }
 
-    def restore(self, snapshot: dict[str, Any] | None) -> None:
-        raw = dict(snapshot or {})
-        self.current = self._restore_task(raw.get("current"))
-        self.prev = self._restore_task(raw.get("prev"))
-
-    @staticmethod
-    def _restore_task(raw: Any) -> TaskUnit | None:
-        if not isinstance(raw, dict):
-            return None
-        task_id = str(raw.get("task_id", "") or "").strip()
-        if not task_id:
-            return None
-        task = TaskUnit(task_id=task_id, params=dict(raw.get("params") or {}))
-        task.status = str(raw.get("status", "running") or "running").strip() or "running"
-        task.summary = str(raw.get("summary", "") or "").strip()
-        task.error = str(raw.get("error", "") or "").strip()
-        task.missing = [str(item).strip() for item in list(raw.get("missing", []) or []) if str(item).strip()]
-        task.input_request = dict(raw.get("input_request") or {}) if isinstance(raw.get("input_request"), dict) else None
-        return task
+    def get_tasks_summary(self) -> str:
+        """获取所有任务的摘要信息，用于回复用户查询。"""
+        tasks = self.active_tasks()
+        if not tasks:
+            return "当前没有正在执行的任务。"
+        lines = []
+        for task in tasks:
+            status_text = {
+                "running": "执行中",
+                "waiting_input": "等待补充信息",
+                "blocked_input": "排队等待",
+            }.get(task.status, task.status)
+            line = f"- {task.title or task.task_id}: {status_text}"
+            if task.stage_info:
+                line += f" ({task.stage_info})"
+            lines.append(line)
+        return "\n".join(lines)
 
     async def _promote_blocked_input(self) -> None:
         blocked = self.blocked_task()

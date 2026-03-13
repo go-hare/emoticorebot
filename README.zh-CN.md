@@ -4,14 +4,25 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-**emoticorebot** 是一个超轻量级个人 AI 助手，采用 **`brain -> central`** 架构，源自原始 Nanobot 项目。
+**emoticorebot** 是一个轻量级个人 AI 助手，采用 **`Brain → Task System → Central`** 三层架构。
 
-它以 `brain` 作为唯一对外主体，在需要时把复杂任务委托给基于 **Deep Agents** 的 `central`，并通过 `turn_reflection + deep_reflection` 持续演化。
+- **Brain**：通过 LangGraph Agent 管理对话和任务（create_task/fill_task/cancel_task/query_task）
+- **Task System**：并发任务队列，支持进度上报、补充信息请求、异步执行
+- **Central**：基于 Deep Agents 的执行引擎，负责工具调用与复杂任务执行
+- **Reflection**：异步反思系统，每轮 `turn_reflection` + 按需 `deep_reflection`
 
 详细设计文档：
 
 - [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md)
 - [docs/FIELDS.zh-CN.md](docs/FIELDS.zh-CN.md)
+
+**核心特性：**
+
+✅ **工具化任务管理**：Brain 通过工具（而非直接调用）创建和管理任务  
+✅ **异步并发执行**：支持多任务并发，进度上报，补充信息请求  
+✅ **完整字段传递**：路由信息（channel/chat_id）、执行信息（execution_summary）贯穿调用链  
+✅ **智能反思系统**：每轮 turn_reflection + 按需 deep_reflection，自动更新 USER.md/SOUL.md  
+✅ **PAD 情感模型**：Pleasure-Arousal-Dominance 三维情绪追踪
 
 ---
 
@@ -85,64 +96,101 @@ emoticorebot gateway
 
 ## 架构
 
-### `brain -> central` 循环
+### 核心设计：`brain -> task system -> central`
 
-emoticorebot 现在使用**显式调度循环**而不是外层 LangGraph 状态机。运行时保持简单：`brain` 负责判断，必要时调用 `central`，对用户首响应之后再异步做反思。
+emoticorebot 采用**三层架构**，从上到下依次为：
 
 ```
-用户输入
-    │
-    ▼
-session / internal / checkpointer
-    │
-    ▼
-brain ──→ central（按需）
-    │              │
-    └──────←───────┘
-    │
-    ▼
-用户回复
-    │
-    ▼
-cognitive_event -> turn_reflection -> deep_reflection -> memory
+┌─────────────────────────────────────────────────────────────┐
+│                         用户输入                              │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Runtime（消息调度 + 会话管理 + 反思协调）                      │
+│  - 接收/发送消息                                              │
+│  - 管理 session（dialogue.jsonl / internal.jsonl）           │
+│  - 异步调度 turn_reflection + deep_reflection                │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Brain（LangGraph Agent + 任务管理工具）                       │
+│  - 理解用户意图                                               │
+│  - 决策：直接回复 OR 创建任务                                  │
+│  - 工具：create_task / fill_task / cancel_task / query_task  │
+│  - 输出：{"message": "...", "execution_summary": "..."}      │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Task System（任务队列 + 事件路由）                            │
+│  - 管理并发任务（running / waiting_input / done / failed）    │
+│  - 传递路由信息（channel / chat_id）                          │
+│  - 事件回调：progress / need_input / done / failed            │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Central（Deep Agents 执行引擎）                              │
+│  - 自主规划与工具调用循环                                      │
+│  - 上报进度：report_progress()                                │
+│  - 请求补充：request_input(field, question)                   │
+│  - 返回结果摘要                                               │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼ （任务事件回调）
+┌─────────────────────────────────────────────────────────────┐
+│  Brain 接收任务事件并转换为自然语言回复用户                      │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  异步反思（不阻塞用户响应）                                    │
+│  - cognitive_event 提炼                                       │
+│  - turn_reflection（每轮必做）                                │
+│  - deep_reflection（按需触发）                                │
+│  - 更新 USER.md / SOUL.md / memory                           │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-只有 `brain` 有权结束当前轮并生成最终对用户的话。
-
-**运行时职责：**
+**核心组件职责：**
 
 | 组件 | 职责 |
 |------|------|
-| `brain` | 唯一主体。负责理解意图、控制 central、维持关系连续性并最终对外表达。 |
-| `central` | 基于 Deep Agents 的执行层。负责规划、工具调用、技能复用与复杂任务执行。 |
-| `reflection` | 异步后处理层。每轮产出 `turn_reflection`，按需或按周期信号追加 `deep_reflection`。 |
+| `Runtime` | 消息调度、会话管理、反思协调 |
+| `Brain` | 唯一对外主体。通过工具管理任务（create_task/fill_task/cancel_task/query_task） |
+| `Task System` | 任务队列管理、事件路由、状态追踪 |
+| `Central` | Deep Agents 执行引擎。规划、工具调用、技能复用 |
+| `Reflection` | 异步后处理。每轮 `turn_reflection`，按需 `deep_reflection` |
 
-**单轮协议：**
+**关键特性：**
 
-- `brain -> central`：只下发一个清晰的内部执行问题；若是恢复执行，再附带恢复元数据。
-- `central -> brain`：返回紧凑结果包：`control_state`、`status`、`analysis`、`risks`、`missing`、`recommended_action`、`confidence`，以及可选的 `pending_review`。
-- `brain -> user`：只有 `brain` 能决定直接回答、追问用户，还是继续内部执行。
-- `post-turn reflection`：对用户首响应之后，运行时再写入轮次记录、提炼 `cognitive_event`、执行 `turn_reflection`，并按需调度 `deep_reflection`。
+1. **Brain 通过工具创建任务**：`create_task(task_description, task_title)` 将任务委托给 Task System
+2. **Task System 管理并发**：支持任务队列、状态追踪、等待用户输入
+3. **路由信息传递**：`channel` 和 `chat_id` 从 Brain → Task System → Central → 事件回调
+4. **异步任务回复**：Central 执行期间可随时向用户报告进度、请求信息
+5. **统一反思入口**：用户消息和任务事件都触发 `turn_reflection`
 
-### `central` 内部的 Deep Agents 执行模型
+### Deep Agents 执行模型
 
-当前的 `central` 不再使用旧的专家 / overlay 管线，而是改为 Deep Agents 执行模型，同时保持简洁的 `brain -> central` 协议。
+`Central` 使用 **Deep Agents** 作为执行引擎：
 
 | 组件 | 职责 |
 |---|---|
-| Planner | 拆解内部任务并决定执行路径 |
-| Tools | 执行文件操作、Shell、web search、fetch、message、cron 等注册能力 |
-| Step-level concurrency | 在安全前提下并行处理彼此独立的步骤或工具链 |
-| Skills | 复用工作区 `skills/` 下的本地工作流说明 |
+| Deep Agents | LangGraph 构建的 Agent，支持自主工具调用循环 |
+| Planner | 内部任务分解与执行路径规划 |
+| Tools | 文件操作、Shell、web search、MCP 等注册能力 |
+| Skills | 复用工作区 `skills/` 下的 Markdown 工作流说明 |
 
-协议仍然由 **brain 主导**：
+**执行流程：**
 
-- `brain` 只决定是否需要 `central`，以及要下发什么内部任务
-- `central` 使用工具、技能以及步骤级并发完成规划与执行
-- `central` 返回标准化结果包：`control_state`、`status`、`analysis`、`risks`、`missing`、`recommended_action`、`confidence`
-- `brain` 决定是直接回答、向用户追问，还是继续内部讨论
-
-这样外层循环保持稳定，而内部执行内核可以逐步增强。
+1. **Task System** 接收 Brain 创建的任务
+2. **Central** 通过 Deep Agents 自主执行（内部循环）
+3. **进度上报**：通过 `task.report_progress()` 发送中间进度
+4. **请求补充**：通过 `task.request_input()` 请求用户提供信息
+5. **完成通知**：任务完成/失败后发送事件给 Runtime
+6. **Brain 处理事件**：将任务事件转换为自然语言回复用户
 
 ### 典型工作流示例
 
@@ -206,99 +254,162 @@ cognitive_event -> turn_reflection -> deep_reflection -> memory
 
 ---
 
-### 决策输入与提示词构建
+### 提示词构建与上下文管理
 
-当前实现已经不再依赖外层 router。每轮计划直接来自 `brain`、会话状态和 `central` 结果包。
+**Brain 提示词构建**（`ContextBuilder.build_brain_system_prompt`）
 
-**`brain` 提示词构建（`ContextBuilder.build_brain_system_prompt`）**
+- 从 `AGENTS.md` 载入 Brain 行为规则
+- 从 `SOUL.md` 载入人格定义
+- 从 `USER.md` 载入用户认知
+- 从 `current_state.md` 载入 PAD 情绪状态
+- 检索最近的 `cognitive_event` 作为上下文
+- 提供任务管理工具（create_task/fill_task/cancel_task/query_task）
+- Brain 通过 JSON 输出：`{"message": "...", "execution_summary": "..."}`
 
-- 从工作区 `AGENTS.md` 载入 `brain` 规则
-- 从 `SOUL.md` 载入人格锚点，从 `USER.md` 载入用户认知
-- 从 `current_state.md` 载入 PAD / 当前状态
-- 检索最近的 `cognitive_event`
-- 让 `brain` 决定是直接回答，还是委托给 `central`
+**Central 执行上下文**
 
-**`central` 提示词构建（`CentralAgentService._build_agent_instructions`）**
+- 接收来自 Task System 的任务参数
+- 使用 Deep Agents 自主循环执行
+- 通过 `task.report_progress()` 上报进度
+- 通过 `task.request_input()` 请求补充信息
+- 返回执行结果摘要
 
-- 固化 `brain -> central` 协议
-- 注入工作区 / 内置技能路径与技能摘要
-- 限制最终输出为紧凑执行结果包
-- 结合工具注册表、Deep Agents 后端路由和 checkpointer 恢复状态执行
+**会话与路由信息**
 
-**会话续接输入**
-
-- `dialogue.jsonl` 保存用户可见对话历史
-- `internal.jsonl` 保存紧凑的 `brain <-> central` 摘要和控制决策
-- 暂停 task 元数据保存 `thread_id`、`run_id`、`missing` 和 `pending_review`
-- checkpointer 状态让 `central` 从上次中断点继续
-
-也就是说，现在的真实工作流是：**历史 + 认知上下文 + 暂停 task → `brain` 规划 → `central` 执行（按需）→ `brain` 收束输出**。
+- `channel` 和 `chat_id`：从用户消息 → Brain → Task System → Central → 事件回调
+- `session_id`：会话标识，用于管理对话历史和任务队列
+- `message_id`：消息唯一标识，用于追踪和关联
 
 ---
 
-### 记忆层
+### 记忆与反思系统
 
-当前架构把**运行时材料**、**认知事件**和**长期记忆**分开保存：
+**分层存储结构：**
 
-| 层 | 文件 / 存储 | 用途 |
+| 层级 | 文件路径 | 用途 |
 |--------|------|------|
-| `session` | `sessions/<session_key>/dialogue.jsonl` | 用户可见的 `user <-> brain` 对话 |
-| `internal` | `sessions/<session_key>/internal.jsonl` | 紧凑的 `brain <-> central` 摘要、控制动作、暂停/恢复线索 |
-| `checkpointer` | `sessions/_checkpoints/central.pkl` | `central` 暂停 / 恢复状态 |
-| `cognitive_event` | `memory/cognitive_events.jsonl` | 每轮结束后提炼出的结构化认知切片 |
-| `self_memory` | `memory/self_memory.jsonl` | 稳定的主脑自我模式 |
-| `relation_memory` | `memory/relation_memory.jsonl` | 稳定的用户 / 关系认知 |
-| `insight_memory` | `memory/insight_memory.jsonl` | 深反思、稳定执行模式、技能候选 |
+| 对话历史 | `sessions/<session_id>/dialogue.jsonl` | 用户可见的对话记录 |
+| 内部消息 | `sessions/<session_id>/internal.jsonl` | Brain 内部推理记录 |
+| 认知事件 | `memory/cognitive_events.jsonl` | 每轮提炼的结构化认知切片 |
+| 长期记忆 | `memory/self_memory.jsonl` | 稳定的自我模式 |
+| 关系记忆 | `memory/relation_memory.jsonl` | 用户认知与关系模式 |
+| 洞察记忆 | `memory/insight_memory.jsonl` | 执行模式与技能候选 |
+| 人格锚点 | `SOUL.md` | 人格定义（由 deep_reflection 更新） |
+| 用户档案 | `USER.md` | 用户认知（由 deep_reflection 更新） |
 
-当前的运行链路是：
+**反思流程：**
 
-1. 先写入 `dialogue` 和 `internal`
-2. 再从完整轮次材料提炼 `cognitive_event`
-3. 每轮必做 `turn_reflection`
-4. 只有当 `brain` 判断值得深挖，或周期信号触发时，才调度 `deep_reflection`
-5. 只有稳定结论才进入长期记忆，并可进一步更新 `SOUL.md`、`USER.md` 或未来 `skills`
+```
+每轮对话/任务事件
+    │
+    ▼
+写入 dialogue.jsonl + internal.jsonl
+    │
+    ▼
+提炼 cognitive_event
+    │
+    ▼
+turn_reflection（必做）
+    ├─→ 生成轮次总结
+    ├─→ 评估执行效果
+    ├─→ 提取 memory_candidates
+    ├─→ 更新 USER.md / SOUL.md（高置信）
+    └─→ 微调 PAD 情绪状态
+    │
+    ▼
+判断是否需要 deep_reflection
+    │
+    ▼
+deep_reflection（按需触发）
+    ├─→ 分析多轮认知事件
+    ├─→ 提炼稳定模式
+    ├─→ 更新长期记忆
+    └─→ 生成技能候选
+```
 
-`central` 默认只接收当前被委托的内部问题和恢复元数据，不回放完整用户历史；跨轮承接仍由 `brain` 主导。
+**触发 deep_reflection 的条件：**
 
-**PAD 情感模型**（Pleasure-Arousal-Dominance）用于跨会话追踪机器人的连续情绪状态。每次启动时从 `current_state.md` 加载，每轮对话结束后写回。
+1. 任务执行失败或需要更多信息
+2. 高重要性对话 + 身份信息更新
+3. Brain 发出特殊信号（如循环限制达到）
+4. 周期性触发（由 SubconsciousDaemon 调度）
+
+**PAD 情感模型**（Pleasure-Arousal-Dominance）：
+
+- 从 `current_state.md` 加载当前情绪状态
+- 每轮对话后根据交互内容自动更新
+- `turn_reflection` 可微调 PAD 增量（±0.3）
+- 后台进程定期衰减回中性值
 
 ---
 
-### 当前局限
+### 当前架构特点
 
-现在这套架构已经可用，但有些地方仍然是有意保持保守、轻量的：
+**优势：**
 
-- Deep Agents 的输出仍需要压缩成紧凑的 `central` 结果包，因此更丰富的中间执行轨迹主要还保留在运行时材料里。
-- 当前工具集合还是偏克制的，工作区操作和研究能力还可以继续扩展。
-- 跨轮承接仍然以 `brain` 为中心且偏保守，对隐式续聊的恢复还可以继续增强。
-- `deep_reflection` 当前保存的是稳定摘要，而不是完整原始执行轨迹。
-- 能力升级到 `skills` 的过程仍然偏保守，主要依赖反思而不是自动提升。
+1. **清晰的职责分层**
+   - Runtime：消息调度与会话管理
+   - Brain：决策与任务管理
+   - Task System：并发任务队列
+   - Central：工具执行引擎
+
+2. **异步任务执行**
+   - 任务在后台并发执行
+   - 支持进度上报和补充信息请求
+   - Brain 可管理多个并发任务
+
+3. **完整的字段传递**
+   - 路由信息（channel/chat_id）贯穿整个调用链
+   - 执行信息（execution_summary）准确传递给反思层
+   - 状态字段（status/missing/failure_reason）完整保留
+
+4. **灵活的反思机制**
+   - 每轮必做 turn_reflection（快速、轻量）
+   - 按需触发 deep_reflection（深度、周期性）
+   - 自动更新 USER.md / SOUL.md
+
+5. **工具化的任务管理**
+   - Brain 通过工具（而非直接调用）管理任务
+   - 支持创建、填充、取消、查询任务
+   - 任务状态透明可追踪
+
+**设计权衡：**
+
+- **Brain 不直接调用 Central**：通过 Task System 隔离，支持并发和异步
+- **任务事件回调**：Central 执行期间可随时通知用户，而非阻塞等待
+- **反思异步化**：不阻塞用户响应，保证首响速度
+- **历史传递保守**：Central 当前不接收完整对话历史（可按需启用）
 
 ### 路线图
 
-我建议这套架构后续优先沿这几个方向演进：
+**近期优化方向：**
 
-1. **提升 Deep Agents 的可观测性**
-   - 在不膨胀 session 历史的前提下保留更多执行轨迹
-   - 为内部规划和执行补更好的调试钩子
+1. **增强 Central 历史传递**
+   - 从 Brain 传递最近对话历史给 Central
+   - 让 Central 更好地理解用户意图和上下文
 
-2. **增强任务承接恢复能力**
-   - 提升对隐式续聊的识别能力
-   - 更好地协调暂停 task、记忆和用户补充信息之间的信号
+2. **任务恢复能力增强**
+   - 识别隐式续聊（用户补充信息但未明确说明）
+   - 更智能的任务状态恢复
 
-3. **继续加强反思输出**
-   - 给 `turn_reflection.execution_review` 和 `deep_reflection` 补更多因果标签
-   - 让后续回合不仅拿到结果，还能拿到触发该结果的失败模式
+3. **执行轨迹可观测性**
+   - 保留更详细的 Central 执行日志
+   - 提供调试和审计能力
 
-4. **继续整理 central 内部结构**
-   - 把规划 / 执行 / 融合拆得更清楚
-   - 在不牺牲轻量性的前提下提高可扩展性
+4. **反思质量提升**
+   - 增强 execution_review 的因果分析
+   - 更准确的失败模式识别
 
-5. **谨慎扩展工具与技能**
-   - 前提是先把当前 Deep Agents 工作流打磨稳定
-   - 之后可以再考虑更强的 workspace helper、验证流程和垂直领域技能
+5. **工具与技能扩展**
+   - 增加更多内置工具
+   - 简化自定义技能创建流程
 
-一句话总结：当前版本优先优化的是 **结构清晰、成本可控、历史可恢复**；下一阶段应该是在不增加额外外层编排的前提下，继续提升 `central` 的执行质量。
+**长期演进方向：**
+
+- **多模态支持**：图像、语音、视频理解
+- **主动学习**：从失败中自动提取技能
+- **分布式执行**：支持远程 Central 节点
+- **更强的规划能力**：长期任务分解与跟踪
 
 ---
 
@@ -492,54 +603,55 @@ emoticorebot channels status  # 查看渠道连接状态
 
 ```text
 emoticorebot/
-├── agent/                # brain / central / reflection / tool
-│   ├── brain.py          #   BrainService
-│   ├── context.py        #   brain 提示词与记忆上下文构建
-│   ├── model.py          #   LLMFactory
-│   ├── state.py          #   TurnState / BrainState / TaskState
+├── agent/                # Brain / Central / Reflection / Tools
+│   ├── brain.py          #   BrainService（LangGraph Agent + 任务管理工具）
+│   ├── context.py        #   提示词与记忆上下文构建
+│   ├── model.py          #   LLMFactory（多模型支持）
+│   ├── system.py         #   SessionTaskSystem（任务队列管理）
 │   ├── central/
-│   │   ├── central.py    #   CentralAgentService
-│   │   ├── skills.py     #   内置与工作区 skill 加载
-│   │   └── subagent/     #   specialized agents 当前目录落点
+│   │   ├── central.py    #   CentralAgentService（Deep Agents 执行引擎）
+│   │   ├── backend.py    #   Deep Agents 后端集成
+│   │   └── stream.py     #   流式输出处理
 │   ├── reflection/
-│   │   ├── turn.py       #   turn_reflection
-│   │   ├── deep.py       #   deep_reflection
-│   │   ├── memory.py     #   reflection -> memory 持久化
-│   │   └── skill.py      #   skill 结晶辅助
+│   │   ├── coordinator.py #  ReflectionCoordinator（反思协调）
+│   │   ├── turn.py        #  TurnReflectionService（逐轮反思）
+│   │   ├── deep.py        #  DeepReflectionService（深度反思）
+│   │   ├── memory.py      #  MemoryService（记忆持久化）
+│   │   └── types.py       #  反思类型定义
 │   └── tool/
-│       ├── manager.py    #   工具注册与执行编排
-│       └── mcp.py        #   MCP 集成
+│       ├── manager.py     #  ToolManager（工具注册与执行）
+│       └── mcp.py         #  MCP 集成
+├── runtime/              # 消息调度与会话管理
+│   ├── event_bus.py      #   RuntimeEventBus（消息总线）
+│   └── runtime.py        #   EmoticoreRuntime（主运行时）
 ├── memory/               # 分层记忆实现
 │   ├── structured_stores.py
 │   ├── stateful_stores.py
-│   ├── extractor.py
 │   ├── retriever.py
-│   ├── schema.py
-│   ├── jsonl_store.py
 │   └── memory_facade.py
-├── background/           # 后台守护进程 + 周期反思入口
-│   ├── subconscious.py   #   SubconsciousDaemon（衰减 / 反思 / 主动对话）
-│   ├── reflection.py     #   ReflectionEngine（周期性 deep_reflection 桥接）
-│   ├── heartbeat.py      #   HeartbeatService（两阶段任务执行器）
-├── tasks/                # 任务上下文辅助
-│   └── task_context.py
-├── tools/                # 内置工具实现
-├── channels/             # 渠道适配器（Telegram、Discord 等）
-├── providers/            # LLM provider 工具
-├── runtime/              # RuntimeEventBus + EmoticoreRuntime + turn_engine
-│   ├── event_bus.py
-│   ├── runtime.py
-│   ├── turn_engine.py
-│   ├── turn_persistence.py
-│   └── execution_control.py
-├── cron/                 # 定时任务调度服务
-├── session/              # 会话持久化与恢复
-├── models/               # 共享数据模型（EmotionState 等）
-├── config/               # Pydantic 配置 Schema
-├── skills/               # 内置技能定义（Markdown）
-├── templates/            # 初始化文件模板
-├── utils/                # 公共工具函数
-└── cli/                  # CLI 入口（Typer）
+├── background/           # 后台守护进程
+│   ├── subconscious.py   #   SubconsciousDaemon（衰减/反思/主动对话）
+│   ├── reflection.py     #   ReflectionEngine（周期性反思）
+│   └── heartbeat.py      #   HeartbeatService（任务检查器）
+├── models/               # 数据模型
+│   ├── emotion_state.py  #   EmotionStateManager（PAD 模型）
+│   └── cognitive.py      #   CognitiveEvent（认知事件）
+├── session/              # 会话持久化
+│   └── manager.py        #   SessionManager
+├── channels/             # 渠道适配器
+│   ├── telegram.py
+│   ├── discord.py
+│   ├── whatsapp.py
+│   └── ...
+├── tools/                # 内置工具
+│   ├── exec.py
+│   ├── file.py
+│   ├── web.py
+│   └── ...
+├── cron/                 # 定时任务
+├── config/               # 配置 Schema
+├── skills/               # 内置技能
+└── cli/                  # CLI 入口
 ```
 
 ---

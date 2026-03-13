@@ -7,14 +7,20 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from emoticorebot.agent.reflection.types import (
+    EmotionState,
+    ExecutionInfo,
+    TurnReflectionOutput,
+)
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.utils.llm_utils import extract_message_text
 
 
 @dataclass(frozen=True)
 class TurnReflectionResult:
-    turn_reflection: dict[str, Any]
-    state_snapshot: dict[str, Any] | None = None
+    """逐轮反思结果"""
+    turn_reflection: TurnReflectionOutput  # 反思输出
+    state_snapshot: dict[str, Any] | None = None  # 情绪状态快照
 
 
 class TurnReflectionService:
@@ -81,7 +87,7 @@ class TurnReflectionService:
     {{
       "audience": "brain|task|shared",
       "kind": "episodic|durable|procedural",
-      "type": "turn_insight|user_fact|preference|goal|constraint|relationship|soul_trait|tool_experience|error_pattern|workflow_pattern|skill_hint",
+      "type": "insight|user|preference|workflow|skill",
       "summary": "",
       "content": "",
       "importance": 1,
@@ -122,7 +128,7 @@ class TurnReflectionService:
 `memory_candidates` 内部字段说明：
 - `audience`：只能是 `brain`、`task`、`shared`。
 - `kind`：只能是 `episodic`、`durable`、`procedural`。
-- `type`：只能从给定枚举里选。
+- `type`：记忆类型，可选 `insight`（本轮洞察）、`user`（用户信息）、`preference`（偏好）、`workflow`（工作流模式）、`skill`（技能提示）。
 - `summary`：一句话摘要。
 - `content`：蒸馏后的完整内容。
 - `importance`：1 到 10 的整数。
@@ -192,12 +198,26 @@ class TurnReflectionService:
         *,
         user_input: str,
         output: str,
-        emotion_label: str,
-        pad: dict[str, float],
-        drives: dict[str, float],
-        execution: dict[str, Any] | None = None,
+        emotion: EmotionState,
+        execution: ExecutionInfo | None = None,
     ) -> TurnReflectionResult:
+        """
+        执行逐轮反思
+        
+        参数:
+            user_input: 用户输入
+            output: 助手输出
+            emotion: 情绪状态快照（包含 emotion_label, pad, drives）
+            execution: 执行信息（可选）
+            
+        返回:
+            TurnReflectionResult: 反思结果
+        """
         normalized_execution = self._normalize_execution(execution)
+        emotion_label = emotion.get("emotion_label", "平静")
+        pad = emotion.get("pad", {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0})
+        drives = emotion.get("drives", {"social": 50.0, "energy": 50.0})
+        
         if not self.llm:
             reflection = self._fallback_turn_reflection(
                 user_input=user_input,
@@ -344,29 +364,33 @@ class TurnReflectionService:
         }
 
     @staticmethod
-    def _normalize_execution(execution: dict[str, Any] | None) -> dict[str, Any]:
-        payload = dict(execution or {})
-        control_state = str(payload.get("control_state", "idle") or "idle").strip().lower()
-        status = str(payload.get("status", "none") or "none").strip().lower()
+    def _normalize_execution(execution: ExecutionInfo | None) -> dict[str, Any]:
+        """标准化执行信息"""
+        if not execution:
+            return {
+                "invoked": False,
+                "status": "none",
+                "summary": "",
+                "missing": [],
+                "confidence": 0.0,
+                "attempt_count": 0,
+                "failure_reason": "",
+                "recommended_action": "",
+            }
+        
+        status = str(execution.get("status", "none")).strip().lower()
+        if status not in {"none", "done", "need_more", "failed"}:
+            status = "none"
+        
         return {
-            "invoked": bool(payload.get("invoked")) or any(
-                [
-                    str(payload.get("thread_id", "") or "").strip(),
-                    str(payload.get("run_id", "") or "").strip(),
-                    str(payload.get("summary", "") or "").strip(),
-                ]
-            ),
-            "thread_id": str(payload.get("thread_id", "") or "").strip(),
-            "run_id": str(payload.get("run_id", "") or "").strip(),
-            "control_state": control_state if control_state in {"idle", "running", "paused", "stopped", "completed"} else "idle",
-            "status": status if status in {"none", "done", "need_more", "failed"} else "none",
-            "summary": str(payload.get("summary", "") or "").strip(),
-            "missing": TurnReflectionService._normalize_str_list(payload.get("missing")),
-            "pending_review": dict(payload.get("pending_review", {}) or {}),
-            "recommended_action": str(payload.get("recommended_action", "") or "").strip(),
-            "confidence": float(payload.get("confidence", 0.0) or 0.0),
-            "attempt_count": int(payload.get("attempt_count", 0) or 0),
-            "failure_reason": str(payload.get("failure_reason", "") or "").strip(),
+            "invoked": bool(execution.get("invoked", True)),
+            "status": status,
+            "summary": str(execution.get("summary", "")).strip(),
+            "missing": list(execution.get("missing", [])),
+            "confidence": float(execution.get("confidence", 0.0)),
+            "attempt_count": int(execution.get("attempt_count", 0)),
+            "failure_reason": str(execution.get("failure_reason", "")).strip(),
+            "recommended_action": str(execution.get("recommended_action", "")).strip(),
         }
 
     @staticmethod

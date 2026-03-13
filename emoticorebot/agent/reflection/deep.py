@@ -63,7 +63,7 @@ class DeepReflectionService:
     {{
       "audience": "brain|task|shared",
       "kind": "episodic|durable|procedural",
-      "type": "user_fact|preference|goal|constraint|relationship|soul_trait|turn_insight|tool_experience|error_pattern|workflow_pattern|skill_hint",
+      "type": "insight|user|preference|workflow|skill",
       "summary": "",
       "content": "",
       "importance": 1,
@@ -107,7 +107,7 @@ class DeepReflectionService:
     {{
       "audience": "task",
       "kind": "procedural",
-      "type": "workflow_pattern",
+      "type": "workflow",
       "summary": "复杂任务适合走最终结果式执行链路",
       "content": "当任务需要多步分析和工具配合时，task 应优先在内部收敛，再把最终结果返回给 brain。",
       "importance": 8,
@@ -184,7 +184,7 @@ class DeepReflectionService:
     def _persist_payload(self, payload: dict[str, Any]) -> DeepReflectionResult:
         memory_candidates = list(payload.get("memory_candidates", []) or [])
         memory_ids = self.memory_store.append_many(memory_candidates)
-        skill_hint_count = sum(1 for record in memory_candidates if str(record.get("type", "")) == "skill_hint")
+        skill_hint_count = sum(1 for record in memory_candidates if str(record.get("type", "")) == "skill")
         materialization = self.skill_materializer.materialize_from_memory()
         updated_user = self.write_managed_reflection_section(
             filename="USER.md",
@@ -370,7 +370,7 @@ class DeepReflectionService:
                 {
                     "audience": "task",
                     "kind": "procedural",
-                    "type": "workflow_pattern",
+                    "type": "workflow",
                     "summary": "近期多轮任务中持续使用执行链路解决问题。",
                     "content": "最近多轮任务都依赖 task 执行并由 brain 统一收口，适合继续保持最终结果式返回。",
                     "importance": 7,
@@ -440,7 +440,7 @@ class DeepReflectionService:
                 {
                     "audience": str(item.get("audience", "shared") or "shared").strip(),
                     "kind": str(item.get("kind", "durable") or "durable").strip(),
-                    "type": str(item.get("type", "turn_insight") or "turn_insight").strip(),
+                    "type": str(item.get("type", "insight") or "insight").strip(),
                     "summary": summary or DeepReflectionService._compact(content, 120),
                     "content": content or summary,
                     "importance": int(item.get("importance", 6) or 6),
@@ -471,7 +471,7 @@ class DeepReflectionService:
                 {
                     "audience": "task",
                     "kind": "procedural",
-                    "type": "skill_hint",
+                    "type": "skill",
                     "summary": summary or DeepReflectionService._compact(content or hint, 120),
                     "content": content or hint or summary,
                     "importance": 7,
