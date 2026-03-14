@@ -111,7 +111,7 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
 
 def _interactive_console() -> Console:
     """Build a Rich console bound to the current stdout proxy used by prompt_toolkit."""
-    return Console(file=sys.stdout, force_terminal=True, color_system="auto")
+    return Console(file=sys.stdout, color_system="auto")
 
 
 def _print_agent_response_interactive(response: str, render_markdown: bool) -> None:
