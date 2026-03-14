@@ -28,14 +28,6 @@ cd emoticorebot
 pip install -e .
 ```
 
-从 PyPI 安装：
-
-```bash
-pip install emoticorebot-ai
-```
-
-> 需要 Python >= 3.11。如需 Matrix E2EE 支持：`pip install "emoticorebot-ai[matrix]"`
-
 ---
 
 ## 快速开始
