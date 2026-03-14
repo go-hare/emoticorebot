@@ -1,162 +1,111 @@
-"""Minimal two-slot task runtime with one-way queue output."""
+"""Per-session live task runtime."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from emoticorebot.types import (
-    ReviewItem,
-    TaskControlState,
-    TaskExecutionResult,
-    TaskInputRequest,
-    TaskLifecycleState,
-    TaskResultStatus,
-    TaskSpec,
-    TaskState,
-    TraceItem,
-)
-
-TaskWorker = Callable[["TaskUnit", "SessionTaskSystem"], Awaitable[Any]]
+from emoticorebot.protocol.events import TaskEvent
+from emoticorebot.protocol.task_models import TaskSpec
+from emoticorebot.runtime.input_gate import InputGate
+from emoticorebot.runtime.running_task import RunningTask, TaskWorker
+from emoticorebot.runtime.task_state import RuntimeTaskState
 
 if TYPE_CHECKING:
     from emoticorebot.agent.context import ContextBuilder
-    from emoticorebot.agent.central.central import CentralAgentService
+    from emoticorebot.execution.central_executor import CentralExecutor
     from emoticorebot.tools import ToolRegistry
 
 
-@dataclass
-class TaskUnit:
-    task_id: str
-    title: str = ""
-    params: TaskSpec = field(default_factory=dict)
-    worker: TaskWorker | None = None
-    status: TaskLifecycleState = "running"
-    summary: str = ""
-    error: str = ""
-    missing: list[str] = field(default_factory=list)
-    input_request: TaskInputRequest | None = None
-    input_fut: asyncio.Future | None = None
-    runner: asyncio.Task | None = None
-    result: Any = None
-    stage_info: str = ""
-    # 结构化结果字段（从 TaskExecutionResult 同步）
-    control_state: TaskControlState = "running"
-    result_status: TaskResultStatus = "pending"
-    analysis: str = ""
-    pending_review: list[ReviewItem] = field(default_factory=list)
-    recommended_action: str = ""
-    confidence: float = 1.0
-    attempt_count: int = 1
-    task_trace: list[TraceItem] = field(default_factory=list)
+class SessionRuntime:
+    """Owns all live task execution state for a single session."""
 
-    def snapshot(self) -> TaskState:
-        return {
-            "invoked": True,
-            "task_id": self.task_id,
-            "title": self.title,
-            "params": dict(self.params),
-            "status": self.status,
-            "result_status": self.result_status,
-            "summary": self.summary,
-            "error": self.error,
-            "missing": list(self.missing),
-            "input_request": dict(self.input_request or {}),
-            "stage_info": self.stage_info,
-            "control_state": self.control_state,
-            "analysis": self.analysis,
-            "pending_review": list(self.pending_review),
-            "recommended_action": self.recommended_action,
-            "confidence": self.confidence,
-            "attempt_count": self.attempt_count,
-            "task_trace": list(self.task_trace),
-        }
-    
-    def sync_from_result(self, result: TaskExecutionResult | dict[str, Any]) -> None:
-        """从 TaskExecutionResult 同步结构化字段到 TaskUnit"""
-        if not isinstance(result, dict):
-            return
-
-        self.control_state = str(result.get("control_state", "running") or "running")
-        self.result_status = str(result.get("status", "pending") or "pending")
-        message = str(result.get("message", "") or "").strip()
-        if message:
-            self.summary = message
-        self.analysis = str(result.get("analysis", "") or "")
-        self.missing = list(result.get("missing", []) or [])
-        self.pending_review = list(result.get("pending_review", []) or [])
-        self.recommended_action = str(result.get("recommended_action", "") or "")
-        self.task_trace = list(result.get("task_trace", []) or [])
-
-        try:
-            self.confidence = float(result.get("confidence", 1.0) or 1.0)
-        except (TypeError, ValueError):
-            self.confidence = 1.0
-
-        try:
-            self.attempt_count = int(result.get("attempt_count", 1) or 1)
-        except (TypeError, ValueError):
-            self.attempt_count = 1
-
-
-class SessionTaskSystem:
     def __init__(
         self,
         *,
+        session_id: str = "",
+        thread_id: str = "",
         central_llm: Any | None = None,
         context_builder: "ContextBuilder | None" = None,
         tool_registry: "ToolRegistry | None" = None,
     ):
-        self._tasks: dict[str, TaskUnit] = {}
-        self.to_main_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self.session_id = str(session_id or "").strip()
+        self.thread_id = str(thread_id or self.session_id or "").strip()
+        self._task_states: dict[str, RuntimeTaskState] = {}
+        self._running_tasks: dict[str, RunningTask] = {}
+        self.input_gate = InputGate()
+        self.event_queue: asyncio.Queue[TaskEvent] = asyncio.Queue()
+        self.to_main_queue = self.event_queue
         self.central_llm = central_llm
         self.context = context_builder
         self.tools = tool_registry
-        self._central: "CentralAgentService | None" = None
+        self._executor: "CentralExecutor | None" = None
         self._on_progress: Callable[[str], Awaitable[None]] | None = None
+        self._recent_task_snapshots: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
-    def _get_central(self) -> "CentralAgentService":
-        if self._central is None:
+    def _get_executor(self) -> "CentralExecutor":
+        if self._executor is None:
             if self.central_llm is None or self.context is None:
                 raise RuntimeError("central execution dependencies are not configured")
-            from emoticorebot.agent.central.central import CentralAgentService
+            from emoticorebot.execution.central_executor import CentralExecutor
 
-            self._central = CentralAgentService(self.central_llm, self.tools, self.context)
-        return self._central
+            self._executor = CentralExecutor(self.central_llm, self.tools, self.context)
+        return self._executor
 
-    def tasks(self) -> list[TaskUnit]:
-        return list(self._tasks.values())
+    def tasks(self) -> list[RunningTask]:
+        return list(self._running_tasks.values())
 
-    def active_tasks(self) -> list[TaskUnit]:
-        return [task for task in self._tasks.values() if task.status not in {"done", "failed"}]
+    def active_tasks(self) -> list[RunningTask]:
+        return [task for task in self._running_tasks.values() if task.status not in {"done", "failed", "cancelled"}]
 
-    def waiting_task(self) -> TaskUnit | None:
-        for task in self._tasks.values():
-            if task.status == "waiting_input":
-                return task
-        return None
+    def active_task_snapshots(self) -> list[dict[str, Any]]:
+        return [task.snapshot() for task in self.active_tasks()]
 
-    def blocked_task(self) -> TaskUnit | None:
-        for task in self._tasks.values():
-            if task.status == "blocked_input":
-                return task
-        return None
+    def latest_active_task_snapshot(self) -> dict[str, Any] | None:
+        active = self.active_tasks()
+        if not active:
+            return None
+        return active[-1].snapshot()
 
-    def get_task(self, task_id: str) -> TaskUnit | None:
+    def get_task_snapshot(self, task_id: str) -> dict[str, Any] | None:
         wanted = str(task_id or "").strip()
         if not wanted:
             return None
-        return self._tasks.get(wanted)
+        live_task = self.get_task(wanted)
+        if live_task is not None:
+            return live_task.snapshot()
+        snapshot = self._recent_task_snapshots.get(wanted)
+        return dict(snapshot) if isinstance(snapshot, dict) else None
 
-    def find_task_by_title(self, title: str) -> TaskUnit | None:
+    def set_progress_handler(self, handler: Callable[[str], Awaitable[None]] | None) -> None:
+        self._on_progress = handler
+
+    def is_idle(self) -> bool:
+        return not self._running_tasks and self.event_queue.empty()
+
+    def waiting_task(self) -> RunningTask | None:
+        task_id = self.input_gate.current_waiting()
+        return self.get_task(task_id or "")
+
+    def blocked_task(self) -> RunningTask | None:
+        task_id = self.input_gate.current_blocked()
+        return self.get_task(task_id or "")
+
+    def get_task(self, task_id: str) -> RunningTask | None:
+        wanted = str(task_id or "").strip()
+        if not wanted:
+            return None
+        return self._running_tasks.get(wanted)
+
+    def find_task_by_title(self, title: str) -> RunningTask | None:
         wanted = str(title or "").strip().lower()
         if not wanted:
             return None
-        for task in self._tasks.values():
+        for task in self._running_tasks.values():
             if task.title.lower() == wanted:
                 return task
-        for task in self._tasks.values():
+        for task in self._running_tasks.values():
             if wanted in task.title.lower():
                 return task
         return None
@@ -167,8 +116,8 @@ class SessionTaskSystem:
         worker: TaskWorker,
         params: TaskSpec | None = None,
         title: str = "",
-    ) -> TaskUnit:
-        task = TaskUnit(
+    ) -> RunningTask:
+        task = RunningTask(
             task_id=str(task_id or "").strip(),
             title=str(title or "").strip(),
             params=dict(params or {}),
@@ -177,7 +126,7 @@ class SessionTaskSystem:
         if not task.task_id:
             raise RuntimeError("task_id is required")
 
-        self._tasks[task.task_id] = task
+        self._remember_task(task)
 
         await self.emit(
             task,
@@ -188,10 +137,7 @@ class SessionTaskSystem:
         await self._start_task(task, worker)
         return task
 
-    async def create_central_task(
-        self,
-        task_spec: TaskSpec,
-    ) -> TaskUnit:
+    async def create_central_task(self, task_spec: TaskSpec) -> RunningTask:
         params: TaskSpec = {
             "task_id": str(task_spec.get("task_id", "") or "").strip(),
             "origin_message_id": str(task_spec.get("origin_message_id", "") or "").strip(),
@@ -227,15 +173,15 @@ class SessionTaskSystem:
         if not params.get("request"):
             raise RuntimeError("TaskSpec.request is required")
 
-        async def _worker(task: TaskUnit, system: "SessionTaskSystem") -> Any:
-            return await self._get_central().run_task(task, system)
+        async def _worker(task: RunningTask, runtime: "SessionRuntime") -> Any:
+            return await self._get_executor().run_task(task, runtime)
 
         return await self.create_task(task_id=task_id, worker=_worker, params=params, title=title)
 
-    def update_params(self, task: TaskUnit, **params: Any) -> None:
+    def update_params(self, task: RunningTask, **params: Any) -> None:
         task.params.update(params)
 
-    async def _start_task(self, task: TaskUnit, worker: TaskWorker) -> asyncio.Task:
+    async def _start_task(self, task: RunningTask, worker: TaskWorker) -> asyncio.Task:
         if task.runner is not None and not task.runner.done():
             raise RuntimeError("task is already running")
 
@@ -243,13 +189,10 @@ class SessionTaskSystem:
             try:
                 result = await worker(task, self)
                 task.result = result
-                
-                # 处理结构化结果
+
                 if isinstance(result, dict) and "control_state" in result:
-                    # 同步结构化字段到 TaskUnit
                     task.sync_from_result(result)
-                    
-                    # TaskExecutionResult 结构化结果
+
                     if task.control_state == "waiting_input" and task.missing:
                         task.input_request = {
                             "field": task.missing[0] if task.missing else "",
@@ -258,18 +201,16 @@ class SessionTaskSystem:
                         task.input_fut = None
                         await self._activate_or_queue_waiting_task(task)
                         return
-                    elif task.control_state == "failed":
+                    if task.control_state == "failed":
                         await self.fail_task(
                             task,
                             reason=str(result.get("message", "") or "").strip() or "执行失败",
                         )
                         return
-                    # completed 或其他状态，正常完成
                     summary = str(result.get("message", "") or "").strip()
                 else:
-                    # 字符串结果（向后兼容）
                     summary = str(result or "").strip()
-                
+
                 if task.status in {"running", "blocked_input"}:
                     await self.finish_task(task, summary=summary)
             except asyncio.CancelledError:
@@ -279,7 +220,8 @@ class SessionTaskSystem:
             except Exception as exc:
                 await self.fail_task(task, reason=str(exc))
 
-        task.runner = asyncio.create_task(_run(), name=f"task-unit:{task.task_id}")
+        task.mark_started()
+        task.runner = asyncio.create_task(_run(), name=f"session-runtime:{task.task_id}")
         await self.emit(
             task,
             type="started",
@@ -287,8 +229,8 @@ class SessionTaskSystem:
         )
         return task.runner
 
-    async def emit(self, task: TaskUnit, /, **payload: Any) -> None:
-        event = {
+    async def emit(self, task: RunningTask, /, **payload: Any) -> None:
+        event: TaskEvent = {
             "task_id": task.task_id,
             "channel": str(task.params.get("channel", "") or "").strip(),
             "chat_id": str(task.params.get("chat_id", "") or "").strip(),
@@ -297,23 +239,22 @@ class SessionTaskSystem:
         }
         await self.to_main_queue.put(event)
 
-    async def report_progress(self, task: TaskUnit, message: str, **payload: Any) -> None:
+    async def report_progress(self, task: RunningTask, message: str, **payload: Any) -> None:
         task.stage_info = str(message or "").strip()
-        event: dict[str, Any] = {
+        event: TaskEvent = {
             "type": "progress",
             "message": task.stage_info,
         }
         if payload:
             event["payload"] = dict(payload)
         await self.emit(task, **event)
-        # 同时调用直连模式的进度回调（如果存在）
         if self._on_progress is not None and task.stage_info:
             try:
                 await self._on_progress(task.stage_info)
             except Exception:
                 pass
 
-    async def request_input(self, task: TaskUnit, field: str, question: str) -> str:
+    async def request_input(self, task: RunningTask, field: str, question: str) -> str:
         loop = asyncio.get_running_loop()
         task.input_fut = loop.create_future()
         task.input_request = {
@@ -324,7 +265,6 @@ class SessionTaskSystem:
         task.control_state = "waiting_input"
         task.result_status = "pending"
         await self._activate_or_queue_waiting_task(task)
-
         return await task.input_fut
 
     async def answer(
@@ -354,7 +294,7 @@ class SessionTaskSystem:
             task.input_fut = None
             task.input_request = None
             task.missing = []
-            await self._promote_blocked_input()
+            await self._promote_after_input_release(task.task_id)
             return True
 
         if task.worker is None:
@@ -369,11 +309,14 @@ class SessionTaskSystem:
         task.input_request = None
         task.stage_info = ""
         await self._start_task(task, task.worker)
-        await self._promote_blocked_input()
+        await self._promote_after_input_release(task.task_id)
         return True
 
-    async def finish_task(self, task: TaskUnit, summary: str = "") -> None:
+    async def finish_task(self, task: RunningTask, summary: str = "") -> None:
         was_waiting = task.status == "waiting_input"
+        promoted_id = self.input_gate.release(task.task_id) if was_waiting else None
+        if not was_waiting:
+            self.input_gate.remove(task.task_id)
         task.status = "done"
         task.control_state = "completed"
         if task.result_status not in {"success", "partial"}:
@@ -384,9 +327,8 @@ class SessionTaskSystem:
             task.input_fut.cancel()
         task.input_fut = None
         task.input_request = None
-        
-        # 构建事件，使用 TaskUnit 上已同步的结构化字段
-        event_data: dict[str, Any] = {
+
+        event_data: TaskEvent = {
             "type": "done",
             "title": task.title,
             "params": dict(task.params),
@@ -401,17 +343,19 @@ class SessionTaskSystem:
             "attempt_count": task.attempt_count,
             "task_trace": list(task.task_trace),
         }
-        
-        # 完成后清空 missing（因为任务已完成）
-        task.missing = []
-        
-        await self.emit(task, **event_data)
-        self._tasks.pop(task.task_id, None)
-        if was_waiting:
-            await self._promote_blocked_input()
 
-    async def fail_task(self, task: TaskUnit, reason: str = "") -> None:
+        self._remember_recent_snapshot(task)
+        task.missing = []
+        await self.emit(task, **event_data)
+        self._forget_task(task.task_id)
+        if promoted_id:
+            await self._promote_task(promoted_id)
+
+    async def fail_task(self, task: RunningTask, reason: str = "") -> None:
         was_waiting = task.status == "waiting_input"
+        promoted_id = self.input_gate.release(task.task_id) if was_waiting else None
+        if not was_waiting:
+            self.input_gate.remove(task.task_id)
         task.status = "failed"
         task.control_state = "failed"
         task.result_status = "failed"
@@ -421,9 +365,8 @@ class SessionTaskSystem:
             task.input_fut.cancel()
         task.input_fut = None
         task.input_request = None
-        
-        # 构建事件，包含结构化字段
-        event_data: dict[str, Any] = {
+
+        event_data: TaskEvent = {
             "type": "failed",
             "title": task.title,
             "params": dict(task.params),
@@ -437,20 +380,20 @@ class SessionTaskSystem:
             "attempt_count": task.attempt_count,
             "task_trace": list(task.task_trace),
         }
-        
+
+        self._remember_recent_snapshot(task)
         task.missing = []
         await self.emit(task, **event_data)
-        self._tasks.pop(task.task_id, None)
-        if was_waiting:
-            await self._promote_blocked_input()
+        self._forget_task(task.task_id)
+        if promoted_id:
+            await self._promote_task(promoted_id)
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "tasks": {tid: t.snapshot() for tid, t in self._tasks.items()},
+            "tasks": {task_id: state.snapshot() for task_id, state in self._task_states.items()},
         }
 
     def get_tasks_summary(self) -> str:
-        """获取所有任务的摘要信息，用于回复用户查询。"""
         tasks = self.active_tasks()
         if not tasks:
             return "当前没有正在执行的任务。"
@@ -467,26 +410,15 @@ class SessionTaskSystem:
             lines.append(line)
         return "\n".join(lines)
 
-    async def _promote_blocked_input(self) -> None:
-        blocked = self.blocked_task()
-        if blocked is None or blocked.input_request is None:
-            return
-        blocked.control_state = "waiting_input"
-        blocked.status = "waiting_input"
-        await self._emit_need_input(
-            blocked,
-        )
-
-    async def _activate_or_queue_waiting_task(self, task: TaskUnit) -> None:
-        active_waiting = self.waiting_task()
-        if active_waiting is not None and active_waiting.task_id != task.task_id:
+    async def _activate_or_queue_waiting_task(self, task: RunningTask) -> None:
+        if not self.input_gate.activate_or_block(task.task_id):
             task.status = "blocked_input"
             return
         task.control_state = "waiting_input"
         task.status = "waiting_input"
         await self._emit_need_input(task)
 
-    async def _emit_need_input(self, task: TaskUnit) -> None:
+    async def _emit_need_input(self, task: RunningTask) -> None:
         input_request = dict(task.input_request or {})
         await self.emit(
             task,
@@ -508,8 +440,39 @@ class SessionTaskSystem:
             task_trace=list(task.task_trace),
         )
 
+    async def _promote_after_input_release(self, task_id: str) -> None:
+        promoted_id = self.input_gate.release(task_id)
+        if promoted_id:
+            await self._promote_task(promoted_id)
+
+    async def _promote_task(self, task_id: str) -> None:
+        promoted_id = str(task_id or "").strip()
+        if not promoted_id:
+            return
+        promoted = self.get_task(promoted_id)
+        if promoted is None or promoted.input_request is None:
+            return
+        promoted.control_state = "waiting_input"
+        promoted.status = "waiting_input"
+        await self._emit_need_input(promoted)
+
+    def _remember_task(self, task: RunningTask) -> None:
+        self._running_tasks[task.task_id] = task
+        self._task_states[task.task_id] = task.state
+        self._remember_recent_snapshot(task)
+
+    def _forget_task(self, task_id: str) -> None:
+        self._running_tasks.pop(task_id, None)
+        self._task_states.pop(task_id, None)
+
+    def _remember_recent_snapshot(self, task: RunningTask) -> None:
+        self._recent_task_snapshots[task.task_id] = task.snapshot()
+        self._recent_task_snapshots.move_to_end(task.task_id)
+        while len(self._recent_task_snapshots) > 32:
+            self._recent_task_snapshots.popitem(last=False)
+
     @staticmethod
-    def _merge_answer_into_task(task: TaskUnit, content: str) -> None:
+    def _merge_answer_into_task(task: RunningTask, content: str) -> None:
         answer = str(content or "").strip()
         if not answer:
             return
@@ -541,13 +504,9 @@ class SessionTaskSystem:
         task.params["task_context"] = task_context
 
         existing_context = str(task.params.get("history_context", "") or "").strip()
-        answer_line = (
-            f"用户补充信息 - {field}: {answer}"
-            if field
-            else f"用户补充信息: {answer}"
-        )
+        answer_line = f"用户补充信息 - {field}: {answer}" if field else f"用户补充信息: {answer}"
         context_lines = [line for line in [existing_context, answer_line] if line]
         task.params["history_context"] = "\n".join(context_lines)
 
 
-__all__ = ["SessionTaskSystem", "TaskUnit"]
+__all__ = ["SessionRuntime"]

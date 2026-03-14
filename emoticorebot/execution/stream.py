@@ -1,4 +1,4 @@
-"""Central streaming and trace helpers."""
+"""Deep Agent streaming and trace helpers for the execution layer."""
 
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ except Exception:
     Command = None
 
 if TYPE_CHECKING:
-    from emoticorebot.agent.central.central import CentralAgentService
+    from emoticorebot.execution.central_executor import CentralExecutor
 
 
 async def invoke_agent(
-    service: "CentralAgentService",
+    service: "CentralExecutor",
     agent: Any,
     prompt: str,
     *,

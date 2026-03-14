@@ -4,8 +4,11 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from emoticorebot.types import ReflectionInput
 
 
 @dataclass
@@ -65,6 +68,14 @@ class CognitiveEvent:
         return ranked[:k]
 
     @classmethod
+    def recent(cls, workspace: Path, *, limit: int = 8) -> list[dict[str, Any]]:
+        records = cls.read_all(workspace)
+        ranked = sorted(records, key=cls._timestamp_score)
+        if limit <= 0:
+            return ranked
+        return ranked[-limit:]
+
+    @classmethod
     def build_cognitive_sections(
         cls,
         workspace: Path,
@@ -112,34 +123,37 @@ class CognitiveEvent:
     def build_turn_events(
         cls,
         *,
-        state: dict[str, Any],
+        reflection_input: ReflectionInput,
         importance: float,
         turn_reflection: dict[str, Any] | None = None,
     ) -> list["CognitiveEvent"]:
-        user_input = str(state.get("user_input", "") or "").strip()
-        assistant_output = str(state.get("output", "") or "").strip()
+        user_input = str(reflection_input.get("user_input", "") or "").strip()
+        assistant_output = str(
+            reflection_input.get("assistant_output", "") or reflection_input.get("output", "") or ""
+        ).strip()
         if not assistant_output:
             return []
 
-        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-        brain = state.get("brain")
+        brain = reflection_input.get("brain")
+        emotion = reflection_input.get("emotion") if isinstance(reflection_input.get("emotion"), dict) else {}
         event = cls(
             id=f"evt_{uuid4().hex}",
             version="3",
             timestamp=datetime.now().astimezone().isoformat(),
-            session_id=str(state.get("session_id", "") or ""),
-            turn_id=cls._extract_turn_id(state),
+            session_id=str(reflection_input.get("session_id", "") or ""),
+            turn_id=cls._extract_turn_id(reflection_input),
             user_input=user_input,
-            brain_state=cls._build_brain_state(brain),
+            brain_state=cls._build_brain_state(brain, emotion=emotion),
             retrieval=cls._build_retrieval(brain=brain, user_input=user_input),
-            task=cls._build_task_state(state),
+            task=cls._build_task_state(reflection_input),
             assistant_output=assistant_output,
             turn_reflection=cls._normalize_turn_reflection(turn_reflection),
             meta={
                 "importance": round(float(importance), 2),
-                "channel": str(state.get("channel", "") or ""),
+                "channel": str(reflection_input.get("channel", "") or ""),
                 "source": "brain.turn_reflection",
-                "message_id": str(metadata.get("message_id", "") or ""),
+                "source_type": str(reflection_input.get("source_type", "user_turn") or "user_turn"),
+                "message_id": str(reflection_input.get("message_id", "") or ""),
             },
         )
         return [event]
@@ -159,24 +173,38 @@ class CognitiveEvent:
         return max(0.1, min(1.0, score))
 
     @staticmethod
-    def _extract_turn_id(state: dict[str, Any]) -> str:
-        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-        message_id = str(metadata.get("message_id", "") or "").strip()
+    def _extract_turn_id(reflection_input: ReflectionInput) -> str:
+        turn_id = str(reflection_input.get("turn_id", "") or "").strip()
+        if turn_id:
+            return turn_id
+        message_id = str(reflection_input.get("message_id", "") or "").strip()
         if message_id:
             return f"turn_{message_id}"
         return f"turn_{uuid4().hex[:12]}"
 
     @staticmethod
-    def _build_brain_state(brain: Any) -> dict[str, Any]:
+    def _build_brain_state(
+        brain: Any,
+        *,
+        emotion: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if brain is None:
-            return {}
+            brain = {}
+
+        emotion_payload = emotion if isinstance(emotion, dict) else {}
+
         def _brain_get(key: str, default: Any = "") -> Any:
             if isinstance(brain, dict):
                 return brain.get(key, default)
             return getattr(brain, key, default)
-        return {
-            "emotion": str(_brain_get("emotion", "") or "平静").strip() or "平静",
-            "pad": dict(_brain_get("pad", {}) or {}),
+
+        brain_state = {
+            "emotion": str(emotion_payload.get("emotion_label", "") or _brain_get("emotion", "") or "平静").strip() or "平静",
+            "pad": dict(emotion_payload.get("pad", {}) or _brain_get("pad", {}) or {}),
+            "drives": dict(emotion_payload.get("drives", {}) or _brain_get("drives", {}) or {}),
+            "emotion_prompt": str(
+                emotion_payload.get("emotion_prompt", "") or _brain_get("emotion_prompt", "") or ""
+            ).strip(),
             "intent": str(_brain_get("intent", "") or "").strip(),
             "working_hypothesis": str(_brain_get("working_hypothesis", "") or "").strip(),
             "retrieval_query": str(_brain_get("retrieval_query", "") or "").strip(),
@@ -195,6 +223,7 @@ class CognitiveEvent:
             "task_reason": str(_brain_get("task_reason", "") or "").strip(),
             "final_decision": str(_brain_get("final_decision", "") or "").strip(),
         }
+        return brain_state
 
     @staticmethod
     def _build_retrieval(*, brain: Any, user_input: str) -> dict[str, Any]:
@@ -215,41 +244,21 @@ class CognitiveEvent:
         return {"query": query, "memory_ids": memory_ids}
 
     @staticmethod
-    def _build_task_state(state: dict[str, Any]) -> dict[str, Any]:
-        task = state.get("task")
-        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-        execution = metadata.get("execution") if isinstance(metadata.get("execution"), dict) else {}
+    def _build_task_state(reflection_input: ReflectionInput) -> dict[str, Any]:
+        task = reflection_input.get("task") if isinstance(reflection_input.get("task"), dict) else {}
+        execution = (
+            reflection_input.get("execution") if isinstance(reflection_input.get("execution"), dict) else {}
+        )
 
-        task_dict: dict[str, Any] = {}
-        if isinstance(task, dict):
-            task_dict = task
-        elif task is not None:
-            task_dict = {
-                "summary": str(getattr(task, "summary", "") or getattr(task, "analysis", "") or ""),
-                "status": str(getattr(task, "status", "") or ""),
-                "control_state": str(getattr(task, "control_state", "") or ""),
-                "missing": list(getattr(task, "missing", []) or []),
-            }
+        summary = str(task.get("summary", "") or task.get("analysis", "") or execution.get("summary", "") or "").strip()
+        status = str(task.get("status", "") or execution.get("status", "") or "none").strip() or "none"
+        result_status = str(task.get("result_status", "") or "").strip()
+        control_state = str(task.get("control_state", "") or "idle").strip()
 
-        summary = str(task_dict.get("summary", "") or task_dict.get("analysis", "") or "").strip()
-        status = str(task_dict.get("status", "") or "none").strip() or "none"
-        result_status = str(task_dict.get("result_status", "") or execution.get("result_status", "") or "").strip()
-        if not summary:
-            summary = str(execution.get("summary", "") or "").strip()
-        if status == "none":
-            status = str(execution.get("status", "") or "none").strip() or "none"
-
-        control_state = str(
-            task_dict.get("control_state", "")
-            or execution.get("control_state", "")
-            or "idle"
-        ).strip()
-
-        raw_missing = list(task_dict.get("missing", []) or execution.get("missing", []) or [])
+        raw_missing = list(task.get("missing", []) or execution.get("missing", []) or [])
         missing = [str(item).strip() for item in raw_missing if str(item).strip()]
 
-        task_action = str(execution.get("task_action", "") or "").strip()
-        used = bool(task_dict) or task_action in {"create_task", "fill_task"}
+        used = bool(execution.get("invoked")) or bool(task)
 
         return {
             "used": used,
@@ -302,6 +311,16 @@ class CognitiveEvent:
         text_tokens = cls._tokenize(combined)
         overlap = len(query_tokens & text_tokens)
         return importance + overlap * 0.2
+
+    @staticmethod
+    def _timestamp_score(item: dict[str, Any]) -> float:
+        raw_value = str(item.get("timestamp", "") or "").strip()
+        if not raw_value:
+            return 0.0
+        try:
+            return datetime.fromisoformat(raw_value).timestamp()
+        except Exception:
+            return 0.0
 
     @staticmethod
     def _compact(text: str, *, limit: int) -> str:

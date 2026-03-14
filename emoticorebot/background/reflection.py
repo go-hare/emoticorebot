@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 if TYPE_CHECKING:
-    from emoticorebot.runtime.runtime import EmoticoreRuntime
+    from emoticorebot.bootstrap import RuntimeHost
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ class ReflectionResult:
 class ReflectionEngine:
     """Periodic deep reflection that consolidates long-term memory."""
 
-    def __init__(self, runtime: "EmoticoreRuntime", workspace: Path):
+    def __init__(self, runtime: "RuntimeHost", workspace: Path):
         self.runtime = runtime
         self.workspace = workspace
 

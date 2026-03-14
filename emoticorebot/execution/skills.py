@@ -1,8 +1,4 @@
-"""Skills loader - 技能（Skill）文件加载器。
-
-从 workspace/skills/ 或内置 skills/ 目录加载 SKILL.md 技能文件，
-供 ContextBuilder 注入到 executor system prompt。
-"""
+"""Skill loading helpers for the execution layer."""
 
 from __future__ import annotations
 
@@ -12,7 +8,7 @@ import re
 import shutil
 from pathlib import Path
 
-BUILTIN_SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
+BUILTIN_SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 
 
 class SkillsLoader:
@@ -60,11 +56,11 @@ class SkillsLoader:
             return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
         lines = ["<skills>"]
-        for s in all_skills:
-            name = escape_xml(s["name"])
-            path = s["path"]
-            desc = escape_xml(self._get_skill_description(s["name"]))
-            skill_meta = self._get_skill_meta(s["name"])
+        for skill in all_skills:
+            name = escape_xml(skill["name"])
+            path = skill["path"]
+            desc = escape_xml(self._get_skill_description(skill["name"]))
+            skill_meta = self._get_skill_meta(skill["name"])
             available = self._check_requirements(skill_meta)
             lines.append(f'  <skill available="{str(available).lower()}">')
             lines.append(f"    <name>{name}</name>")
@@ -81,12 +77,12 @@ class SkillsLoader:
     def _get_missing_requirements(self, skill_meta: dict) -> str:
         missing = []
         requires = skill_meta.get("requires", {})
-        for b in requires.get("bins", []):
-            if not shutil.which(b):
-                missing.append(f"CLI: {b}")
-        for env in requires.get("env", []):
-            if not os.environ.get(env):
-                missing.append(f"ENV: {env}")
+        for binary in requires.get("bins", []):
+            if not shutil.which(binary):
+                missing.append(f"CLI: {binary}")
+        for env_name in requires.get("env", []):
+            if not os.environ.get(env_name):
+                missing.append(f"ENV: {env_name}")
         return ", ".join(missing)
 
     def _get_skill_description(self, name: str) -> str:
@@ -100,7 +96,7 @@ class SkillsLoader:
         if content.startswith("---"):
             match = re.match(r"^---\n.*?\n---\n", content, re.DOTALL)
             if match:
-                return content[match.end():].strip()
+                return content[match.end() :].strip()
         return content
 
     @staticmethod
@@ -114,11 +110,11 @@ class SkillsLoader:
     @staticmethod
     def _check_requirements(skill_meta: dict) -> bool:
         requires = skill_meta.get("requires", {})
-        for b in requires.get("bins", []):
-            if not shutil.which(b):
+        for binary in requires.get("bins", []):
+            if not shutil.which(binary):
                 return False
-        for env in requires.get("env", []):
-            if not os.environ.get(env):
+        for env_name in requires.get("env", []):
+            if not os.environ.get(env_name):
                 return False
         return True
 
@@ -142,4 +138,4 @@ class SkillsLoader:
         return None
 
 
-__all__ = ["SkillsLoader"]
+__all__ = ["BUILTIN_SKILLS_DIR", "SkillsLoader"]

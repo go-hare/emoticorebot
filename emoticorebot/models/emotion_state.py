@@ -222,6 +222,8 @@ class EmotionEvent:
     delta_pleasure: float = 0.0     # 愉悦度变化量
     delta_arousal:  float = 0.0     # 激活度变化量
     delta_dominance: float = 0.0    # 支配度变化量
+    delta_social: float = 0.0       # 社交驱动变化量
+    delta_energy: float = 0.0       # 精力驱动变化量
     behavior:      str = ""         # 后续行为描述，如 "傲娇防御，开心"
 
     def to_md_row(self) -> str:
@@ -233,6 +235,10 @@ class EmotionEvent:
             parts.append(f"激活{self.delta_arousal:+.2f}")
         if self.delta_dominance != 0:
             parts.append(f"支配{self.delta_dominance:+.2f}")
+        if self.delta_social != 0:
+            parts.append(f"社交{self.delta_social:+.2f}")
+        if self.delta_energy != 0:
+            parts.append(f"精力{self.delta_energy:+.2f}")
         delta_str = " ".join(parts) if parts else "无变化"
         return f"| {self.timestamp} | {self.trigger} | {delta_str} | {self.behavior} |"
 
@@ -375,27 +381,25 @@ class EmotionStateManager:
         pad_delta: dict[str, float] | None = None,
         drive_delta: dict[str, float] | None = None,
     ) -> dict[str, Any]:
-        """Apply bounded per-turn reflection updates through the state manager."""
+        """Apply reflection-selected absolute state values through the state manager."""
         with self._lock:
             for attr in ("pleasure", "arousal", "dominance"):
                 if attr not in (pad_delta or {}):
                     continue
                 try:
-                    delta = float((pad_delta or {}).get(attr, 0.0) or 0.0)
+                    value = float((pad_delta or {}).get(attr, getattr(self.pad, attr)) or 0.0)
                 except Exception:
                     continue
-                delta = max(-0.3, min(0.3, delta))
-                setattr(self.pad, attr, getattr(self.pad, attr) + delta)
+                setattr(self.pad, attr, value)
 
             for attr in ("social", "energy"):
                 if attr not in (drive_delta or {}):
                     continue
                 try:
-                    delta = float((drive_delta or {}).get(attr, 0.0) or 0.0)
+                    value = float((drive_delta or {}).get(attr, getattr(self.drive, attr)) or 0.0)
                 except Exception:
                     continue
-                delta = max(-20.0, min(20.0, delta))
-                setattr(self.drive, attr, getattr(self.drive, attr) + delta)
+                setattr(self.drive, attr, value)
 
             self.pad.clamp()
             self.drive.clamp()
@@ -430,6 +434,8 @@ class EmotionStateManager:
             p_before = self.pad.pleasure
             a_before = self.pad.arousal
             d_before = self.pad.dominance
+            social_before = self.drive.social
+            energy_before = self.drive.energy
 
             event_trigger  = ""
             event_behavior = ""
@@ -461,19 +467,20 @@ class EmotionStateManager:
             delta_p = round(self.pad.pleasure  - p_before, 2)
             delta_a = round(self.pad.arousal   - a_before, 2)
             delta_d = round(self.pad.dominance - d_before, 2)
+            delta_social = round(self.drive.social - social_before, 2)
+            delta_energy = round(self.drive.energy - energy_before, 2)
 
-            # 只有 PAD 有实质变化时才记录（避免每次对话都写日志）
-            if abs(delta_p) > 0.01 or abs(delta_a) > 0.01 or abs(delta_d) > 0.01:
-                event = EmotionEvent(
-                    timestamp       = datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    trigger         = f'"{event_trigger}"',
-                    delta_pleasure  = delta_p,
-                    delta_arousal   = delta_a,
-                    delta_dominance = delta_d,
-                    behavior        = event_behavior,
-                )
-                return event  # 返回给调用方，供写入对话事件流
-            return None
+            event = EmotionEvent(
+                timestamp       = datetime.now().strftime("%Y-%m-%d %H:%M"),
+                trigger         = f'"{event_trigger}"',
+                delta_pleasure  = delta_p,
+                delta_arousal   = delta_a,
+                delta_dominance = delta_d,
+                delta_social    = delta_social,
+                delta_energy    = delta_energy,
+                behavior        = event_behavior,
+            )
+            return event  # 返回给调用方，供写入对话事件流
 
     def decay(self, hours: float = 0.5) -> None:
         """

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from importlib.resources import files
@@ -31,6 +32,8 @@ class DeepReflectionResult:
 class DeepReflectionService:
     """Consolidate recent cognitive events into unified long-term memory."""
 
+    _SKILL_MEMORY_TYPES = {"skill_hint", "skill"}
+
     _PROMPT = """
 你是 `brain` 的深反思过程。
 
@@ -46,7 +49,7 @@ class DeepReflectionService:
 - 不要复制原始日志或大段文本。
 - 优先给出稳定结论，而不是一次性噪声。
 - 如果证据不足，直接返回空列表。
-- 没有内容时，字符串字段返回 `""`，数组字段返回 `[]`，对象字段返回 `{}`。
+        - 没有内容时，字符串字段返回 `""`，数组字段返回 `[]`，对象字段返回 `{{}}`。
 - `user_updates` / `soul_updates` 的每一项都必须是一条可直接写入 Markdown 列表的稳定结论。
 - `user_updates` 聚焦用户的稳定事实、偏好、目标、边界与长期沟通习惯。
 - `soul_updates` 聚焦主脑的稳定风格、表达原则与长期策略修正。
@@ -183,7 +186,9 @@ class DeepReflectionService:
     def _persist_payload(self, payload: dict[str, Any]) -> DeepReflectionResult:
         memory_candidates = list(payload.get("memory_candidates", []) or [])
         memory_ids = self.memory_store.append_many(memory_candidates)
-        skill_hint_count = sum(1 for record in memory_candidates if str(record.get("type", "")) == "skill")
+        skill_hint_count = sum(
+            1 for record in memory_candidates if str(record.get("type", "") or "").strip() in self._SKILL_MEMORY_TYPES
+        )
         materialization = self.skill_materializer.materialize_from_memory()
         updated_user = self.write_managed_reflection_section(
             filename="USER.md",
@@ -407,24 +412,39 @@ class DeepReflectionService:
     @staticmethod
     def _build_event_block(events: list[dict[str, Any]]) -> str:
         lines: list[str] = []
-        for event in events[-12:]:
+        for event in events:
             event_id = str(event.get("id", "") or "")
             timestamp = str(event.get("timestamp", "") or "")[:19]
             user_input = str(event.get("user_input", "") or "").strip()
             assistant_output = str(event.get("assistant_output", "") or "").strip()
             turn_reflection = event.get("turn_reflection") if isinstance(event.get("turn_reflection"), dict) else {}
+            brain_state = event.get("brain_state") if isinstance(event.get("brain_state"), dict) else {}
             task = event.get("task") if isinstance(event.get("task"), dict) else {}
             lifecycle_status = str(task.get("status", "none") or "none").strip()
             result_status = str(task.get("result_status", "") or "").strip()
             execution_status = lifecycle_status
             if result_status:
                 execution_status = f"{lifecycle_status}/{result_status}"
+            problems = DeepReflectionService._normalize_str_list(turn_reflection.get("problems"))
+            user_updates = DeepReflectionService._normalize_str_list(turn_reflection.get("user_updates"))
+            soul_updates = DeepReflectionService._normalize_str_list(turn_reflection.get("soul_updates"))
+            state_update = turn_reflection.get("state_update") if isinstance(turn_reflection.get("state_update"), dict) else {}
+            emotion_label = str(brain_state.get("emotion", "") or "").strip()
+            pad = dict(brain_state.get("pad", {}) or {})
+            drives = dict(brain_state.get("drives", {}) or {})
             lines.append(
                 "- "
                 f"{event_id} [{timestamp}] 用户={DeepReflectionService._compact(user_input, 80)} "
                 f"主脑回复={DeepReflectionService._compact(assistant_output, 80)} "
                 f"反思摘要={DeepReflectionService._compact(str(turn_reflection.get('summary', '') or ''), 80)} "
-                f"执行状态={execution_status}"
+                f"执行状态={execution_status} "
+                f"emotion={emotion_label or 'unknown'} "
+                f"pad={json.dumps(pad, ensure_ascii=False, sort_keys=True)} "
+                f"drives={json.dumps(drives, ensure_ascii=False, sort_keys=True)} "
+                f"problems={json.dumps(problems, ensure_ascii=False)} "
+                f"user_updates={json.dumps(user_updates, ensure_ascii=False)} "
+                f"soul_updates={json.dumps(soul_updates, ensure_ascii=False)} "
+                f"state_update={json.dumps(state_update, ensure_ascii=False, sort_keys=True)}"
             )
         return "\n".join(lines)
 
@@ -475,7 +495,7 @@ class DeepReflectionService:
                 {
                     "audience": "task",
                     "kind": "procedural",
-                    "type": "skill",
+                    "type": "skill_hint",
                     "summary": summary or DeepReflectionService._compact(content or hint, 120),
                     "content": content or hint or summary,
                     "importance": 7,

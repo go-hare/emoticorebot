@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from emoticorebot.agent.central.skills import BUILTIN_SKILLS_DIR
+from emoticorebot.execution.skills import BUILTIN_SKILLS_DIR
 from emoticorebot.memory import MemoryStore
 
 
@@ -22,6 +22,9 @@ class SkillMaterializationResult:
 
 class SkillMaterializer:
     """Turn repeated procedural hints into lightweight `SKILL.md` files."""
+
+    _SKILL_MEMORY_TYPES = {"skill_hint", "skill"}
+    _MIN_CLUSTER_SIMILARITY = 0.40
 
     def __init__(self, workspace: Path, memory_store: MemoryStore, *, min_support: int = 2):
         self.workspace = workspace
@@ -80,23 +83,65 @@ class SkillMaterializer:
         return [
             record
             for record in records
-            if str(record.get("type", "") or "") == "skill_hint"
+            if str(record.get("type", "") or "") in self._SKILL_MEMORY_TYPES
             and str(record.get("status", "active") or "active") == "active"
         ]
 
     def _group_hints(self, hints: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         grouped: dict[str, list[dict[str, Any]]] = {}
+        clusters: list[dict[str, Any]] = []
         for record in hints:
-            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-            slug = self._normalize_slug(
-                str(payload.get("skill_name", "") or "")
-                or str(payload.get("skill_id", "") or "")
-                or str(record.get("summary", "") or "")
-            )
+            slug, priority = self._slug_candidate(record)
             if not slug:
                 continue
-            grouped.setdefault(slug, []).append(record)
+            tokens = self._signature_tokens(record)
+
+            matched_cluster: dict[str, Any] | None = None
+            for cluster in clusters:
+                if slug == cluster["slug"]:
+                    matched_cluster = cluster
+                    break
+                similarities = [
+                    self._token_overlap(tokens, signature)
+                    for signature in list(cluster.get("signatures", []) or [])
+                ]
+                if similarities and max(similarities) >= self._MIN_CLUSTER_SIMILARITY:
+                    matched_cluster = cluster
+                    break
+
+            if matched_cluster is None:
+                cluster = {
+                    "slug": slug,
+                    "slug_priority": priority,
+                    "records": [record],
+                    "signatures": [tokens],
+                }
+                clusters.append(cluster)
+                grouped[slug] = cluster["records"]
+                continue
+
+            matched_cluster["records"].append(record)
+            matched_cluster.setdefault("signatures", []).append(tokens)
+            if priority > int(matched_cluster.get("slug_priority", -1)):
+                old_slug = str(matched_cluster.get("slug", "") or "").strip()
+                new_slug = slug
+                records_for_slug = grouped.pop(old_slug, None)
+                if records_for_slug is not None:
+                    grouped[new_slug] = records_for_slug
+                matched_cluster["slug"] = new_slug
+                matched_cluster["slug_priority"] = priority
         return grouped
+
+    @classmethod
+    def _slug_candidate(cls, record: dict[str, Any]) -> tuple[str, int]:
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        skill_name = cls._normalize_slug(str(payload.get("skill_name", "") or ""))
+        if skill_name:
+            return skill_name, 2
+        skill_id = cls._normalize_slug(str(payload.get("skill_id", "") or ""))
+        if skill_id:
+            return skill_id, 1
+        return cls._normalize_slug(str(record.get("summary", "") or "")), 0
 
     @staticmethod
     def _normalize_slug(value: str) -> str:
@@ -105,6 +150,50 @@ class SkillMaterializer:
         text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", text)
         text = re.sub(r"-+", "-", text).strip("-")
         return text
+
+    @staticmethod
+    def _tokenize_text(value: str) -> set[str]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return set()
+        tokens: list[str] = []
+        buffer: list[str] = []
+        for char in text:
+            if char.isascii() and char.isalnum():
+                buffer.append(char)
+                continue
+            if buffer:
+                tokens.append("".join(buffer))
+                buffer = []
+            if "\u4e00" <= char <= "\u9fff":
+                tokens.append(char)
+        if buffer:
+            tokens.append("".join(buffer))
+        return {token for token in tokens if token}
+
+    @classmethod
+    def _signature_tokens(cls, record: dict[str, Any]) -> set[str]:
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        combined = " ".join(
+            [
+                str(record.get("summary", "") or ""),
+                str(record.get("content", "") or ""),
+                str(payload.get("skill_name", "") or ""),
+                str(payload.get("trigger", "") or ""),
+                str(payload.get("hint", "") or ""),
+            ]
+        )
+        return cls._tokenize_text(combined)
+
+    @staticmethod
+    def _token_overlap(left: set[str], right: set[str]) -> float:
+        if not left or not right:
+            return 0.0
+        shared = len(left & right)
+        baseline = min(len(left), len(right))
+        if baseline <= 0:
+            return 0.0
+        return shared / baseline
 
     @staticmethod
     def _compact(text: str, *, limit: int = 160) -> str:

@@ -19,7 +19,7 @@ from loguru import logger
 from emoticorebot.background.reflection import ReflectionEngine
 
 if TYPE_CHECKING:
-    from emoticorebot.runtime.runtime import EmoticoreRuntime
+    from emoticorebot.bootstrap import RuntimeHost
     from emoticorebot.cron.service import CronService
 
 
@@ -33,7 +33,7 @@ class SubconsciousDaemon:
 - 不要说"你在吗"，要有性格、有灵魂
 - 符合你目前的情绪状态"""
 
-    def __init__(self, runtime: "EmoticoreRuntime", workspace: Path):
+    def __init__(self, runtime: "RuntimeHost", workspace: Path):
         self.runtime = runtime
         self.workspace = workspace
         self.emotion_mgr = runtime.emotion_mgr
@@ -155,12 +155,12 @@ class SubconsciousDaemon:
         emotion_prompt = self.emotion_mgr.get_emotion_prompt()
         prompt = self._PROACTIVE_PROMPT.format(emotion_prompt=emotion_prompt)
         try:
-            # 通过 BrainService 生成主动消息
-            content = await self.runtime.brain_service._generate_proactive(prompt)
+            # 通过 CompanionBrain 生成主动消息
+            content = await self.runtime.companion_brain.generate_proactive(prompt)
             if not content:
                 return
 
-                from emoticorebot.runtime.event_bus import OutboundMessage
+            from emoticorebot.runtime.event_bus import OutboundMessage
 
             await self.runtime.bus.publish_outbound(
                 OutboundMessage(

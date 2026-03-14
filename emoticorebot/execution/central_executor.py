@@ -1,42 +1,55 @@
-"""Central execution module - 直接调用 Deep Agent 执行任务。"""
+"""Central executor backed by Deep Agent."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from emoticorebot.agent.central import backend as central_backend
-from emoticorebot.agent.central import stream as central_stream
-from emoticorebot.agent.system import SessionTaskSystem, TaskUnit
-from emoticorebot.tools import ToolRegistry
-from emoticorebot.types import TaskExecutionResult, TaskSpec
+from emoticorebot.execution import backend as executor_backend
+from emoticorebot.execution import stream as executor_stream
+from emoticorebot.execution.executor_context import ExecutorContext
+from emoticorebot.execution.tool_runtime import ExecutionToolRuntime
+from emoticorebot.protocol.task_models import TaskSpec
+from emoticorebot.protocol.task_result import TaskExecutionResult
+from emoticorebot.runtime.running_task import RunningTask
+from emoticorebot.runtime.session_runtime import SessionRuntime
 from emoticorebot.utils.llm_utils import blocks_to_llm_content
 
 if TYPE_CHECKING:
     from emoticorebot.agent.context import ContextBuilder
+    from emoticorebot.tools import ToolRegistry
 
 
-class CentralAgentService:
-    """Central executor - 直接调用 Deep Agent，由 agent 内部处理工具循环。"""
+class CentralExecutor:
+    """Executor that delegates complex tasks to the Deep Agent stack."""
 
     def __init__(
         self,
         central_llm,
-        tool_registry: ToolRegistry | None,
+        tool_registry: "ToolRegistry | None",
         context_builder: "ContextBuilder",
     ):
-        self.central_llm = central_llm
-        self.tools = tool_registry
-        self.context = context_builder
+        self.executor_context = ExecutorContext(
+            central_llm=central_llm,
+            tool_registry=tool_registry,
+            context_builder=context_builder,
+        )
+        self.tool_runtime = ExecutionToolRuntime()
+
+        # Compatibility for shared helper modules that inspect these attributes.
+        self.central_llm = self.executor_context.central_llm
+        self.tools = self.executor_context.tool_registry
+        self.context = self.executor_context.context_builder
+
         self._agent: Any | None = None
         self._checkpointer: Any | None = None
-        self._current_system: SessionTaskSystem | None = None
-        self._current_task: TaskUnit | None = None
+        self._current_runtime: SessionRuntime | None = None
+        self._current_task: RunningTask | None = None
         self._trace_log: list[dict[str, Any]] = []
 
-    async def run_task(self, task: TaskUnit, system: SessionTaskSystem) -> TaskExecutionResult:
-        """执行任务 - 一次调用，Deep Agent 内部自动循环处理工具调用。"""
-        if not central_backend.deep_agents_available():
+    async def run_task(self, task: RunningTask, runtime: SessionRuntime) -> TaskExecutionResult:
+        """Execute a single task instance end-to-end."""
+        if not executor_backend.deep_agents_available():
             return self._build_result(
                 control_state="failed",
                 status="failed",
@@ -56,25 +69,26 @@ class CentralAgentService:
                 confidence=0.0,
             )
 
-        agent = central_backend.ensure_agent(self)
+        agent = executor_backend.ensure_agent(self)
         thread_id = self._build_thread_id(task_spec, task.task_id)
         run_id = f"run_{uuid4().hex[:12]}"
 
-        self._current_system = system
+        self._current_runtime = runtime
         self._current_task = task
+        self.tool_runtime.bind(runtime=runtime, task=task)
         self._trace_log = []
 
-        history = [
-            item for item in list(task_spec.get("history") or [])
-            if isinstance(item, dict)
-        ]
+        history = [item for item in list(task_spec.get("history") or []) if isinstance(item, dict)]
         media = [str(item).strip() for item in list(task_spec.get("media") or []) if str(item).strip()]
         task_context = dict(task_spec.get("task_context") or {})
 
         try:
-            await system.report_progress(
-                task, "正在执行内部任务",
-                event="task.progress", producer="central", phase="stage",
+            await runtime.report_progress(
+                task,
+                "正在执行内部任务",
+                event="task.progress",
+                producer="central",
+                phase="stage",
             )
 
             agent_result = await self._invoke_agent(
@@ -88,7 +102,8 @@ class CentralAgentService:
             )
             return self._normalize_task_result(self._extract_structured_result(agent_result))
         finally:
-            self._current_system = None
+            self.tool_runtime.clear()
+            self._current_runtime = None
             self._current_task = None
 
     def _build_thread_id(self, task_spec: TaskSpec, task_id: str) -> str:
@@ -111,7 +126,6 @@ class CentralAgentService:
         media: list[str] | None = None,
         task_context: dict[str, Any] | None = None,
     ) -> Any:
-        """直接调用 Deep Agent - agent 内部自动处理工具循环。"""
         messages: list[dict[str, Any]] = []
         for turn in (history or [])[-10:]:
             role = str(turn.get("role", "") or "").strip()
@@ -169,10 +183,7 @@ class CentralAgentService:
 
         media_items = self.context.build_media_context(media) if self.context else []
         if media_items:
-            user_content: Any = [
-                {"type": "text", "text": "".join(user_parts)},
-                *media_items,
-            ]
+            user_content: Any = [{"type": "text", "text": "".join(user_parts)}, *media_items]
             messages.append({"role": "user", "content": user_content})
         else:
             if media:
@@ -193,10 +204,7 @@ class CentralAgentService:
             return agent.invoke(payload, config=config)
         raise RuntimeError("Deep Agent does not expose invoke/ainvoke/astream")
 
-    async def _stream_invoke(
-        self, agent: Any, payload: dict[str, Any], config: dict[str, Any]
-    ) -> Any:
-        """流式调用，捕获 trace 用于调试。"""
+    async def _stream_invoke(self, agent: Any, payload: dict[str, Any], config: dict[str, Any]) -> Any:
         last_values: Any = None
         async for item in agent.astream(
             payload,
@@ -204,13 +212,11 @@ class CentralAgentService:
             stream_mode=["values", "updates", "messages", "custom"],
             subgraphs=True,
         ):
-            namespace, mode, data = central_stream.unpack_stream_item(item)
+            namespace, mode, data = executor_stream.unpack_stream_item(item)
             if mode == "values":
                 last_values = data
                 continue
-            for record in central_stream.build_trace_records(
-                mode=mode, namespace=namespace, data=data
-            ):
+            for record in executor_stream.build_trace_records(mode=mode, namespace=namespace, data=data):
                 self._trace_log.append(record)
 
         if last_values is None:
@@ -335,7 +341,7 @@ class CentralAgentService:
                 record["severity"] = severity
             if "blocking" in item:
                 record["blocking"] = bool(item.get("blocking"))
-            evidence = CentralAgentService._normalize_str_list(item.get("evidence"))
+            evidence = CentralExecutor._normalize_str_list(item.get("evidence"))
             if evidence:
                 record["evidence"] = evidence
             payload = item.get("payload")
@@ -385,4 +391,4 @@ class CentralAgentService:
         return max(1, retry_count + 1)
 
 
-__all__ = ["CentralAgentService"]
+__all__ = ["CentralExecutor"]

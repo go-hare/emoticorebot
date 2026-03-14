@@ -1,8 +1,8 @@
 """ToolManager - 工具管理服务。
 
-职责（单一）：注册 / 配置 / 连接 / 释放所有工具，向 CentralAgentService 提供 ToolRegistry。
+职责（单一）：注册 / 配置 / 连接 / 释放所有工具，向 CentralExecutor 提供 ToolRegistry。
 
-工具注册逻辑集中在此，避免分散到 Runtime 或 CentralAgentService 内部。
+工具注册逻辑集中在此，避免分散到 Runtime 或 CentralExecutor 内部。
 """
 
 from __future__ import annotations
@@ -156,7 +156,7 @@ class ToolManager:
             logger.info("MCP servers closed")
 
     def get_registry(self) -> ToolRegistry:
-        """获取工具注册表（供 CentralAgentService 使用）。"""
+        """获取工具注册表（供 CentralExecutor 使用）。"""
         return self.registry
 
 

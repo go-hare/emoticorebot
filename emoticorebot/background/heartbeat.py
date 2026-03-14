@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from loguru import logger
 
 if TYPE_CHECKING:
-    from emoticorebot.runtime.runtime import EmoticoreRuntime
+    from emoticorebot.bootstrap import RuntimeHost
 
 _HEARTBEAT_TOOL = {
     "type": "function",
@@ -46,7 +46,7 @@ class HeartbeatService:
     def __init__(
         self,
         workspace: Path,
-        runtime: "EmoticoreRuntime",
+        runtime: "RuntimeHost",
         on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         interval_s: int = 30 * 60,

@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
-    "BrainService",
-    "CentralAgentService",
+    "CompanionBrain",
+    "EventNarrator",
+    "CentralExecutor",
     "MemoryService",
     "ReflectionCoordinator",
     "ToolManager",
@@ -14,14 +15,18 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name == "BrainService":
-        from emoticorebot.agent.brain import BrainService
+    if name == "CompanionBrain":
+        from emoticorebot.brain.companion_brain import CompanionBrain
 
-        return BrainService
-    if name == "CentralAgentService":
-        from emoticorebot.agent.central.central import CentralAgentService
+        return CompanionBrain
+    if name == "EventNarrator":
+        from emoticorebot.brain.event_narrator import EventNarrator
 
-        return CentralAgentService
+        return EventNarrator
+    if name == "CentralExecutor":
+        from emoticorebot.execution.central_executor import CentralExecutor
+
+        return CentralExecutor
     if name == "MemoryService":
         from emoticorebot.agent.reflection import MemoryService
 

@@ -241,9 +241,9 @@ def gateway(
     """Start the emoticorebot gateway."""
     from emoticorebot.config.loader import load_config, get_data_dir
     from emoticorebot.runtime.event_bus import RuntimeEventBus
-    from emoticorebot.runtime.runtime import EmoticoreRuntime
+    from emoticorebot.bootstrap import RuntimeHost
     from emoticorebot.channels.manager import ChannelManager
-    from emoticorebot.session.manager import SessionManager
+    from emoticorebot.session.thread_store import ThreadStore
     from emoticorebot.cron.service import CronService
     from emoticorebot.cron.types import CronJob
     
@@ -255,14 +255,14 @@ def gateway(
     
     config = load_config()
     bus = RuntimeEventBus()
-    session_manager = SessionManager(config.workspace_path)
+    thread_store = ThreadStore(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
     # Create agent with cron service
-    agent = EmoticoreRuntime(
+    agent = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
         central_mode=config.agents.defaults.central_mode,
@@ -273,7 +273,7 @@ def gateway(
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
-        session_manager=session_manager,
+        thread_store=thread_store,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
     )
@@ -297,7 +297,7 @@ def gateway(
         return response
     cron.on_job = on_cron_job
     
-    # Initialize subconscious daemon and heartbeat service (integrated in EmoticoreRuntime)
+    # Initialize subconscious daemon and heartbeat service in RuntimeHost
     hb_cfg = config.gateway.heartbeat
     agent.initialize_subconscious(
         enable_reflection=True,  # 启用反思和主动对话
@@ -359,7 +359,7 @@ def agent(
     """Interact with the agent directly."""
     from emoticorebot.config.loader import load_config, get_data_dir
     from emoticorebot.runtime.event_bus import RuntimeEventBus
-    from emoticorebot.runtime.runtime import EmoticoreRuntime
+    from emoticorebot.bootstrap import RuntimeHost
     from emoticorebot.cron.service import CronService
     from loguru import logger
     
@@ -375,7 +375,7 @@ def agent(
     else:
         logger.disable("emoticorebot")
     
-    agent_loop = EmoticoreRuntime(
+    agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
         central_mode=config.agents.defaults.central_mode,
@@ -860,12 +860,12 @@ def cron_run(
     from emoticorebot.cron.service import CronService
     from emoticorebot.cron.types import CronJob
     from emoticorebot.runtime.event_bus import RuntimeEventBus
-    from emoticorebot.runtime.runtime import EmoticoreRuntime
+    from emoticorebot.bootstrap import RuntimeHost
     logger.disable("emoticorebot")
 
     config = load_config()
     bus = RuntimeEventBus()
-    agent_loop = EmoticoreRuntime(
+    agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
         central_mode=config.agents.defaults.central_mode,

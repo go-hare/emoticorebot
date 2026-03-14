@@ -32,27 +32,46 @@ class TurnReflectionService:
 4. 从 `brain` 视角评价本轮 `task` 执行情况。
 5. 只在确实有长期价值时，产出少量长期记忆候选。
 6. 只在本轮存在高置信、可直接落盘的信息时，填写 `user_updates` 与 `soul_updates`。
-7. 只在确实需要微调当前实时状态时，填写 `state_update`，并且只能给出很小的增量。
+7. 必须填写 `state_update`，并且 `pad_delta` / `drives_delta` 不能返回空对象。
 
 规则：
 - `memory_candidates` 必须简洁，并且足够稳定，能帮助未来轮次。
 - `user_updates` / `soul_updates` 的每一项都必须是可直接写入 Markdown 列表的单句结论。
 - `user_updates` 聚焦用户本轮明确表达出的稳定事实、偏好、目标、边界或协作习惯。
 - `soul_updates` 聚焦主脑本轮需要立即记住的表达方式、风格要求或协作策略修正。
-- `state_update` 只能输出很小的 PAD / drive 增量，不要重写整个状态，不要输出大幅度变化。
+- `state_update` 必须始终填写。
+- `pad_delta` 必须始终包含 `pleasure`、`arousal`、`dominance` 三个键。
+- `drives_delta` 必须始终包含 `social`、`energy` 两个键。
+- 字段名虽然叫 `pad_delta` / `drives_delta`，但在这里必须填写“你判断后的状态值”，不要填写增量、差值或 `+0.1` / `-2.0` 这种微调量。
+- 如果本轮判断“不需要调整”，也必须把当前上下文中的状态值原样回填到这些键里，不能返回 `{{}}`，也不要统一写成 `0.0`。
+- 如果本轮判断“需要调整”，也要直接填写你判断后的目标状态值，而不是填写相对当前值的增减量。
+- 例如：当前 `arousal=1.0`，你判断本轮更合理的状态应为 `0.8`，那就写 `0.8`，不要写 `-0.2`。
+- `state_update` 是主脑对“本轮状态变化/状态判断”的记录字段，不是系统控制指令。
+- 系统会在 `should_apply=true` 时，把你写出的状态值同步到实时状态；`should_apply=false` 时，只记录你的判断，不修改实时状态。
 - 不要复制原始日志，不要复制大段对话原文。
 - 如果本轮没有执行，`outcome` 设为 `no_execution`，并把 `execution_review.effectiveness` 设为 `none`。
 - 如果本轮发生了执行，只描述最关键的阻塞、尝试过程和最有价值的下一步提示。
 - `summary`、`resolution`、`next_hint` 使用与用户相同的语言。
-- 没有内容时，字符串字段返回 `""`，数组字段返回 `[]`，对象字段返回 `{}`。
+        - 没有内容时，字符串字段返回 `""`，数组字段返回 `[]`，对象字段返回 `{{}}`。
 
 本轮上下文：
+- source_type: {source_type}
 - user_input: {user_input}
 - assistant_output: {output}
 - emotion: {emotion_label}
 - pad: {pad_json}
 - drives: {drives_json}
 - execution: {execution_json}
+
+判断原则：
+- `emotion`、`pad`、`drives` 是当前轮进入反思时的实时状态上下文。
+- 你在填写 `state_update` 时，要基于当前状态上下文与本轮对话过程自己判断。
+- `state_update` 表示你对“本轮结束后，主脑状态应当如何记录”的判断，不是重复回放日志，也不是执行指令。
+- 你可以自行判断当前状态是否需要被标记为稳定、上扬、回落或紧绷。
+- 如果你判断当前状态已经合理，可以 `should_apply=false`，但仍然要把你的判断理由和完整字段写出来。
+- 无论 `should_apply` 是 `true` 还是 `false`，`pad_delta` / `drives_delta` 都必须填写你判断后的状态值。
+- `should_apply=false` 时，通常回填当前状态上下文值，表示当前状态已经合理。
+- `should_apply=true` 时，填写你建议采用的状态值，系统会据此更新实时状态。
 
 返回结构必须符合：
 {{
@@ -108,16 +127,16 @@ class TurnReflectionService:
 - `next_hint`：下一轮主脑最值得记住的承接提示。
 - `user_updates`：本轮新增的用户信息直写候选，没有就返回空数组。
 - `soul_updates`：本轮新增的主脑风格修正直写候选，没有就返回空数组。
-- `state_update`：对 `current_state.md` 的小幅增量更新建议；没有就保留 `should_apply=false` 且增量为空对象。
+- `state_update`：主脑对本轮状态变化的判断记录，必须填写完整结构。
 - `memory_candidates`：确实值得写入长期记忆的候选，没有就返回空数组。
 - `execution_review`：对执行过程的紧凑评价。
 
 `state_update` 内部字段说明：
-- `should_apply`：是否建议应用这次实时状态增量。
-- `confidence`：0 到 1 的小数，只有高置信才应为 true。
-- `reason`：为什么要更新当前实时状态。
-- `pad_delta`：PAD 三个维度的微小增量，没有就 `{}`。
-- `drives_delta`：`social` / `energy` 的微小增量，没有就 `{}`。
+- `should_apply`：是否建议把这次状态值同步到实时状态。
+- `confidence`：0 到 1 的小数。
+- `reason`：为什么这样判断。
+- `pad_delta`：必须始终写出 `pleasure`、`arousal`、`dominance` 三个键；字段名保留为 `delta`，但这里实际填写的是你判断后的状态值，不是增量。
+- `drives_delta`：必须始终写出 `social`、`energy` 两个键；字段名保留为 `delta`，但这里实际填写的是你判断后的状态值，不是增量。
 
 `memory_candidates` 内部字段说明：
 - `audience`：只能是 `brain`、`task`、`shared`。
@@ -129,7 +148,7 @@ class TurnReflectionService:
 - `confidence`：0 到 1 的小数。
 - `stability`：0 到 1 的小数。
 - `tags`：标签列表，没有就 `[]`。
-- `payload`：类型扩展字段，没有就 `{}`。
+        - `payload`：类型扩展字段，没有就 `{{}}`。
 
 示例：
 {{
@@ -145,12 +164,13 @@ class TurnReflectionService:
     "confidence": 0.72,
     "reason": "本轮问题得到解决，当前状态可以小幅提升稳定感与掌控感。",
     "pad_delta": {{
-      "pleasure": 0.06,
-      "arousal": -0.03,
-      "dominance": 0.08
+      "pleasure": 0.66,
+      "arousal": 0.42,
+      "dominance": 0.58
     }},
     "drives_delta": {{
-      "energy": -2.0
+      "social": 62.0,
+      "energy": 84.0
     }}
   }},
   "memory_candidates": [
@@ -194,6 +214,7 @@ class TurnReflectionService:
         output: str,
         emotion: EmotionState,
         execution: ExecutionInfo | None = None,
+        source_type: str = "user_turn",
     ) -> TurnReflectionResult:
         """
         执行逐轮反思
@@ -216,6 +237,7 @@ class TurnReflectionService:
             reflection = self._fallback_turn_reflection(
                 user_input=user_input,
                 output=output,
+                emotion=emotion,
                 execution=normalized_execution,
             )
             return TurnReflectionResult(turn_reflection=reflection, state_snapshot=self.emotion_mgr.snapshot())
@@ -226,6 +248,7 @@ class TurnReflectionService:
             emotion_label=emotion_label,
             pad_json=json.dumps(pad, ensure_ascii=False),
             drives_json=json.dumps(drives, ensure_ascii=False),
+            source_type=str(source_type or "user_turn"),
             execution_json=json.dumps(normalized_execution, ensure_ascii=False),
         )
         try:
@@ -238,6 +261,7 @@ class TurnReflectionService:
             parsed if isinstance(parsed, dict) else {},
             user_input=user_input,
             output=output,
+            emotion=emotion,
             execution=normalized_execution,
         )
         return TurnReflectionResult(turn_reflection=reflection, state_snapshot=self.emotion_mgr.snapshot())
@@ -248,11 +272,13 @@ class TurnReflectionService:
         *,
         user_input: str,
         output: str,
+        emotion: EmotionState,
         execution: dict[str, Any],
     ) -> dict[str, Any]:
         fallback = self._fallback_turn_reflection(
             user_input=user_input,
             output=output,
+            emotion=emotion,
             execution=execution,
         )
         normalized = {
@@ -263,7 +289,10 @@ class TurnReflectionService:
             "next_hint": str(payload.get("next_hint", "") or fallback["next_hint"]).strip(),
             "user_updates": self._normalize_str_list(payload.get("user_updates")),
             "soul_updates": self._normalize_str_list(payload.get("soul_updates")),
-            "state_update": self._normalize_state_update(payload.get("state_update")),
+            "state_update": self._normalize_state_update(
+                payload.get("state_update"),
+                fallback=fallback["state_update"],
+            ),
             "memory_candidates": self._normalize_memory_candidates(payload.get("memory_candidates")) or fallback["memory_candidates"],
             "execution_review": self._normalize_execution_review(
                 payload.get("execution_review"),
@@ -277,6 +306,7 @@ class TurnReflectionService:
         *,
         user_input: str,
         output: str,
+        emotion: EmotionState,
         execution: dict[str, Any],
     ) -> dict[str, Any]:
         invoked = bool(execution.get("invoked"))
@@ -346,13 +376,7 @@ class TurnReflectionService:
             "next_hint": "承接本轮结果继续推进。" if invoked else "自然承接用户当前话题。",
             "user_updates": [],
             "soul_updates": [],
-            "state_update": {
-                "should_apply": False,
-                "confidence": 0.0,
-                "reason": "",
-                "pad_delta": {},
-                "drives_delta": {},
-            },
+            "state_update": self._fallback_state_update(emotion),
             "memory_candidates": memory_candidates,
             "execution_review": execution_review,
         }
@@ -431,54 +455,172 @@ class TurnReflectionService:
         return records[:6]
 
     @staticmethod
-    def _normalize_state_update(value: Any) -> dict[str, Any]:
+    def _normalize_state_update(value: Any, *, fallback: dict[str, Any]) -> dict[str, Any]:
         payload = value if isinstance(value, dict) else {}
-        pad_delta = TurnReflectionService._normalize_delta_map(
-            payload.get("pad_delta"),
+        should_apply = bool(payload.get("should_apply", fallback.get("should_apply", False)))
+        fallback_pad = TurnReflectionService._normalize_state_map(
+            fallback.get("pad_delta"),
+            fallback=fallback.get("pad_delta"),
             allowed=("pleasure", "arousal", "dominance"),
-            max_abs=0.3,
+            minimum=-1.0,
+            maximum=1.0,
         )
-        drives_delta = TurnReflectionService._normalize_delta_map(
-            payload.get("drives_delta"),
+        fallback_drives = TurnReflectionService._normalize_state_map(
+            fallback.get("drives_delta"),
+            fallback=fallback.get("drives_delta"),
             allowed=("social", "energy"),
-            max_abs=20.0,
+            minimum=0.0,
+            maximum=100.0,
         )
-        should_apply = bool(payload.get("should_apply", False)) or bool(pad_delta or drives_delta)
+        pad_delta = TurnReflectionService._normalize_state_map(
+            payload.get("pad_delta"),
+            fallback=fallback_pad,
+            allowed=("pleasure", "arousal", "dominance"),
+            minimum=-1.0,
+            maximum=1.0,
+        )
+        drives_delta = TurnReflectionService._normalize_state_map(
+            payload.get("drives_delta"),
+            fallback=fallback_drives,
+            allowed=("social", "energy"),
+            minimum=0.0,
+            maximum=100.0,
+        )
+        if should_apply and TurnReflectionService._looks_like_legacy_delta_update(payload.get("drives_delta")):
+            pad_delta = TurnReflectionService._apply_state_map_delta(
+                payload.get("pad_delta"),
+                base=fallback_pad,
+                allowed=("pleasure", "arousal", "dominance"),
+                minimum=-1.0,
+                maximum=1.0,
+            )
+            drives_delta = TurnReflectionService._apply_state_map_delta(
+                payload.get("drives_delta"),
+                base=fallback_drives,
+                allowed=("social", "energy"),
+                minimum=0.0,
+                maximum=100.0,
+            )
+        if not should_apply and TurnReflectionService._all_zero_map(pad_delta):
+            pad_delta = TurnReflectionService._normalize_state_map(
+                fallback_pad,
+                fallback=fallback_pad,
+                allowed=("pleasure", "arousal", "dominance"),
+                minimum=-1.0,
+                maximum=1.0,
+            )
+        if not should_apply and TurnReflectionService._all_zero_map(drives_delta):
+            drives_delta = TurnReflectionService._normalize_state_map(
+                fallback_drives,
+                fallback=fallback_drives,
+                allowed=("social", "energy"),
+                minimum=0.0,
+                maximum=100.0,
+            )
         return {
             "should_apply": should_apply,
             "confidence": TurnReflectionService._clamp_float(
-                payload.get("confidence"),
-                default=0.0,
+                payload.get("confidence", fallback.get("confidence")),
+                default=float(fallback.get("confidence", 0.0) or 0.0),
                 minimum=0.0,
                 maximum=1.0,
             ),
-            "reason": str(payload.get("reason", "") or "").strip(),
+            "reason": str(payload.get("reason", fallback.get("reason", "")) or "").strip(),
             "pad_delta": pad_delta,
             "drives_delta": drives_delta,
         }
 
     @staticmethod
-    def _normalize_delta_map(
+    def _normalize_state_map(
         payload: Any,
         *,
+        fallback: Any,
         allowed: tuple[str, ...],
-        max_abs: float,
+        minimum: float,
+        maximum: float,
     ) -> dict[str, float]:
-        if not isinstance(payload, dict):
-            return {}
+        source = payload if isinstance(payload, dict) else {}
+        fallback_map = fallback if isinstance(fallback, dict) else {}
         normalized: dict[str, float] = {}
-        precision = 3 if max_abs <= 1.0 else 2
         for key in allowed:
-            if key not in payload:
+            try:
+                raw_value = source.get(key, fallback_map.get(key, 0.0))
+                value = float(raw_value if raw_value is not None else 0.0)
+            except Exception:
+                value = 0.0
+            value = max(minimum, min(maximum, value))
+            precision = 3 if key in {"pleasure", "arousal", "dominance"} else 2
+            normalized[key] = round(value, precision)
+        return normalized
+
+    @staticmethod
+    def _apply_state_map_delta(
+        payload: Any,
+        *,
+        base: dict[str, float],
+        allowed: tuple[str, ...],
+        minimum: float,
+        maximum: float,
+    ) -> dict[str, float]:
+        source = payload if isinstance(payload, dict) else {}
+        normalized: dict[str, float] = {}
+        for key in allowed:
+            base_value = float(base.get(key, 0.0) or 0.0)
+            if key not in source:
+                value = base_value
+            else:
+                try:
+                    raw_delta = float(source.get(key, 0.0) or 0.0)
+                except Exception:
+                    raw_delta = 0.0
+                value = base_value + raw_delta
+            value = max(minimum, min(maximum, value))
+            precision = 3 if key in {"pleasure", "arousal", "dominance"} else 2
+            normalized[key] = round(value, precision)
+        return normalized
+
+    @staticmethod
+    def _looks_like_legacy_delta_update(drives_payload: Any) -> bool:
+        if not isinstance(drives_payload, dict):
+            return False
+        for key in ("social", "energy"):
+            if key not in drives_payload:
                 continue
             try:
-                value = float(payload.get(key, 0.0) or 0.0)
+                value = float(drives_payload.get(key, 0.0) or 0.0)
             except Exception:
                 continue
-            value = max(-max_abs, min(max_abs, value))
-            if abs(value) > 1e-6:
-                normalized[key] = round(value, precision)
-        return normalized
+            if value < 0.0 or value > 100.0:
+                return True
+        return False
+
+    @staticmethod
+    def _all_zero_map(payload: dict[str, float]) -> bool:
+        return all(abs(float(value)) <= 1e-6 for value in payload.values())
+
+    @staticmethod
+    def _fallback_state_update(emotion: EmotionState) -> dict[str, Any]:
+        pad = emotion.get("pad", {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0})
+        drives = emotion.get("drives", {"social": 50.0, "energy": 50.0})
+        return {
+            "should_apply": False,
+            "confidence": 0.4,
+            "reason": "本轮未判断出需要额外调整，回填当前状态上下文。",
+            "pad_delta": TurnReflectionService._normalize_state_map(
+                pad,
+                fallback=pad,
+                allowed=("pleasure", "arousal", "dominance"),
+                minimum=-1.0,
+                maximum=1.0,
+            ),
+            "drives_delta": TurnReflectionService._normalize_state_map(
+                drives,
+                fallback=drives,
+                allowed=("social", "energy"),
+                minimum=0.0,
+                maximum=100.0,
+            ),
+        }
 
     @staticmethod
     def _normalize_outcome(value: Any, default: str) -> str:

@@ -1,4 +1,4 @@
-"""Central backend, tools, and deep-agent wiring."""
+"""Deep Agent backend wiring for the execution layer."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 from langchain.agents.structured_output import ToolStrategy
 
-from emoticorebot.agent.central.skills import BUILTIN_SKILLS_DIR
-from emoticorebot.types import TaskExecutionResult
+from emoticorebot.execution.skills import BUILTIN_SKILLS_DIR
+from emoticorebot.protocol.task_result import TaskExecutionResult
 from emoticorebot.utils.helpers import ensure_dir
 
 try:
@@ -27,20 +27,20 @@ except Exception:
     InMemorySaver = None
 
 if TYPE_CHECKING:
-    from emoticorebot.agent.central.central import CentralAgentService
+    from emoticorebot.execution.central_executor import CentralExecutor
 
 
 def deep_agents_available() -> bool:
     return create_deep_agent is not None
 
 
-def ensure_agent(service: "CentralAgentService") -> Any:
+def ensure_agent(service: "CentralExecutor") -> Any:
     if service._agent is None:
         service._agent = build_agent(service)
     return service._agent
 
 
-def build_agent(service: "CentralAgentService") -> Any:
+def build_agent(service: "CentralExecutor") -> Any:
     if create_deep_agent is None:
         raise RuntimeError("deepagents is not available")
 
@@ -71,7 +71,7 @@ def build_agent(service: "CentralAgentService") -> Any:
         raise RuntimeError(f"Deep Agents API mismatch: {exc}") from exc
 
 
-def ensure_checkpointer(service: "CentralAgentService") -> Any | None:
+def ensure_checkpointer(service: "CentralExecutor") -> Any | None:
     if service._checkpointer is not None:
         return service._checkpointer
     workspace = Path(service.context.workspace).expanduser().resolve()
@@ -99,11 +99,13 @@ def build_interrupt_on() -> dict[str, Any]:
     }
 
 
-def build_agent_instructions(service: "CentralAgentService") -> str:
+def build_agent_instructions(service: "CentralExecutor") -> str:
     workspace = Path(service.context.workspace).expanduser().resolve()
     return (
         "你是 `central`，负责复杂问题的规划、执行与结果收口。\n"
         f"当前工作区目录是 `{workspace}`。\n\n"
+        "默认文件路径（例如 `/foo.py`）对应当前工作区中的真实文件。\n"
+        "只有 `/state/` 前缀用于会话内临时文件；不要把最终交付物写到 `/state/`。\n\n"
         "## 职责\n"
         "1. 接收委托的问题并执行。\n"
         "2. 必要时调用工具，在单次执行内完成任务。\n"
@@ -125,7 +127,7 @@ def build_agent_instructions(service: "CentralAgentService") -> str:
     )
 
 
-def build_backend(service: "CentralAgentService") -> Any | None:
+def build_backend(service: "CentralExecutor") -> Any | None:
     workspace = Path(service.context.workspace).expanduser().resolve()
     workspace_skills_root = (workspace / "skills").resolve()
     builtin_skills_root = BUILTIN_SKILLS_DIR.resolve()
@@ -137,7 +139,10 @@ def build_backend(service: "CentralAgentService") -> Any | None:
 
     def build_agent_backend(rt: Any) -> Any:
         routes: dict[str, Any] = {
-            "/state/": FilesystemBackend(root_dir=workspace, virtual_mode=True),
+            # Route normal absolute paths like `/foo.py` to the real workspace.
+            # Keep `/state/` as the explicit ephemeral namespace backed by runtime state.
+            "/": FilesystemBackend(root_dir=workspace, virtual_mode=True),
+            "/state/": StateBackend(rt),
         }
         if builtin_skills_root.exists():
             routes["/skills/builtin/"] = FilesystemBackend(
@@ -157,7 +162,7 @@ def build_backend(service: "CentralAgentService") -> Any | None:
     return build_agent_backend
 
 
-def build_tools(service: "CentralAgentService") -> list[Any]:
+def build_tools(service: "CentralExecutor") -> list[Any]:
     tools: list[Any] = []
     stage_tool = build_stage_report_tool(service)
     if stage_tool is not None:
@@ -167,7 +172,7 @@ def build_tools(service: "CentralAgentService") -> list[Any]:
     return tools
 
 
-def build_stage_report_tool(service: "CentralAgentService") -> Any | None:
+def build_stage_report_tool(service: "CentralExecutor") -> Any | None:
     """构建阶段性汇报工具，让 agent 可以主动汇报进展。"""
     try:
         from langchain_core.tools import StructuredTool
@@ -181,18 +186,8 @@ def build_stage_report_tool(service: "CentralAgentService") -> Any | None:
         next_step: str = Field(default="", description="下一步计划，可选")
 
     async def report_stage(summary: str, progress: float = 0.5, next_step: str = "") -> str:
-        system = getattr(service, "_current_system", None)
-        task = getattr(service, "_current_task", None)
-        if system is None or task is None:
-            return "当前无法汇报（未在执行中）"
-
-        text = str(summary or "").strip()
-        if not text:
-            return "汇报内容为空"
-
-        await system.report_progress(
-            task,
-            text,
+        return await service.tool_runtime.report_progress(
+            str(summary or "").strip(),
             event="task.stage",
             producer="central",
             phase="stage",
@@ -201,7 +196,6 @@ def build_stage_report_tool(service: "CentralAgentService") -> Any | None:
                 "next_step": str(next_step or "").strip(),
             },
         )
-        return f"已汇报: {text}"
 
     return StructuredTool.from_function(
         coroutine=report_stage,
@@ -214,7 +208,7 @@ def build_stage_report_tool(service: "CentralAgentService") -> Any | None:
     )
 
 
-def build_registry_tools(service: "CentralAgentService", names: list[str]) -> list[Any]:
+def build_registry_tools(service: "CentralExecutor", names: list[str]) -> list[Any]:
     if service.tools is None:
         return []
 
@@ -226,7 +220,7 @@ def build_registry_tools(service: "CentralAgentService", names: list[str]) -> li
     return built
 
 
-def build_registry_tool(service: "CentralAgentService", name: str) -> Any | None:
+def build_registry_tool(service: "CentralExecutor", name: str) -> Any | None:
     if service.tools is None:
         return None
 
@@ -283,7 +277,7 @@ def json_schema_to_python_type(schema: dict[str, Any] | None) -> Any:
     return str
 
 
-def build_skill_paths(service: "CentralAgentService", *, virtual_mode: bool = False) -> list[str]:
+def build_skill_paths(service: "CentralExecutor", *, virtual_mode: bool = False) -> list[str]:
     workspace = getattr(service.context, "workspace", None)
     paths: list[str] = []
     workspace_skills: Path | None = None

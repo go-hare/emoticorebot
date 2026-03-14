@@ -10,8 +10,8 @@ It keeps `brain` as the only outward-facing subject, delegates complex work to a
 
 Detailed architecture design:
 
-- [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md)
-- [docs/FIELDS.zh-CN.md](docs/FIELDS.zh-CN.md)
+- [docs/non-compatible-runtime-refactor.md](docs/non-compatible-runtime-refactor.md)
+- [docs/non-compatible-runtime-refactor.zh-CN.md](docs/non-compatible-runtime-refactor.zh-CN.md)
 
 ---
 
@@ -114,6 +114,7 @@ Only `brain` can terminate the turn and produce the user-facing message.
 | Component | Role |
 |------|------|
 | `brain` | Only subject. Interprets intent, controls central, preserves relationship continuity, and produces the final user-facing reply. |
+| `RuntimeHost` | Top-level assembly host that wires gateway, brain, runtime, reflection, and background services together. |
 | `central` | Deep Agents-based execution layer. Handles planning, tools, skills, and long-running complex tasks. |
 | `reflection` | Async post-turn process. Produces `turn_reflection` every turn and `deep_reflection` on demand or by periodic signal. |
 
@@ -218,7 +219,7 @@ The current implementation no longer depends on an outer router layer. Turn plan
 - retrieves recent `cognitive_event` context
 - asks `brain` to decide whether to answer directly or delegate to `central`
 
-**`central` prompt construction (`CentralAgentService._build_agent_instructions`)**
+**`central` prompt construction (`emoticorebot.execution.backend.build_agent_instructions`)**
 
 - enforces the `brain -> central` contract
 - injects workspace / builtin skill routes and skill summaries
@@ -498,54 +499,47 @@ emoticorebot channels status  # Show channel connection status
 
 ```text
 emoticorebot/
-├── agent/                # brain / central / reflection / tool
-│   ├── brain.py          #   BrainService
-│   ├── context.py        #   Brain prompt and memory context builder
-│   ├── model.py          #   LLMFactory
-│   ├── state.py          #   TurnState / BrainState / TaskState
-│   ├── central/
-│   │   ├── central.py    #   CentralAgentService
-│   │   ├── skills.py     #   Builtin/workspace skill loading
-│   │   └── subagent/     #   Specialized agent landing area
-│   ├── reflection/
-│   │   ├── turn.py       #   turn_reflection
-│   │   ├── deep.py       #   deep_reflection
-│   │   ├── memory.py     #   reflection -> memory persistence
-│   │   └── skill.py      #   skill crystallization helpers
-│   └── tool/
-│       ├── manager.py    #   Tool registry / execution wiring
-│       └── mcp.py        #   MCP integration
-├── memory/               # Layered memory implementation
-│   ├── structured_stores.py
-│   ├── stateful_stores.py
-│   ├── extractor.py
-│   ├── retriever.py
-│   ├── schema.py
-│   ├── jsonl_store.py
-│   └── memory_facade.py
-├── background/           # Background daemon + periodic reflection entrypoints
-│   ├── subconscious.py   #   SubconsciousDaemon (decay / reflect / proactive)
-│   ├── reflection.py     #   ReflectionEngine (periodic deep_reflection bridge)
-│   ├── heartbeat.py      #   HeartbeatService (two-phase task runner)
-├── tasks/                # Shared task context helpers
-│   └── task_context.py
-├── tools/                # Built-in tool implementations
-├── channels/             # Channel adapters (Telegram, Discord, …)
-├── providers/            # LLM provider utilities
-├── runtime/              # RuntimeEventBus + EmoticoreRuntime + turn_engine
+├── adapters/            # Conversation gateway / outbound dispatch
+├── agent/
+│   ├── context.py       # Brain prompt and memory context builder
+│   ├── reflection/      # Reflection coordination and memory persistence
+│   └── tool/            # Tool registry / execution wiring
+├── background/          # Background daemon + periodic reflection entrypoints
+├── bootstrap.py         # RuntimeHost, top-level assembly host
+├── brain/
+│   ├── companion_brain.py
+│   ├── decision_packet.py
+│   └── event_narrator.py
+├── execution/
+│   ├── backend.py
+│   ├── central_executor.py
+│   ├── executor_context.py
+│   ├── skills.py
+│   ├── stream.py
+│   └── tool_runtime.py
+├── protocol/            # Typed runtime submissions / events / task results
+├── runtime/
 │   ├── event_bus.py
-│   ├── runtime.py
-│   ├── turn_engine.py
-│   ├── turn_persistence.py
-│   └── execution_control.py
-├── cron/                 # Cron scheduler service
-├── session/              # Session persistence and recovery
-├── models/               # Shared data models (EmotionState, …)
-├── config/               # Pydantic config schema
-├── skills/               # Built-in skill definitions (Markdown)
-├── templates/            # Onboarding file templates
-├── utils/                # Shared utilities
-└── cli/                  # CLI entrypoints (Typer)
+│   ├── event_loop.py
+│   ├── input_gate.py
+│   ├── manager.py
+│   ├── running_task.py
+│   ├── session_runtime.py
+│   └── task_state.py
+├── session/
+│   ├── history_store.py
+│   └── thread_store.py
+├── memory/
+├── tools/
+├── channels/
+├── providers/
+├── cron/
+├── models/
+├── config/
+├── skills/
+├── templates/
+├── utils/
+└── cli/
 ```
 
 ---

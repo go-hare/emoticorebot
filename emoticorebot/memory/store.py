@@ -26,7 +26,7 @@ TASK_EXPERIENCE_TYPES = {
     "error_pattern",
     "workflow_pattern",
 }
-SKILL_HINT_TYPES = {"skill_hint"}
+SKILL_HINT_TYPES = {"skill_hint", "skill"}
 
 
 @dataclass(frozen=True)
