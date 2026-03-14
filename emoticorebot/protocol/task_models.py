@@ -79,6 +79,7 @@ class TaskSpec(TypedDict, total=False):
     memory_bundle_ids: list[str]
     skill_hints: list[str]
     media: list[str]
+    timeout_s: float
     channel: str
     chat_id: str
     session_id: str

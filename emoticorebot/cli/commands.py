@@ -3,9 +3,11 @@
 import asyncio
 import os
 import signal
+from contextlib import nullcontext
 from pathlib import Path
 import select
 import sys
+from uuid import uuid4
 
 import typer
 from rich.console import Console
@@ -105,6 +107,29 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
     console.print(f"[cyan]{__logo__} emoticorebot[/cyan]")
     console.print(body)
     console.print()
+
+
+def _interactive_console() -> Console:
+    """Build a Rich console bound to the current stdout proxy used by prompt_toolkit."""
+    return Console(file=sys.stdout, force_terminal=True, color_system="auto")
+
+
+def _print_agent_response_interactive(response: str, render_markdown: bool) -> None:
+    """Render assistant output while prompt_toolkit may still own the terminal."""
+    content = response or ""
+    with patch_stdout():
+        interactive_console = _interactive_console()
+        body = Markdown(content) if render_markdown else Text(content)
+        interactive_console.print()
+        interactive_console.print(f"[cyan]{__logo__} emoticorebot[/cyan]")
+        interactive_console.print(body)
+        interactive_console.print()
+
+
+def _print_interactive_line(text: str) -> None:
+    """Print a single line safely during interactive prompt redraws."""
+    with patch_stdout():
+        _interactive_console().print(text)
 
 
 def _is_exit_command(command: str) -> bool:
@@ -391,9 +416,8 @@ def agent(
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
-    def _thinking_ctx():
-        if logs:
-            from contextlib import nullcontext
+    def _thinking_ctx(*, interactive: bool = False):
+        if logs or interactive:
             return nullcontext()
         # Animated spinner is safe to use with prompt_toolkit input handling
         return console.status("[dim]emoticorebot is thinking...[/dim]", spinner="dots")
@@ -406,55 +430,6 @@ def agent(
             return
         console.print(f"  [dim]↳ {content}[/dim]")
 
-    async def _consume_cli_outbound_message() -> bool:
-        try:
-            msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-        except asyncio.TimeoutError:
-            return False
-
-        if msg.metadata.get("_progress"):
-            is_tool_hint = msg.metadata.get("_tool_hint", False)
-            ch = agent_loop.channels_config
-            if ch and is_tool_hint and not ch.send_tool_hints:
-                return True
-            if ch and not is_tool_hint and not ch.send_progress:
-                return True
-            console.print(f"  [dim]↳ {msg.content}[/dim]")
-            return True
-
-        if msg.content:
-            console.print()
-            _print_agent_response(msg.content, render_markdown=markdown)
-        return True
-
-    async def _follow_session_tasks_once() -> None:
-        runtime = agent_loop.runtime_manager.get(session_id)
-        if runtime is None or not runtime.active_tasks():
-            return
-
-        console.print("  [dim]↳ 检测到异步任务，继续监听当前 session 的进展...[/dim]")
-        loop = asyncio.get_running_loop()
-        idle_since: float | None = None
-
-        while True:
-            runtime = agent_loop.runtime_manager.get(session_id)
-            active = runtime is not None and bool(runtime.active_tasks())
-
-            delivered = await _consume_cli_outbound_message()
-            if delivered:
-                idle_since = None
-                continue
-
-            if active:
-                continue
-
-            now = loop.time()
-            if idle_since is None:
-                idle_since = now
-                continue
-            if now - idle_since >= 0.5:
-                break
-
     if message:
         # Single message mode — direct call, no bus needed
         async def run_once():
@@ -462,7 +437,6 @@ def agent(
                 with _thinking_ctx():
                     response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
                 _print_agent_response(response, render_markdown=markdown)
-                await _follow_session_tasks_once()
             finally:
                 await agent_loop.close_mcp()
 
@@ -490,8 +464,18 @@ def agent(
             turn_done = asyncio.Event()
             turn_done.set()
             turn_response: list[str] = []
+            pending_turn_message_id: str | None = None
+
+            def _matches_pending_turn(msg: InboundMessage | object) -> bool:
+                if not pending_turn_message_id:
+                    return False
+                outbound_message_id = str(getattr(msg, "reply_to", "") or "").strip()
+                metadata = getattr(msg, "metadata", {}) or {}
+                origin_message_id = str(metadata.get("message_id", "") or "").strip()
+                return pending_turn_message_id in {outbound_message_id, origin_message_id}
 
             async def _consume_outbound():
+                nonlocal pending_turn_message_id
                 while True:
                     try:
                         msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
@@ -503,14 +487,17 @@ def agent(
                             elif ch and not is_tool_hint and not ch.send_progress:
                                 pass
                             else:
-                                console.print(f"  [dim]↳ {msg.content}[/dim]")
+                                _print_interactive_line(f"  [dim]↳ {msg.content}[/dim]")
                         elif not turn_done.is_set():
-                            if msg.content:
-                                turn_response.append(msg.content)
-                            turn_done.set()
+                            if _matches_pending_turn(msg):
+                                if msg.content:
+                                    turn_response.append(msg.content)
+                                pending_turn_message_id = None
+                                turn_done.set()
+                            elif msg.content:
+                                _print_agent_response_interactive(msg.content, render_markdown=markdown)
                         elif msg.content:
-                            console.print()
-                            _print_agent_response(msg.content, render_markdown=markdown)
+                            _print_agent_response_interactive(msg.content, render_markdown=markdown)
                     except asyncio.TimeoutError:
                         continue
                     except asyncio.CancelledError:
@@ -534,24 +521,29 @@ def agent(
 
                         turn_done.clear()
                         turn_response.clear()
+                        pending_turn_message_id = f"msg_cli_{uuid4().hex[:16]}"
 
                         await bus.publish_inbound(InboundMessage(
                             channel=cli_channel,
                             sender_id="user",
                             chat_id=cli_chat_id,
                             content=user_input,
+                            metadata={"message_id": pending_turn_message_id},
                         ))
 
-                        with _thinking_ctx():
+                        with _thinking_ctx(interactive=True):
                             await turn_done.wait()
 
                         if turn_response:
                             _print_agent_response(turn_response[0], render_markdown=markdown)
+                        pending_turn_message_id = None
                     except KeyboardInterrupt:
+                        pending_turn_message_id = None
                         _restore_terminal()
                         console.print("\nGoodbye!")
                         break
                     except EOFError:
+                        pending_turn_message_id = None
                         _restore_terminal()
                         console.print("\nGoodbye!")
                         break

@@ -34,7 +34,7 @@ class TaskEventLoop:
         memory_window: int,
         new_message_id: Callable[[], str],
         schedule_turn_reflection: Callable[..., None],
-        session_lock_for: Callable[[str], asyncio.Lock],
+        state_lock_for: Callable[[str], asyncio.Lock],
     ):
         self.runtime_manager = runtime_manager
         self.thread_store = thread_store
@@ -44,7 +44,7 @@ class TaskEventLoop:
         self.memory_window = memory_window
         self._new_message_id = new_message_id
         self._schedule_turn_reflection = schedule_turn_reflection
-        self._session_lock_for = session_lock_for
+        self._state_lock_for = state_lock_for
         self._task_consumers: dict[str, asyncio.Task] = {}
 
     def ensure_consumer(self, session_id: str, runtime=None) -> None:
@@ -72,68 +72,78 @@ class TaskEventLoop:
             event = await runtime.to_main_queue.get()
             should_exit = False
             try:
-                async with self._session_lock_for(session_id):
-                    channel = str(event.get("channel", "") or "").strip()
-                    chat_id = str(event.get("chat_id", "") or "").strip()
-                    if not channel or not chat_id:
+                channel = str(event.get("channel", "") or "").strip()
+                chat_id = str(event.get("chat_id", "") or "").strip()
+                if not channel or not chat_id:
+                    async with self._state_lock_for(session_id):
                         thread = self.thread_store.get(session_id)
                         if thread is not None:
                             await self._handle_task_event_internal(thread, event, session_id)
-                    else:
-                        thread = self.thread_store.get(session_id)
-                        history = (
-                            thread.get_history(max_messages=self.memory_window, include_task_context=False)
-                            if thread is not None
-                            else []
-                        )
-                        pad = {
-                            "pleasure": float(self.emotion_mgr.pad.pleasure),
-                            "arousal": float(self.emotion_mgr.pad.arousal),
-                            "dominance": float(self.emotion_mgr.pad.dominance),
-                        }
-                        brain_packet = await self.event_narrator.handle_task_event(
-                            event=event,
-                            history=history,
-                            emotion=self.emotion_mgr.get_emotion_label(),
-                            pad=pad,
-                            task_system=runtime,
-                            channel=channel,
-                            chat_id=chat_id,
-                            session_id=session_id,
-                        )
-                        if brain_packet:
-                            content = str(brain_packet.get("final_message", "") or "").strip()
-                            if content:
-                                task_id = str(event.get("task_id", "") or "").strip()
-                                origin_message_id = str(event.get("message_id", "") or "").strip()
-                                await self.dispatcher.publish(
-                                    OutboundMessage(
-                                        channel=channel,
-                                        chat_id=chat_id,
-                                        content=content,
-                                        reply_to=origin_message_id or None,
-                                        metadata={
-                                            "task_id": task_id,
-                                            "task_event": str(event.get("type", "") or "").strip(),
-                                            "producer": "session_runtime",
-                                            "message_id": origin_message_id,
-                                        },
-                                    )
-                                )
+                        should_exit = runtime.is_idle()
+                        if should_exit and self.runtime_manager.get(session_id) is runtime:
+                            self.runtime_manager.remove(session_id)
+                    if should_exit:
+                        break
+                    continue
 
-                                if thread is not None:
-                                    await self._persist_and_reflect_routed_event(
-                                        thread=thread,
-                                        event=event,
-                                        session_id=session_id,
-                                        content=content,
-                                        brain_packet=dict(brain_packet),
-                                        channel=channel,
-                                        chat_id=chat_id,
-                                    )
-                    should_exit = runtime.is_idle()
-                    if should_exit and self.runtime_manager.get(session_id) is runtime:
-                        self.runtime_manager.remove(session_id)
+                async with self._state_lock_for(session_id):
+                    thread = self.thread_store.get(session_id)
+                    history = (
+                        thread.get_history(max_messages=self.memory_window, include_task_context=False)
+                        if thread is not None
+                        else []
+                    )
+
+                pad = {
+                    "pleasure": float(self.emotion_mgr.pad.pleasure),
+                    "arousal": float(self.emotion_mgr.pad.arousal),
+                    "dominance": float(self.emotion_mgr.pad.dominance),
+                }
+                brain_packet = await self.event_narrator.handle_task_event(
+                    event=event,
+                    history=history,
+                    emotion=self.emotion_mgr.get_emotion_label(),
+                    pad=pad,
+                    task_system=runtime,
+                    channel=channel,
+                    chat_id=chat_id,
+                    session_id=session_id,
+                )
+                if brain_packet:
+                    content = str(brain_packet.get("final_message", "") or "").strip()
+                    if content:
+                        task_id = str(event.get("task_id", "") or "").strip()
+                        origin_message_id = str(event.get("message_id", "") or "").strip()
+                        await self.dispatcher.publish(
+                            OutboundMessage(
+                                channel=channel,
+                                chat_id=chat_id,
+                                content=content,
+                                reply_to=origin_message_id or None,
+                                metadata={
+                                    "task_id": task_id,
+                                    "task_event": str(event.get("type", "") or "").strip(),
+                                    "producer": "session_runtime",
+                                    "message_id": origin_message_id,
+                                },
+                            )
+                        )
+
+                        async with self._state_lock_for(session_id):
+                            latest_thread = self.thread_store.get_or_create(session_id)
+                            await self._persist_and_reflect_routed_event(
+                                thread=latest_thread,
+                                event=event,
+                                session_id=session_id,
+                                content=content,
+                                brain_packet=dict(brain_packet),
+                                channel=channel,
+                                chat_id=chat_id,
+                            )
+
+                should_exit = runtime.is_idle()
+                if should_exit and self.runtime_manager.get(session_id) is runtime:
+                    self.runtime_manager.remove(session_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

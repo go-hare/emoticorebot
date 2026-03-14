@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -19,6 +20,40 @@ from emoticorebot.utils.llm_utils import blocks_to_llm_content, extract_message_
 
 class CompanionBrain:
     """Handles user-turn decisions in the companion layer."""
+
+    _TASK_VERB_PATTERN = re.compile(
+        r"(这是一个复杂任务|写|创建|新建|生成|修改|更新|编辑|新增|添加|删除|重构|修复|运行|执行|测试|安装|查找|搜索|"
+        r"create|write|modify|update|edit|add|delete|refactor|fix|run|test|install|search)",
+        re.IGNORECASE,
+    )
+    _CODE_SIGNAL_PATTERN = re.compile(
+        r"(```|`[^`]+`|"
+        r"\bdef\b|\bclass\b|\bfunction\b|\breturn\b|"
+        r"\bpytest\b|\bpip\b|\bnpm\b|\buv\b|\bpython\b|"
+        r"[A-Za-z0-9_\-./\\\\]+\.(py|js|ts|tsx|jsx|json|yaml|yml|md|txt|toml|ini|cfg|sh|ps1))",
+        re.IGNORECASE,
+    )
+    _STATUS_QUERY_PATTERN = re.compile(
+        r"(创建好了吗|创建完了吗|好了吗|好了没|完成了吗|完成没|做完了吗|进度|结果呢|怎么样了|还在吗|status|progress|done|finished)",
+        re.IGNORECASE,
+    )
+    _GREETING_PATTERN = re.compile(
+        r"^(你好|您好|嗨|hi|hello|哈喽|在吗|在不在|早上好|中午好|晚上好)[!！。\.~～\s]*$",
+        re.IGNORECASE,
+    )
+    _WAITING_TASK_CANCEL_PATTERN = re.compile(
+        r"(取消|不用了|先不用|算了|停下|停止|stop|cancel)",
+        re.IGNORECASE,
+    )
+    _WAITING_TASK_QUESTION_PATTERN = re.compile(
+        r"(\?|？|什么|为啥|为什么|怎么|咋|如何|哪里|哪儿|哪个|谁|吗|呢|么|是否|能不能|可不可以|"
+        r"帮我|请|查一下|看一下|告诉我|what|why|how|when|where|who)",
+        re.IGNORECASE,
+    )
+    _FILE_REF_PATTERN = re.compile(
+        r"([A-Za-z0-9_\-./\\\\]+\.(py|js|ts|tsx|jsx|json|yaml|yml|md|txt|toml|ini|cfg|sh|ps1))",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -48,30 +83,19 @@ class CompanionBrain:
             if task_system is None:
                 return "SessionRuntime 未初始化"
 
-            task_id = f"task_{uuid4().hex[:12]}"
-            title = str(task_title or "").strip() or task_description[:20]
-
-            history = current_context.get("history", [])
-            media = current_context.get("media", [])
-            message_id = current_context.get("message_id", "")
-            task_spec: TaskSpec = {
-                "task_id": task_id,
-                "origin_message_id": str(message_id or "").strip(),
-                "title": title,
-                "request": str(task_description or "").strip(),
-                "history": [dict(item) for item in list(history or []) if isinstance(item, dict)],
-                "task_context": {"history_context": history_context} if history_context else {},
-                "history_context": str(history_context or "").strip(),
-                "media": [str(item).strip() for item in list(media or []) if str(item).strip()],
-                "channel": str(channel or "").strip(),
-                "chat_id": str(chat_id or "").strip(),
-                "session_id": str(session_id or "").strip(),
-            }
-
-            await task_system.create_central_task(task_spec)
-            current_context["tool_action"] = "create_task"
-            current_context["task_spec"] = dict(task_spec)
-            return f"已创建任务「{title}」({task_id})，正在处理中"
+            task_spec = await self._create_session_task(
+                task_system=task_system,
+                current_context=current_context,
+                request=task_description,
+                title=task_title,
+                history_context=history_context,
+                channel=channel,
+                chat_id=chat_id,
+                session_id=session_id,
+            )
+            task_id = str(task_spec.get("task_id", "") or "").strip()
+            resolved_title = str(task_spec.get("title", "") or "").strip()
+            return f"已创建任务「{resolved_title}」({task_id})，正在处理中"
 
         @tool
         async def fill_task(answer: str, task_id: str = "") -> str:
@@ -161,6 +185,335 @@ class CompanionBrain:
             return task_system.get_tasks_summary()
 
         return [create_task, fill_task, cancel_task, query_task]
+
+    @staticmethod
+    def _derive_task_title(request: str, explicit_title: str = "") -> str:
+        title = str(explicit_title or "").strip()
+        if title:
+            return title
+        text = str(request or "").strip()
+        if not text:
+            return "执行任务"
+        file_match = re.search(
+            r"([A-Za-z0-9_\-./\\\\]+\.(py|js|ts|tsx|jsx|json|yaml|yml|md|txt|toml|ini|cfg|sh|ps1))",
+            text,
+            re.IGNORECASE,
+        )
+        file_name = file_match.group(1) if file_match else ""
+        action = ""
+        if re.search(r"(修改|更新|编辑|update|modify|edit)", text, re.IGNORECASE):
+            action = "修改"
+        elif re.search(r"(写|创建|新建|生成|新增|添加|create|write|add)", text, re.IGNORECASE):
+            action = "创建"
+        elif re.search(r"(删除|delete)", text, re.IGNORECASE):
+            action = "删除"
+        elif re.search(r"(运行|执行|run|execute)", text, re.IGNORECASE):
+            action = "执行"
+        elif re.search(r"(测试|test)", text, re.IGNORECASE):
+            action = "测试"
+        if action and file_name:
+            return f"{action} {file_name}"
+        return text[:32]
+
+    @classmethod
+    def _extract_file_refs(cls, text: str) -> list[str]:
+        refs: list[str] = []
+        for match in cls._FILE_REF_PATTERN.finditer(str(text or "")):
+            value = str(match.group(1) or "").strip().lower()
+            if value and value not in refs:
+                refs.append(value)
+        return refs
+
+    @classmethod
+    def _iter_task_snapshots(cls, task_system: SessionRuntime | None) -> list[dict[str, Any]]:
+        if task_system is None:
+            return []
+        snapshots: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for task in task_system.active_tasks():
+            snapshot = task.snapshot()
+            task_id = str(snapshot.get("task_id", "") or "").strip()
+            if task_id and task_id not in seen:
+                snapshots.append(snapshot)
+                seen.add(task_id)
+
+        for snapshot in reversed(task_system.recent_task_snapshots()):
+            task_id = str(snapshot.get("task_id", "") or "").strip()
+            if task_id and task_id not in seen:
+                snapshots.append(snapshot)
+                seen.add(task_id)
+        return snapshots
+
+    @classmethod
+    def _find_relevant_task_snapshot(
+        cls,
+        user_input: str,
+        task_system: SessionRuntime | None,
+        *,
+        active_only: bool = False,
+    ) -> dict[str, Any] | None:
+        if task_system is None:
+            return None
+
+        snapshots: list[dict[str, Any]]
+        if active_only:
+            snapshots = [task.snapshot() for task in task_system.active_tasks()]
+        else:
+            snapshots = cls._iter_task_snapshots(task_system)
+        if not snapshots:
+            return None
+
+        refs = cls._extract_file_refs(user_input)
+        if refs:
+            for snapshot in snapshots:
+                haystacks = [
+                    str(snapshot.get("title", "") or "").lower(),
+                    str((snapshot.get("params") or {}).get("request", "") or "").lower(),
+                    str((snapshot.get("params") or {}).get("title", "") or "").lower(),
+                    str(snapshot.get("summary", "") or "").lower(),
+                ]
+                if any(ref in haystack for ref in refs for haystack in haystacks if haystack):
+                    return snapshot
+
+        normalized = " ".join(str(user_input or "").lower().split())
+        for snapshot in snapshots:
+            request = " ".join(str((snapshot.get("params") or {}).get("request", "") or "").lower().split())
+            title = " ".join(str(snapshot.get("title", "") or "").lower().split())
+            if normalized and ((request and normalized in request) or (title and normalized in title)):
+                return snapshot
+
+        if len(snapshots) == 1:
+            return snapshots[0]
+        return None
+
+    @classmethod
+    def _is_task_status_query(cls, user_input: str, task_system: SessionRuntime | None) -> bool:
+        if task_system is None:
+            return False
+        text = str(user_input or "").strip()
+        if not text:
+            return False
+        if not cls._STATUS_QUERY_PATTERN.search(text):
+            return False
+        return bool(task_system.active_tasks() or task_system.latest_task_snapshot())
+
+    @staticmethod
+    def _build_task_status_reply(
+        snapshot: dict[str, Any] | None,
+        *,
+        multiple_active_summary: str = "",
+        message_id: str = "",
+    ) -> BrainControlPacket:
+        if snapshot is None:
+            final_message = multiple_active_summary or "当前没有正在执行的任务。"
+            return {
+                "message_id": str(message_id or "").strip(),
+                "intent": "query_task_status",
+                "working_hypothesis": "用户在询问任务状态。",
+                "task_action": "none",
+                "task_reason": "直接返回当前任务状态即可。",
+                "final_decision": "answer",
+                "final_message": final_message,
+                "task_brief": "",
+                "execution_summary": "返回任务状态。",
+                "notify_user": True,
+                "retrieval_query": "",
+                "retrieval_focus": [],
+                "retrieved_memory_ids": [],
+            }
+
+        title = str(snapshot.get("title", "") or snapshot.get("task_id", "") or "任务").strip()
+        status = str(snapshot.get("status", "") or "").strip()
+        summary = str(snapshot.get("summary", "") or "").strip()
+        error = str(snapshot.get("error", "") or "").strip()
+        stage_info = str(snapshot.get("stage_info", "") or "").strip()
+        recommended_action = str(snapshot.get("recommended_action", "") or "").strip()
+        input_request = snapshot.get("input_request") if isinstance(snapshot.get("input_request"), dict) else {}
+        question = str(input_request.get("question", "") or "").strip()
+
+        if status == "done":
+            final_message = f"「{title}」已经完成。{summary or '处理完成。'}"
+        elif status == "failed":
+            final_message = f"「{title}」执行失败了。{error or summary or '暂时没有更多错误信息。'}"
+        elif status == "waiting_input":
+            final_message = f"「{title}」现在卡在等补充信息。{question or recommended_action or '请补充后再继续。'}"
+        elif multiple_active_summary:
+            final_message = multiple_active_summary
+        else:
+            final_message = f"「{title}」还在处理中。当前进度：{stage_info or '正在执行内部任务'}。"
+
+        return {
+            "message_id": str(message_id or "").strip(),
+            "intent": "query_task_status",
+            "working_hypothesis": "用户在询问任务状态。",
+            "task_action": "none",
+            "task_reason": "直接返回当前任务状态即可。",
+            "final_decision": "answer",
+            "final_message": final_message,
+            "task_brief": "",
+            "execution_summary": "返回任务状态。",
+            "notify_user": True,
+            "retrieval_query": "",
+            "retrieval_focus": [],
+            "retrieved_memory_ids": [],
+        }
+
+    @classmethod
+    def _is_simple_greeting(cls, user_input: str) -> bool:
+        return bool(cls._GREETING_PATTERN.match(str(user_input or "").strip()))
+
+    @staticmethod
+    def _build_greeting_reply(
+        *,
+        message_id: str = "",
+        task_system: SessionRuntime | None = None,
+    ) -> BrainControlPacket:
+        active_tasks = task_system.active_tasks() if task_system is not None else []
+        if active_tasks:
+            latest = active_tasks[-1].snapshot()
+            title = str(latest.get("title", "") or latest.get("task_id", "") or "任务").strip()
+            stage = str(latest.get("stage_info", "") or "").strip() or "正在处理中"
+            final_message = f"你好呀，我在。顺便说一下，「{title}」还在处理中，当前进度：{stage}。你可以继续说，我这边不会断。"
+        else:
+            final_message = "你好呀，我在。你现在想聊什么，或者要我继续处理什么？"
+        return {
+            "message_id": str(message_id or "").strip(),
+            "intent": "simple_greeting",
+            "working_hypothesis": "用户在进行轻量打招呼。",
+            "task_action": "none",
+            "task_reason": "轻量寒暄直接回复即可，不需要调用主脑工具链。",
+            "final_decision": "answer",
+            "final_message": final_message,
+            "task_brief": "",
+            "execution_summary": "回复用户问候。",
+            "notify_user": True,
+            "retrieval_query": "",
+            "retrieval_focus": [],
+            "retrieved_memory_ids": [],
+        }
+
+    @classmethod
+    def _looks_like_waiting_task_answer(cls, user_input: str, task_system: SessionRuntime | None) -> bool:
+        if task_system is None or task_system.waiting_task() is None:
+            return False
+        text = str(user_input or "").strip()
+        if not text or text.startswith("/"):
+            return False
+        if cls._WAITING_TASK_CANCEL_PATTERN.search(text):
+            return False
+        if cls._is_simple_greeting(text):
+            return False
+        if cls._is_task_status_query(text, task_system):
+            return False
+        if cls._should_fast_dispatch_task(text, task_system):
+            return False
+        if cls._WAITING_TASK_QUESTION_PATTERN.search(text):
+            return False
+        return True
+
+    @staticmethod
+    def _build_waiting_task_fill_reply(
+        *,
+        waiting_task,
+        answer: str,
+        message_id: str = "",
+        channel: str = "",
+        chat_id: str = "",
+        session_id: str = "",
+    ) -> BrainControlPacket:
+        task_spec: TaskSpec = {
+            "task_id": str(getattr(waiting_task, "task_id", "") or "").strip(),
+            "origin_message_id": str(message_id or "").strip(),
+            "title": str(getattr(waiting_task, "title", "") or "").strip(),
+            "request": str(answer or "").strip(),
+            "channel": str(channel or "").strip(),
+            "chat_id": str(chat_id or "").strip(),
+            "session_id": str(session_id or "").strip(),
+        }
+        params = getattr(waiting_task, "params", None)
+        if isinstance(params, dict):
+            for key in (
+                "goal",
+                "expected_output",
+                "history_context",
+                "constraints",
+                "success_criteria",
+                "memory_bundle_ids",
+                "skill_hints",
+                "media",
+                "history",
+                "task_context",
+            ):
+                value = params.get(key)
+                if value not in (None, "", [], {}):
+                    task_spec[key] = value
+
+        title = str(task_spec.get("title", "") or task_spec.get("task_id", "") or "任务").strip()
+        return {
+            "message_id": str(message_id or "").strip(),
+            "intent": "fill_waiting_task",
+            "working_hypothesis": "当前有任务在等待补充信息，用户这句话是在直接补充所需内容。",
+            "task_action": "fill_task",
+            "task_reason": "直接将补充信息恢复给等待中的任务，避免主脑重复判断。",
+            "final_decision": "continue",
+            "final_message": f"收到，我继续处理「{title}」，有结果再告诉你。",
+            "task_brief": f"已补充等待任务：{title}",
+            "task": task_spec,
+            "execution_summary": "已将用户补充信息提交给等待任务，继续异步执行。",
+            "notify_user": True,
+            "retrieval_query": "",
+            "retrieval_focus": [],
+            "retrieved_memory_ids": [],
+        }
+
+    @staticmethod
+    def _should_fast_dispatch_task(user_input: str, task_system: SessionRuntime | None) -> bool:
+        if task_system is None or task_system.waiting_task() is not None:
+            return False
+        text = str(user_input or "").strip()
+        if not text:
+            return False
+        return bool(
+            CompanionBrain._TASK_VERB_PATTERN.search(text)
+            and CompanionBrain._CODE_SIGNAL_PATTERN.search(text)
+        )
+
+    async def _create_session_task(
+        self,
+        *,
+        task_system: SessionRuntime,
+        current_context: dict[str, Any],
+        request: str,
+        title: str = "",
+        history_context: str = "",
+        channel: str = "",
+        chat_id: str = "",
+        session_id: str = "",
+    ) -> TaskSpec:
+        task_id = f"task_{uuid4().hex[:12]}"
+        task_title = self._derive_task_title(request, title)
+        history = current_context.get("history", [])
+        media = current_context.get("media", [])
+        message_id = current_context.get("message_id", "")
+        task_spec: TaskSpec = {
+            "task_id": task_id,
+            "origin_message_id": str(message_id or "").strip(),
+            "title": task_title,
+            "request": str(request or "").strip(),
+            "history": [dict(item) for item in list(history or []) if isinstance(item, dict)],
+            "task_context": {"history_context": history_context} if history_context else {},
+            "history_context": str(history_context or "").strip(),
+            "media": [str(item).strip() for item in list(media or []) if str(item).strip()],
+            "channel": str(channel or "").strip(),
+            "chat_id": str(chat_id or "").strip(),
+            "session_id": str(session_id or "").strip(),
+        }
+
+        await task_system.create_central_task(task_spec)
+        current_context["tool_action"] = "create_task"
+        current_context["task_spec"] = dict(task_spec)
+        return task_spec
 
     def _build_state_modifier(
         self,
@@ -317,6 +670,70 @@ class CompanionBrain:
             "tool_action": "none",
             "task_spec": None,
         }
+
+        if self._is_simple_greeting(user_input):
+            return self._build_greeting_reply(message_id=message_id, task_system=task_system)
+
+        if self._is_task_status_query(user_input, task_system):
+            active_snapshots = [task.snapshot() for task in (task_system.active_tasks() if task_system is not None else [])]
+            matching_snapshot = self._find_relevant_task_snapshot(user_input, task_system)
+            if matching_snapshot is not None:
+                return self._build_task_status_reply(matching_snapshot, message_id=message_id)
+            if len(active_snapshots) > 1 and task_system is not None:
+                return self._build_task_status_reply(
+                    None,
+                    multiple_active_summary="当前有多个任务在处理中：\n" + task_system.get_tasks_summary(),
+                    message_id=message_id,
+                )
+            latest_snapshot = task_system.latest_task_snapshot() if task_system is not None else None
+            return self._build_task_status_reply(latest_snapshot, message_id=message_id)
+
+        waiting_task = task_system.waiting_task() if task_system is not None else None
+        if waiting_task is not None and self._looks_like_waiting_task_answer(user_input, task_system):
+            success = await task_system.answer(
+                user_input,
+                waiting_task.task_id,
+                origin_message_id=str(message_id or "").strip(),
+            )
+            if success:
+                return self._build_waiting_task_fill_reply(
+                    waiting_task=waiting_task,
+                    answer=user_input,
+                    message_id=message_id,
+                    channel=channel,
+                    chat_id=chat_id,
+                    session_id=session_id,
+                )
+
+        if self._should_fast_dispatch_task(user_input, task_system):
+            existing_task = self._find_relevant_task_snapshot(user_input, task_system, active_only=True)
+            if existing_task is not None:
+                return self._build_task_status_reply(existing_task, message_id=message_id)
+            task_spec = await self._create_session_task(
+                task_system=task_system,
+                current_context=current_context,
+                request=user_input,
+                channel=channel,
+                chat_id=chat_id,
+                session_id=session_id,
+            )
+            title = str(task_spec.get("title", "") or "").strip() or "任务"
+            return {
+                "message_id": str(message_id or "").strip(),
+                "intent": "dispatch_explicit_task",
+                "working_hypothesis": "用户给出的是明确的执行请求，适合直接委托给 central 异步处理。",
+                "task_action": "create_task",
+                "task_reason": "这是明确的文件/代码执行请求，不需要主脑继续同步展开。",
+                "final_decision": "continue",
+                "final_message": f"我先去处理「{title}」，有结果再告诉你。",
+                "task_brief": f"已创建异步任务：{title}",
+                "task": dict(task_spec),
+                "execution_summary": "已将本轮请求委托给 central 异步执行。",
+                "notify_user": True,
+                "retrieval_query": "",
+                "retrieval_focus": [],
+                "retrieved_memory_ids": [],
+            }
 
         system_prompt = self._build_state_modifier(
             emotion=emotion,

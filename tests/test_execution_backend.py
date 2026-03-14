@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from emoticorebot.execution.backend import build_backend
+from emoticorebot.execution.backend import build_backend, build_interrupt_on
 
 
 def _build_service(workspace: Path) -> SimpleNamespace:
@@ -43,3 +43,10 @@ def test_backend_keeps_state_namespace_ephemeral() -> None:
         assert not (workspace / "state" / "scratch.txt").exists()
         assert "/scratch.txt" in runtime.state.get("files", {})
         assert "temporary note" in backend.read("/state/scratch.txt")
+
+
+def test_backend_interrupts_do_not_include_message_tool() -> None:
+    interrupt_on = build_interrupt_on()
+
+    assert "message" not in interrupt_on
+    assert "cron" in interrupt_on

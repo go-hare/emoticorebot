@@ -54,10 +54,10 @@ async def _exercise_task_event_serialization_and_cleanup(tmp_path) -> None:
     manager.get_or_create_runtime("sess_1")
 
     dispatcher = _DispatcherStub()
-    locks: dict[str, asyncio.Lock] = {}
+    state_locks: dict[str, asyncio.Lock] = {}
 
-    def _session_lock_for(session_id: str) -> asyncio.Lock:
-        return locks.setdefault(session_id, asyncio.Lock())
+    def _state_lock_for(session_id: str) -> asyncio.Lock:
+        return state_locks.setdefault(session_id, asyncio.Lock())
 
     event_loop = TaskEventLoop(
         runtime_manager=manager,
@@ -68,12 +68,12 @@ async def _exercise_task_event_serialization_and_cleanup(tmp_path) -> None:
         memory_window=20,
         new_message_id=lambda: "msg_task_event",
         schedule_turn_reflection=lambda **kwargs: None,
-        session_lock_for=_session_lock_for,
+        state_lock_for=_state_lock_for,
     )
     event_loop.ensure_consumer("sess_1", runtime)
 
-    session_lock = _session_lock_for("sess_1")
-    await session_lock.acquire()
+    state_lock = _state_lock_for("sess_1")
+    await state_lock.acquire()
     await runtime.to_main_queue.put(
         {
             "task_id": "task_1",
@@ -89,7 +89,7 @@ async def _exercise_task_event_serialization_and_cleanup(tmp_path) -> None:
     await asyncio.sleep(0.05)
     assert dispatcher.messages == []
 
-    session_lock.release()
+    state_lock.release()
 
     await _wait_for(lambda: len(dispatcher.messages) == 1)
     assert dispatcher.messages[0].content == "任务事件已送达"
@@ -103,7 +103,7 @@ async def _exercise_task_event_serialization_and_cleanup(tmp_path) -> None:
     event_loop.stop()
 
 
-def test_task_event_waits_for_session_lock_and_cleans_up_idle_runtime(tmp_path) -> None:
+def test_task_event_waits_for_state_lock_and_cleans_up_idle_runtime(tmp_path) -> None:
     asyncio.run(_exercise_task_event_serialization_and_cleanup(tmp_path))
 
 
@@ -113,10 +113,10 @@ async def _exercise_explicit_idle_release(tmp_path) -> None:
     manager = RuntimeManager(lambda _session_id: runtime)
     manager.get_or_create_runtime("sess_idle")
 
-    locks: dict[str, asyncio.Lock] = {}
+    state_locks: dict[str, asyncio.Lock] = {}
 
-    def _session_lock_for(session_id: str) -> asyncio.Lock:
-        return locks.setdefault(session_id, asyncio.Lock())
+    def _state_lock_for(session_id: str) -> asyncio.Lock:
+        return state_locks.setdefault(session_id, asyncio.Lock())
 
     event_loop = TaskEventLoop(
         runtime_manager=manager,
@@ -127,7 +127,7 @@ async def _exercise_explicit_idle_release(tmp_path) -> None:
         memory_window=20,
         new_message_id=lambda: "msg_idle",
         schedule_turn_reflection=lambda **kwargs: None,
-        session_lock_for=_session_lock_for,
+        state_lock_for=_state_lock_for,
     )
     event_loop.ensure_consumer("sess_idle", runtime)
 
@@ -141,3 +141,62 @@ async def _exercise_explicit_idle_release(tmp_path) -> None:
 
 def test_release_session_removes_idle_runtime_without_events(tmp_path) -> None:
     asyncio.run(_exercise_explicit_idle_release(tmp_path))
+
+
+async def _exercise_task_event_ignores_turn_lock(tmp_path) -> None:
+    store = ThreadStore(tmp_path)
+    thread = store.get_or_create("sess_turn")
+    thread.add_message("user", [{"type": "text", "text": "hello"}], message_id="msg_user")
+    store.save(thread)
+
+    runtime = SessionRuntime(session_id="sess_turn", thread_id="sess_turn")
+    manager = RuntimeManager(lambda _session_id: runtime)
+    manager.get_or_create_runtime("sess_turn")
+
+    dispatcher = _DispatcherStub()
+    state_locks: dict[str, asyncio.Lock] = {}
+    turn_locks: dict[str, asyncio.Lock] = {}
+
+    def _state_lock_for(session_id: str) -> asyncio.Lock:
+        return state_locks.setdefault(session_id, asyncio.Lock())
+
+    def _turn_lock_for(session_id: str) -> asyncio.Lock:
+        return turn_locks.setdefault(session_id, asyncio.Lock())
+
+    event_loop = TaskEventLoop(
+        runtime_manager=manager,
+        thread_store=store,
+        dispatcher=dispatcher,
+        event_narrator=_NarratorStub(),
+        emotion_mgr=_EmotionManagerStub(),
+        memory_window=20,
+        new_message_id=lambda: "msg_turn_event",
+        schedule_turn_reflection=lambda **kwargs: None,
+        state_lock_for=_state_lock_for,
+    )
+    event_loop.ensure_consumer("sess_turn", runtime)
+
+    turn_lock = _turn_lock_for("sess_turn")
+    await turn_lock.acquire()
+    await runtime.to_main_queue.put(
+        {
+            "task_id": "task_turn",
+            "type": "done",
+            "summary": "完成",
+            "channel": "cli",
+            "chat_id": "direct",
+            "message_id": "msg_origin",
+            "params": {"task_id": "task_turn", "title": "任务二"},
+        }
+    )
+
+    await _wait_for(lambda: len(dispatcher.messages) == 1)
+    assert dispatcher.messages[0].content == "任务事件已送达"
+
+    turn_lock.release()
+    await _wait_for(lambda: manager.get("sess_turn") is None)
+    event_loop.stop()
+
+
+def test_task_event_is_not_blocked_by_turn_lock(tmp_path) -> None:
+    asyncio.run(_exercise_task_event_ignores_turn_lock(tmp_path))

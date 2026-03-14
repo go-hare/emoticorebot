@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
 
 class CentralExecutor:
     """Executor that delegates complex tasks to the Deep Agent stack."""
+
+    DEFAULT_TASK_TIMEOUT_S = 120.0
 
     def __init__(
         self,
@@ -91,15 +94,32 @@ class CentralExecutor:
                 phase="stage",
             )
 
-            agent_result = await self._invoke_agent(
-                agent,
-                task_spec,
-                thread_id,
-                run_id,
-                history=history,
-                media=media,
-                task_context=task_context,
+            timeout_s = self._resolve_task_timeout(task_spec)
+            agent_task = asyncio.create_task(
+                self._invoke_agent(
+                    agent,
+                    task_spec,
+                    thread_id,
+                    run_id,
+                    history=history,
+                    media=media,
+                    task_context=task_context,
+                ),
+                name=f"central-agent:{task.task_id}",
             )
+            try:
+                agent_result = await asyncio.wait_for(asyncio.shield(agent_task), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                agent_task.cancel()
+                agent_task.add_done_callback(self._consume_background_task_result)
+                timeout_text = int(timeout_s) if float(timeout_s).is_integer() else round(timeout_s, 1)
+                return self._build_result(
+                    control_state="failed",
+                    status="failed",
+                    message=f"central 执行超时（{timeout_text}s），本次任务已终止。",
+                    analysis="CentralExecutor 在限定时间内未返回结果。",
+                    confidence=0.0,
+                )
             return self._normalize_task_result(self._extract_structured_result(agent_result))
         finally:
             self.tool_runtime.clear()
@@ -114,6 +134,25 @@ class CentralExecutor:
         chat_id = str(task_spec.get("chat_id", "") or "").strip()
         base = f"{channel}:{chat_id}" if channel or chat_id else "default"
         return f"central:{base}:{task_id}"
+
+    def _resolve_task_timeout(self, task_spec: TaskSpec) -> float:
+        raw_timeout = task_spec.get("timeout_s")
+        try:
+            timeout_s = float(raw_timeout)
+        except (TypeError, ValueError):
+            timeout_s = self.DEFAULT_TASK_TIMEOUT_S
+        if timeout_s <= 0:
+            return self.DEFAULT_TASK_TIMEOUT_S
+        return timeout_s
+
+    @staticmethod
+    def _consume_background_task_result(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
 
     async def _invoke_agent(
         self,
@@ -256,8 +295,13 @@ class CentralExecutor:
                 raise RuntimeError("TaskExecutionResult.missing is required when control_state is waiting_input")
             if status not in {"pending", "partial"}:
                 raise RuntimeError("TaskExecutionResult.status must be pending or partial when waiting for input")
-            if not recommended_action:
-                recommended_action = f"请补充以下信息：{missing[0]}"
+            request_hint = recommended_action or f"请补充以下信息：{missing[0]}"
+            missing_summary = "、".join(missing)
+            message = message or f"缺少继续执行所需信息：{missing_summary}。{request_hint}"
+            analysis = analysis or "Central 当前单次执行无法继续，需由主脑决定是否重新发起新任务。"
+            control_state = "failed"
+            status = "failed"
+            recommended_action = request_hint
         elif control_state == "completed":
             if status not in {"success", "partial"}:
                 raise RuntimeError("TaskExecutionResult.status must be success or partial when control_state is completed")
@@ -317,8 +361,6 @@ class CentralExecutor:
 
     @staticmethod
     def _default_status_for_control_state(control_state: str) -> str:
-        if control_state == "waiting_input":
-            return "pending"
         if control_state == "failed":
             return "failed"
         return "success"

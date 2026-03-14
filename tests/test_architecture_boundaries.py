@@ -28,6 +28,29 @@ def test_runtime_host_depends_on_thread_store_not_session_manager() -> None:
     assert "session_manager" not in source
 
 
+def test_command_shortcuts_preserve_message_correlation() -> None:
+    source = _read("emoticorebot/bootstrap.py")
+
+    assert 'msg.metadata["message_id"] = message_id' in source
+    assert 'content="New session started."' in source
+    assert "reply_to=message_id" in source
+    assert "metadata=msg.metadata or {}" in source
+
+
+def test_runtime_host_uses_split_turn_and_state_locks() -> None:
+    bootstrap = _read("emoticorebot/bootstrap.py")
+    event_loop = _read("emoticorebot/runtime/event_loop.py")
+
+    assert "self._turn_locks: dict[str, asyncio.Lock] = {}" in bootstrap
+    assert "self._state_locks: dict[str, asyncio.Lock] = {}" in bootstrap
+    assert "async with self._turn_lock_for(key):" in bootstrap
+    assert "async with self._state_lock_for(key):" in bootstrap
+    assert "state_lock_for=self._state_lock_for" in bootstrap
+    assert "session_lock_for" not in event_loop
+    assert "state_lock_for: Callable[[str], asyncio.Lock]" in event_loop
+    assert "self._state_lock_for = state_lock_for" in event_loop
+
+
 def test_reflection_pipeline_uses_normalized_reflection_input() -> None:
     coordinator = _read("emoticorebot/agent/reflection/coordinator.py")
     host = _read("emoticorebot/bootstrap.py")

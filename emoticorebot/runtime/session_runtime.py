@@ -68,6 +68,19 @@ class SessionRuntime:
             return None
         return active[-1].snapshot()
 
+    def recent_task_snapshots(self) -> list[dict[str, Any]]:
+        return [dict(snapshot) for snapshot in self._recent_task_snapshots.values() if isinstance(snapshot, dict)]
+
+    def latest_task_snapshot(self) -> dict[str, Any] | None:
+        active = self.latest_active_task_snapshot()
+        if active:
+            return active
+        if not self._recent_task_snapshots:
+            return None
+        last_key = next(reversed(self._recent_task_snapshots))
+        snapshot = self._recent_task_snapshots.get(last_key)
+        return dict(snapshot) if isinstance(snapshot, dict) else None
+
     def get_task_snapshot(self, task_id: str) -> dict[str, Any] | None:
         wanted = str(task_id or "").strip()
         if not wanted:
@@ -159,6 +172,13 @@ class SessionRuntime:
             "skill_hints": [str(item).strip() for item in list(task_spec.get("skill_hints", []) or []) if str(item).strip()],
             "media": [str(item).strip() for item in list(task_spec.get("media", []) or []) if str(item).strip()],
         }
+        timeout_override = task_spec.get("timeout_s")
+        try:
+            timeout_s = float(timeout_override)
+        except (TypeError, ValueError):
+            timeout_s = 0.0
+        if timeout_s > 0:
+            params["timeout_s"] = timeout_s
         history = task_spec.get("history")
         if isinstance(history, list):
             params["history"] = [dict(item) for item in history if isinstance(item, dict)]

@@ -88,10 +88,6 @@ def ensure_checkpointer(service: "CentralExecutor") -> Any | None:
 
 def build_interrupt_on() -> dict[str, Any]:
     return {
-        "message": {
-            "allowed_decisions": ["approve", "edit", "reject"],
-            "description": "请确认是否允许 central 发送消息。",
-        },
         "cron": {
             "allowed_decisions": ["approve", "reject"],
             "description": "请确认是否允许 central 创建或修改定时任务。",
@@ -116,10 +112,10 @@ def build_agent_instructions(service: "CentralExecutor") -> str:
         "3. 不要输出原始日志、工具轨迹或 JSON 代码块。\n\n"
         "## Task 结构化输出要求\n"
         "系统会强制你输出 `TaskExecutionResult` 结构，不要在 `message` 或 `analysis` 中嵌 JSON。\n"
-        "- `control_state` 只能是 `completed`、`waiting_input`、`failed`。\n"
-        "- `status` 只能是 `success`、`partial`、`pending`、`failed`。\n"
+        "- `control_state` 对你来说只能使用 `completed` 或 `failed`；不要返回 `waiting_input`。\n"
+        "- `status` 只能是 `success`、`partial`、`failed`。\n"
         "- 已完成任务：使用 `completed`，并在 `message` 中写最终可交付结果。\n"
-        "- 需要用户补充信息：使用 `waiting_input`，填写 `missing`，并把明确追问写入 `recommended_action`。\n"
+        "- 如果缺少关键信息无法继续：直接使用 `failed`，在 `message` 或 `analysis` 中写清楚缺什么、为什么无法继续；如有必要可在 `recommended_action` 中写建议补充项。\n"
         "- 无法继续执行：使用 `failed`，在 `message` 或 `analysis` 中写明失败原因。\n"
         "- `analysis` 只写紧凑结论，不展开冗长推理。\n"
         "- `pending_review` 只有确实需要审核时才填写。\n"
@@ -168,7 +164,8 @@ def build_tools(service: "CentralExecutor") -> list[Any]:
     if stage_tool is not None:
         tools.append(stage_tool)
     if service.tools is not None:
-        tools.extend(build_registry_tools(service, service.tools.tool_names))
+        tool_names = [name for name in service.tools.tool_names if name != "message"]
+        tools.extend(build_registry_tools(service, tool_names))
     return tools
 
 

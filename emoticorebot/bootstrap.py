@@ -112,7 +112,8 @@ class RuntimeHost:
         self.tool_manager.register_default_tools()
 
         self._mcp_servers = mcp_servers or {}
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._state_locks: dict[str, asyncio.Lock] = {}
         self.outbound_dispatcher = OutboundDispatcher(self.bus)
         self.runtime_manager = RuntimeManager(self._build_session_runtime)
         self.task_event_loop = TaskEventLoop(
@@ -124,7 +125,7 @@ class RuntimeHost:
             memory_window=self.memory_window,
             new_message_id=self._new_message_id,
             schedule_turn_reflection=self._schedule_turn_reflection,
-            session_lock_for=self._session_lock_for,
+            state_lock_for=self._state_lock_for,
         )
         self.runtime_manager.set_on_runtime_created(
             lambda session_id, runtime: self.task_event_loop.ensure_consumer(session_id, runtime)
@@ -154,14 +155,14 @@ class RuntimeHost:
         on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         key = session_key or msg.session_key
-        async with self._session_lock_for(key):
-            return await self._process_message_unlocked(
+        async with self._turn_lock_for(key):
+            return await self._process_message_turn(
                 msg=msg,
                 session_key=key,
                 on_progress=on_progress,
             )
 
-    async def _process_message_unlocked(
+    async def _process_message_turn(
         self,
         *,
         msg: InboundMessage,
@@ -175,24 +176,28 @@ class RuntimeHost:
             return None
 
         key = session_key
-        thread = self.thread_store.get_or_create(key)
         cmd = msg.content.strip().lower()
+        message_id = str(msg.metadata.get("message_id", "") or "").strip() or self._new_message_id()
+        msg.metadata["message_id"] = message_id
 
         if cmd == "/new":
-            thread.clear()
-            self.thread_store.clear_internal_messages(thread.thread_id)
-            self.thread_store.save(thread)
-            self.thread_store.invalidate(thread.thread_id)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="New session started.")
+            async with self._state_lock_for(key):
+                self._reset_session_thread(key)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="New session started.",
+                reply_to=message_id,
+                metadata=msg.metadata or {},
+            )
         if cmd == "/help":
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=self._help_text(),
+                reply_to=message_id,
+                metadata=msg.metadata or {},
             )
-
-        message_id = str(msg.metadata.get("message_id", "") or "").strip() or self._new_message_id()
-        msg.metadata["message_id"] = message_id
         self.tool_manager.set_context(
             msg.channel,
             msg.chat_id,
@@ -200,8 +205,15 @@ class RuntimeHost:
             key,
         )
 
-        dialogue_history = thread.get_history(max_messages=self.memory_window, include_task_context=False)
-        internal_history = self.thread_store.get_internal_messages(key, max_messages=self.memory_window)
+        async with self._state_lock_for(key):
+            dialogue_history, internal_history = self._snapshot_turn_input(key)
+            self._persist_user_message(
+                session_key=key,
+                content=msg.content,
+                media=msg.media,
+                message_id=message_id,
+                timestamp=msg.timestamp.isoformat(),
+            )
         content, final_state = await self._run_user_message(
             user_input=msg.content,
             dialogue_history=dialogue_history,
@@ -215,28 +227,27 @@ class RuntimeHost:
         )
 
         assistant_timestamp = datetime.now().isoformat()
-        self.thread_store.append_internal_messages(
-            key,
-            self._build_internal_turn_records(
-                final_state,
-                assistant_timestamp=assistant_timestamp,
+        async with self._state_lock_for(key):
+            self.thread_store.append_internal_messages(
+                key,
+                self._build_internal_turn_records(
+                    final_state,
+                    assistant_timestamp=assistant_timestamp,
+                    message_id=message_id,
+                    existing_internal_count=len(internal_history),
+                ),
+            )
+
+            thread = self.thread_store.get_or_create(key)
+            assistant_fields = self._build_assistant_session_fields(final_state)
+            thread.add_message(
+                "assistant",
+                [{"type": "text", "text": content}],
                 message_id=message_id,
-                existing_internal_count=len(internal_history),
-            ),
-        )
-
-        user_content = self._build_user_message_content(msg.content, msg.media)
-        assistant_fields = self._build_assistant_session_fields(final_state)
-        thread.add_message("user", user_content, message_id=message_id, timestamp=msg.timestamp.isoformat())
-        thread.add_message(
-            "assistant",
-            [{"type": "text", "text": content}],
-            message_id=message_id,
-            timestamp=assistant_timestamp,
-            **assistant_fields,
-        )
-
-        self.thread_store.save(thread)
+                timestamp=assistant_timestamp,
+                **assistant_fields,
+            )
+            self.thread_store.save(thread)
         self._save_proactive_target(msg.channel, msg.chat_id)
         self._schedule_turn_reflection(session_key=key, state=final_state)
         self._release_idle_session_runtime(key)
@@ -657,9 +668,40 @@ class RuntimeHost:
         
         asyncio.create_task(_run(), name=f"reflection:{session_key}")
 
-    def _session_lock_for(self, session_id: str) -> asyncio.Lock:
+    def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
         key = str(session_id or "__default__").strip() or "__default__"
-        return self._session_locks.setdefault(key, asyncio.Lock())
+        return self._turn_locks.setdefault(key, asyncio.Lock())
+
+    def _state_lock_for(self, session_id: str) -> asyncio.Lock:
+        key = str(session_id or "__default__").strip() or "__default__"
+        return self._state_locks.setdefault(key, asyncio.Lock())
+
+    def _snapshot_turn_input(self, session_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        thread = self.thread_store.get_or_create(session_id)
+        dialogue_history = thread.get_history(max_messages=self.memory_window, include_task_context=False)
+        internal_history = self.thread_store.get_internal_messages(session_id, max_messages=self.memory_window)
+        return dialogue_history, internal_history
+
+    def _persist_user_message(
+        self,
+        *,
+        session_key: str,
+        content: str,
+        media: list[str] | None,
+        message_id: str,
+        timestamp: str,
+    ) -> None:
+        thread = self.thread_store.get_or_create(session_key)
+        user_content = self._build_user_message_content(content, media)
+        thread.add_message("user", user_content, message_id=message_id, timestamp=timestamp)
+        self.thread_store.save(thread)
+
+    def _reset_session_thread(self, session_id: str) -> None:
+        thread = self.thread_store.get_or_create(session_id)
+        thread.clear()
+        self.thread_store.clear_internal_messages(thread.thread_id)
+        self.thread_store.save(thread)
+        self.thread_store.invalidate(thread.thread_id)
 
     def _release_idle_session_runtime(self, session_id: str) -> None:
         runtime = self.runtime_manager.get(session_id)

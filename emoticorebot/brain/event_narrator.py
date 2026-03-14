@@ -17,6 +17,93 @@ from emoticorebot.utils.llm_utils import blocks_to_llm_content
 class EventNarrator(CompanionBrain):
     """Handles user-facing narration of runtime task events."""
 
+    @staticmethod
+    def _should_suppress_progress_message(message: str) -> bool:
+        text = str(message or "").strip()
+        if not text:
+            return True
+
+        low_value_markers = {
+            "正在执行内部任务",
+            "处理中",
+            "继续处理中",
+        }
+        if text in low_value_markers:
+            return True
+
+        user_input_markers = (
+            "?",
+            "？",
+            "请提供",
+            "请补充",
+            "补充信息",
+            "需要你",
+            "需要您",
+            "告诉我",
+            "告诉一下",
+            "哪个城市",
+            "什么城市",
+            "你在哪",
+            "您在哪",
+        )
+        return any(marker in text for marker in user_input_markers)
+
+    @staticmethod
+    def _build_direct_event_packet(event: TaskEvent) -> BrainControlPacket | None:
+        event_type = str(event.get("type", "") or "").strip().lower()
+        if event_type not in {"done", "failed", "need_input"}:
+            return None
+
+        task_id = str(event.get("task_id", "") or "").strip()
+        title = str(event.get("title", "") or "").strip() or task_id or "任务"
+        message_id = str(event.get("message_id", "") or "").strip()
+
+        if event_type == "done":
+            summary = str(event.get("summary", "") or "").strip() or "处理完成。"
+            final_message = f"「{title}」已经完成。{summary}"
+            final_decision = "answer"
+            intent = "task_done"
+            working_hypothesis = "任务已经完成，直接通知用户结果。"
+            execution_summary = "通知用户任务完成。"
+        elif event_type == "failed":
+            reason = str(event.get("reason", "") or "").strip() or "暂时没有更多错误信息。"
+            final_message = f"「{title}」执行失败了。{reason}"
+            final_decision = "answer"
+            intent = "task_failed"
+            working_hypothesis = "任务执行失败，需要立即告知用户。"
+            execution_summary = "通知用户任务失败。"
+        else:
+            summary = str(event.get("summary", "") or event.get("message", "") or "").strip()
+            question = str(event.get("question", "") or "").strip()
+            if summary and question:
+                final_message = f"「{title}」已经完成一部分：{summary}。还需要你补充：{question}"
+            elif question:
+                final_message = f"「{title}」还需要你补充信息：{question}"
+            elif summary:
+                final_message = f"「{title}」已经完成一部分：{summary}。还需要你补充一点信息才能继续。"
+            else:
+                final_message = f"「{title}」还需要你补充一点信息才能继续。"
+            final_decision = "ask_user"
+            intent = "task_need_input"
+            working_hypothesis = "任务需要用户补充信息，直接追问即可。"
+            execution_summary = "向用户追问任务所需信息。"
+
+        return {
+            "message_id": message_id,
+            "intent": intent,
+            "working_hypothesis": working_hypothesis,
+            "task_action": "none",
+            "task_reason": "这是任务事件通知，不需要再创建或修改任务。",
+            "final_decision": final_decision,
+            "final_message": final_message,
+            "task_brief": "",
+            "execution_summary": execution_summary,
+            "notify_user": True,
+            "retrieval_query": "",
+            "retrieval_focus": [],
+            "retrieved_memory_ids": [],
+        }
+
     def _build_narration_prompt(
         self,
         *,
@@ -72,7 +159,7 @@ class EventNarrator(CompanionBrain):
             message = str(event.get("message", "") or "").strip()
             payload = event.get("payload", {}) or {}
             phase = str(payload.get("phase", "") or "").strip()
-            if phase == "stage" and message:
+            if phase == "stage" and message and not EventNarrator._should_suppress_progress_message(message):
                 return f"[任务 {task_id} 进度] {message}"
         return None
 
@@ -91,6 +178,10 @@ class EventNarrator(CompanionBrain):
         content = self._format_event_content(event)
         if not content:
             return None
+
+        direct_packet = self._build_direct_event_packet(event)
+        if direct_packet is not None:
+            return direct_packet
 
         ev_channel = channel or str(event.get("channel", "") or "").strip()
         ev_chat_id = chat_id or str(event.get("chat_id", "") or "").strip()
