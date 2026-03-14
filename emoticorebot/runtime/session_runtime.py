@@ -408,6 +408,35 @@ class SessionRuntime:
         if promoted_id:
             await self._promote_task(promoted_id)
 
+    async def shutdown(self) -> None:
+        runners: list[asyncio.Task] = []
+        for task in list(self._running_tasks.values()):
+            self.input_gate.remove(task.task_id)
+            task.status = "cancelled"
+            task.input_request = None
+            task.missing = []
+            if task.input_fut is not None and not task.input_fut.done():
+                task.input_fut.cancel()
+            task.input_fut = None
+            runner = task.runner
+            if runner is not None and not runner.done():
+                runner.cancel()
+                runners.append(runner)
+
+        if runners:
+            await asyncio.gather(*runners, return_exceptions=True)
+
+        self._running_tasks.clear()
+        self._task_states.clear()
+        self._recent_task_snapshots.clear()
+        self.input_gate.waiting_task_id = None
+        self.input_gate.blocked_task_ids.clear()
+        while not self.event_queue.empty():
+            try:
+                self.event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "tasks": {task_id: state.snapshot() for task_id, state in self._task_states.items()},

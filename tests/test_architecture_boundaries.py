@@ -33,6 +33,7 @@ def test_command_shortcuts_preserve_message_correlation() -> None:
 
     assert 'msg.metadata["message_id"] = message_id' in source
     assert 'content="New session started."' in source
+    assert "await self._reset_session(key)" in source
     assert "reply_to=message_id" in source
     assert "metadata=msg.metadata or {}" in source
 

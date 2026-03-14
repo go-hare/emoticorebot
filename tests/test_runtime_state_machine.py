@@ -133,3 +133,42 @@ async def _exercise_terminal_snapshot_retention() -> None:
 
 def test_terminal_task_snapshot_is_retained_after_cleanup() -> None:
     asyncio.run(_exercise_terminal_snapshot_retention())
+
+
+async def _sleep_forever(task, runtime: SessionRuntime) -> dict[str, object]:
+    del task, runtime
+    await asyncio.sleep(60)
+    return {
+        "control_state": "completed",
+        "status": "success",
+        "message": "unreachable",
+    }
+
+
+async def _exercise_runtime_shutdown_clears_live_and_recent_tasks() -> None:
+    runtime = SessionRuntime(session_id="sess_reset", thread_id="thread_reset")
+
+    task = await runtime.create_task(
+        task_id="task_reset",
+        worker=_sleep_forever,
+        params={"channel": "cli", "chat_id": "direct", "origin_message_id": "msg_reset"},
+        title="reset me",
+    )
+
+    await asyncio.sleep(0)
+    assert runtime.get_task("task_reset") is task
+    assert runtime.recent_task_snapshots()
+
+    await runtime.shutdown()
+
+    assert runtime.get_task("task_reset") is None
+    assert runtime.active_tasks() == []
+    assert runtime.recent_task_snapshots() == []
+    assert runtime.waiting_task() is None
+    assert runtime.blocked_task() is None
+    assert runtime.is_idle() is True
+    assert task.runner is not None and task.runner.done()
+
+
+def test_runtime_shutdown_clears_live_and_recent_tasks() -> None:
+    asyncio.run(_exercise_runtime_shutdown_clears_live_and_recent_tasks())

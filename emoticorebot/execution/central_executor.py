@@ -84,6 +84,7 @@ class CentralExecutor:
         history = [item for item in list(task_spec.get("history") or []) if isinstance(item, dict)]
         media = [str(item).strip() for item in list(task_spec.get("media") or []) if str(item).strip()]
         task_context = dict(task_spec.get("task_context") or {})
+        agent_task: asyncio.Task | None = None
 
         try:
             await runtime.report_progress(
@@ -121,6 +122,11 @@ class CentralExecutor:
                     confidence=0.0,
                 )
             return self._normalize_task_result(self._extract_structured_result(agent_result))
+        except asyncio.CancelledError:
+            if agent_task is not None and not agent_task.done():
+                agent_task.cancel()
+                agent_task.add_done_callback(self._consume_background_task_result)
+            raise
         finally:
             self.tool_runtime.clear()
             self._current_runtime = None

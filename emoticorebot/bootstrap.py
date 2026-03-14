@@ -181,8 +181,7 @@ class RuntimeHost:
         msg.metadata["message_id"] = message_id
 
         if cmd == "/new":
-            async with self._state_lock_for(key):
-                self._reset_session_thread(key)
+            await self._reset_session(key)
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -702,6 +701,14 @@ class RuntimeHost:
         self.thread_store.clear_internal_messages(thread.thread_id)
         self.thread_store.save(thread)
         self.thread_store.invalidate(thread.thread_id)
+
+    async def _reset_session(self, session_id: str) -> None:
+        runtime = self.runtime_manager.remove(session_id)
+        self.task_event_loop.release_session(session_id, runtime=None)
+        if runtime is not None:
+            await runtime.shutdown()
+        async with self._state_lock_for(session_id):
+            self._reset_session_thread(session_id)
 
     def _release_idle_session_runtime(self, session_id: str) -> None:
         runtime = self.runtime_manager.get(session_id)

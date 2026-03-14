@@ -4,7 +4,7 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-**emoticorebot** is an ultra-lightweight personal AI assistant built around a **brain -> central** architecture and derived from the original Nanobot project.
+**emoticorebot** is an ultra-lightweight personal AI assistant built around a **brain -> central** architecture and derived 
 
 It keeps `brain` as the only outward-facing subject, delegates complex work to a **Deep Agents-based `central`** when needed, and evolves through `turn_reflection + deep_reflection`.
 
