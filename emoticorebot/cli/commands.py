@@ -406,6 +406,55 @@ def agent(
             return
         console.print(f"  [dim]↳ {content}[/dim]")
 
+    async def _consume_cli_outbound_message() -> bool:
+        try:
+            msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+        except asyncio.TimeoutError:
+            return False
+
+        if msg.metadata.get("_progress"):
+            is_tool_hint = msg.metadata.get("_tool_hint", False)
+            ch = agent_loop.channels_config
+            if ch and is_tool_hint and not ch.send_tool_hints:
+                return True
+            if ch and not is_tool_hint and not ch.send_progress:
+                return True
+            console.print(f"  [dim]↳ {msg.content}[/dim]")
+            return True
+
+        if msg.content:
+            console.print()
+            _print_agent_response(msg.content, render_markdown=markdown)
+        return True
+
+    async def _follow_session_tasks_once() -> None:
+        runtime = agent_loop.runtime_manager.get(session_id)
+        if runtime is None or not runtime.active_tasks():
+            return
+
+        console.print("  [dim]↳ 检测到异步任务，继续监听当前 session 的进展...[/dim]")
+        loop = asyncio.get_running_loop()
+        idle_since: float | None = None
+
+        while True:
+            runtime = agent_loop.runtime_manager.get(session_id)
+            active = runtime is not None and bool(runtime.active_tasks())
+
+            delivered = await _consume_cli_outbound_message()
+            if delivered:
+                idle_since = None
+                continue
+
+            if active:
+                continue
+
+            now = loop.time()
+            if idle_since is None:
+                idle_since = now
+                continue
+            if now - idle_since >= 0.5:
+                break
+
     if message:
         # Single message mode — direct call, no bus needed
         async def run_once():
@@ -413,6 +462,7 @@ def agent(
                 with _thinking_ctx():
                     response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
                 _print_agent_response(response, render_markdown=markdown)
+                await _follow_session_tasks_once()
             finally:
                 await agent_loop.close_mcp()
 
