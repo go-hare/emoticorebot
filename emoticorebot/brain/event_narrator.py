@@ -5,10 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
 
 from emoticorebot.brain.companion_brain import CompanionBrain
-from emoticorebot.brain.decision_packet import BrainControlPacket, normalize_brain_packet
+from emoticorebot.brain.decision_packet import BrainControlPacket, normalize_brain_packet, parse_raw_brain_json
 from emoticorebot.protocol.events import TaskEvent
 from emoticorebot.runtime.session_runtime import SessionRuntime
 from emoticorebot.utils.llm_utils import blocks_to_llm_content
@@ -127,11 +126,25 @@ class EventNarrator(CompanionBrain):
         parts.append("\n\n## 任务事件转述规则")
         parts.append("\n你收到的是 runtime 任务事件，不是新的用户请求。")
         parts.append("\n你的职责是判断这条事件是否值得告诉用户，以及用陪伴式语言怎么说。")
-        parts.append("\n- `task_action` 必须是 `none`。")
-        parts.append("\n- 不要创建任务，不要补充任务，不要取消任务。")
+
+        parts.append("\n\n## 结构化输出要求")
+        parts.append("\n你必须且只能输出一个合法的 JSON 对象（不要包裹在 markdown 代码块中），")
+        parts.append("严格遵循以下 `BrainControlPacket` schema：")
+        parts.append('\n```json\n{\n'
+                     '  "intent": "<string: 对本次事件的判断>",\n'
+                     '  "working_hypothesis": "<string: 当前工作假设>",\n'
+                     '  "task_action": "none",\n'
+                     '  "task_reason": "<string: 为什么采取该动作>",\n'
+                     '  "final_decision": "<enum: answer | ask_user>",\n'
+                     '  "final_message": "<string: 给用户的自然语言回复>",\n'
+                     '  "task_brief": "",\n'
+                     '  "execution_summary": "<string: 一句话总结这条任务事件>"\n'
+                     '}\n```')
+        parts.append("\n⚠️ 重要约束：")
+        parts.append("\n- 输出必须是可被 `json.loads()` 直接解析的纯 JSON，不要输出任何 JSON 之外的文字。")
+        parts.append("\n- `task_action` 必须是 `none`，不要创建/补充/取消任务。")
         parts.append("\n- `final_decision` 只能是 `answer` 或 `ask_user`。")
         parts.append("\n- `final_message` 必须是给用户看的自然语言，不要复述内部字段名。")
-        parts.append("\n- `execution_summary` 用一句话总结这条任务事件。")
         parts.append("\n- 如果这是等待用户补充信息的事件，要把追问自然地说给用户。")
         parts.append("\n- 如果只是低价值进度噪音，就返回空消息是不允许的；应该在进入这里前就被过滤。")
         return "".join(parts)
@@ -215,10 +228,9 @@ class EventNarrator(CompanionBrain):
         agent = create_agent(
             model=self.brain_llm,
             tools=[],
-            response_format=ToolStrategy(BrainControlPacket),
         )
         result = await agent.ainvoke({"messages": messages})
-        structured = result.get("structured_response")
+        structured = parse_raw_brain_json(result)
         return normalize_brain_packet(structured, current_context=current_context)
 
 

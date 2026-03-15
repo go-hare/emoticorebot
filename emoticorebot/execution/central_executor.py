@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -268,13 +270,52 @@ class CentralExecutor:
             raise RuntimeError("Deep Agent stream did not produce final state")
         return last_values
 
+    _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
+
     def _extract_structured_result(self, result: Any) -> dict[str, Any]:
+        """Extract and parse a JSON TaskExecutionResult from an agent result.
+
+        Tries structured_response first (backward-compat), then falls back to
+        parsing the last AI message's text content as JSON.
+        """
         if isinstance(result, dict):
+            # Fast path: structured output still present
             structured = result.get("structured_response")
             if isinstance(structured, dict):
                 return structured
             if "control_state" in result or "status" in result:
                 return result
+
+            # Fallback: parse raw JSON from the last AI message
+            messages = result.get("messages", [])
+            text = ""
+            for msg in reversed(messages):
+                content = getattr(msg, "content", None)
+                if content is None:
+                    content = msg.get("content", "") if isinstance(msg, dict) else ""
+                if isinstance(content, list):
+                    parts = [
+                        str(item.get("text", "")) if isinstance(item, dict) and item.get("type") == "text" else str(item)
+                        for item in content
+                    ]
+                    content = "\n".join(parts)
+                if isinstance(content, str) and content.strip():
+                    text = content.strip()
+                    break
+
+            if text:
+                # Strip markdown ```json ... ``` fences if present
+                fence_match = self._JSON_FENCE_RE.search(text)
+                if fence_match:
+                    text = fence_match.group(1).strip()
+
+                try:
+                    payload = json.loads(text)
+                    if isinstance(payload, dict):
+                        return payload
+                except json.JSONDecodeError:
+                    pass
+
         raise RuntimeError("Central agent did not return a structured TaskExecutionResult")
 
     def _normalize_task_result(self, payload: dict[str, Any]) -> TaskExecutionResult:

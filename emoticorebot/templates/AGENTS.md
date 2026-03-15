@@ -32,18 +32,28 @@
 
 ## 输出协议
 
-- 必须只输出一个 JSON 对象
-- 第一轮主导判断（`deliberate`）输出：
-  - `intent` / `working_hypothesis`
-  - `task_action`：`create_task` 或 `answer`
-  - `task_reason`
-  - `final_decision`：若创建 `task` 则为 `continue`，否则为 `answer`
-  - `task_brief`
-  - `final_message`
-- 第二轮综合判断（`finalize`）输出：
-  - `final_decision`：`answer / ask_user / continue`
-  - `final_message`
-  - `task_brief`
+必须且只能输出一个合法的 JSON 对象（不要包裹在 markdown 代码块中），严格遵循 `BrainControlPacket` schema：
+
+```json
+{
+  "intent": "<string: 对用户当前诉求的判断>",
+  "working_hypothesis": "<string: 当前工作假设>",
+  "task_action": "<enum: none | create_task | fill_task>",
+  "task_reason": "<string: 为什么采取该动作>",
+  "final_decision": "<enum: answer | ask_user | continue>",
+  "final_message": "<string: 给用户的自然语言回复>",
+  "task_brief": "<string: 当本轮发生任务动作时，给 SessionRuntime 的简要说明；无动作时为空字符串>",
+  "task": "<object|null: 当且仅当本轮真实调用了 create_task 或 fill_task 时填写>",
+  "execution_summary": "<string: 一句话总结本轮做了什么；没有执行就填空字符串>"
+}
+```
+
+**规则：**
+- 直接回复用户：`"task_action":"none"`, `"final_decision":"answer"`
+- 需要追问但不创建任务：`"task_action":"none"`, `"final_decision":"ask_user"`
+- 创建任务前必须先真实调用 `create_task` 工具，然后 `"task_action":"create_task"`, `"final_decision":"continue"`
+- 补充等待任务前必须先真实调用 `fill_task` 工具，然后 `"task_action":"fill_task"`, `"final_decision":"continue"`
+- 不要伪造任务 ID，不要声称创建/补充了并未真实调用的任务
 
 ## 长期记忆原则
 

@@ -7,11 +7,10 @@ from typing import Any
 from uuid import uuid4
 
 from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
 from langchain_core.tools import tool
 
 from emoticorebot.agent.context import ContextBuilder
-from emoticorebot.brain.decision_packet import BrainControlPacket, normalize_brain_packet
+from emoticorebot.brain.decision_packet import BrainControlPacket, normalize_brain_packet, parse_raw_brain_json
 from emoticorebot.protocol.task_models import TaskSpec
 from emoticorebot.runtime.event_bus import RuntimeEventBus
 from emoticorebot.runtime.session_runtime import SessionRuntime
@@ -542,22 +541,27 @@ class CompanionBrain:
             parts.append("如果用户在说其他事情，正常回复即可。")
 
         parts.append("\n\n## 主脑结构化输出要求")
-        parts.append("\n系统会强制你输出 `BrainControlPacket` 结构，不要在 `final_message` 中嵌 JSON。")
-        parts.append("\n字段语义：")
-        parts.append("\n- `intent`: 对用户当前诉求的判断")
-        parts.append("\n- `working_hypothesis`: 当前工作假设")
-        parts.append("\n- `task_action`: 只能是 `none`、`create_task`、`fill_task`")
-        parts.append("\n- `task_reason`: 为什么采取该动作")
-        parts.append("\n- `final_decision`: 只能是 `answer`、`ask_user`、`continue`")
-        parts.append("\n- `final_message`: 给用户的自然语言回复")
-        parts.append("\n- `task_brief`: 当本轮发生任务动作时，给 SessionRuntime 的简要说明")
-        parts.append("\n- `task`: 当且仅当本轮真实调用了 `create_task` 或 `fill_task` 时填写")
-        parts.append("\n- `execution_summary`: 一句话总结本轮做了什么；没有执行就填空字符串")
+        parts.append("\n你必须且只能输出一个合法的 JSON 对象（不要包裹在 markdown 代码块中），")
+        parts.append("严格遵循以下 `BrainControlPacket` schema：")
+        parts.append('\n```json\n{\n'
+                     '  "intent": "<string: 对用户当前诉求的判断>",\n'
+                     '  "working_hypothesis": "<string: 当前工作假设>",\n'
+                     '  "task_action": "<enum: none | create_task | fill_task>",\n'
+                     '  "task_reason": "<string: 为什么采取该动作>",\n'
+                     '  "final_decision": "<enum: answer | ask_user | continue>",\n'
+                     '  "final_message": "<string: 给用户的自然语言回复>",\n'
+                     '  "task_brief": "<string: 当本轮发生任务动作时，给 SessionRuntime 的简要说明；无动作时为空字符串>",\n'
+                     '  "task": "<object|null: 当且仅当本轮真实调用了 create_task 或 fill_task 时填写，否则不要包含此字段>",\n'
+                     '  "execution_summary": "<string: 一句话总结本轮做了什么；没有执行就填空字符串>"\n'
+                     '}\n```')
+        parts.append("\n⚠️ 重要约束：")
+        parts.append("\n- 输出必须是可被 `json.loads()` 直接解析的纯 JSON，不要输出任何 JSON 之外的文字。")
+        parts.append("\n- `final_message` 是给用户看的自然语言回复，放在 JSON 字段里即可，不要在 JSON 外面再写一遍。")
         parts.append("\n规则：")
-        parts.append("\n- 直接回复用户：`task_action=none`，`final_decision=answer`。")
-        parts.append("\n- 需要追问但不创建任务：`task_action=none`，`final_decision=ask_user`。")
-        parts.append("\n- 创建任务前必须先真实调用 `create_task` 工具，然后 `task_action=create_task`，`final_decision=continue`。")
-        parts.append("\n- 补充等待任务前必须先真实调用 `fill_task` 工具，然后 `task_action=fill_task`，`final_decision=continue`。")
+        parts.append('\n- 直接回复用户：`"task_action":"none"`, `"final_decision":"answer"`。')
+        parts.append('\n- 需要追问但不创建任务：`"task_action":"none"`, `"final_decision":"ask_user"`。')
+        parts.append('\n- 创建任务前必须先真实调用 `create_task` 工具，然后 `"task_action":"create_task"`, `"final_decision":"continue"`。')
+        parts.append('\n- 补充等待任务前必须先真实调用 `fill_task` 工具，然后 `"task_action":"fill_task"`, `"final_decision":"continue"`。')
         parts.append("\n- 不要伪造任务 ID，不要声称创建/补充了并未真实调用的任务。")
 
         return "".join(parts)
@@ -781,10 +785,12 @@ class CompanionBrain:
         agent = create_agent(
             model=self.brain_llm,
             tools=tools,
-            response_format=ToolStrategy(BrainControlPacket),
         )
         result = await agent.ainvoke({"messages": messages})
-        structured = result.get("structured_response")
+        print(result)
+        print("--------------------------------")
+        structured = parse_raw_brain_json(result)
+        print(structured)
         return normalize_brain_packet(structured, current_context=current_context)
 
     async def generate_proactive(

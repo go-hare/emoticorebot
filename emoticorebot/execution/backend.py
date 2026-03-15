@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from langchain.agents.structured_output import ToolStrategy
-
 from emoticorebot.execution.skills import BUILTIN_SKILLS_DIR
 from emoticorebot.protocol.task_result import TaskExecutionResult
 from emoticorebot.utils.helpers import ensure_dir
@@ -56,7 +54,6 @@ def build_agent(service: "CentralExecutor") -> Any:
             "model": service.central_llm,
             "tools": tools,
             "system_prompt": build_agent_instructions(service),
-            "response_format": ToolStrategy(TaskExecutionResult),
         }
         if skills:
             kwargs["skills"] = skills
@@ -111,15 +108,26 @@ def build_agent_instructions(service: "CentralExecutor") -> str:
         "2. 不负责人格维护、情绪陪伴。\n"
         "3. 不要输出原始日志、工具轨迹或 JSON 代码块。\n\n"
         "## Task 结构化输出要求\n"
-        "系统会强制你输出 `TaskExecutionResult` 结构，不要在 `message` 或 `analysis` 中嵌 JSON。\n"
-        "- `control_state` 对你来说只能使用 `completed` 或 `failed`；不要返回 `waiting_input`。\n"
-        "- `status` 只能是 `success`、`partial`、`failed`。\n"
+        "你必须且只能输出一个合法的 JSON 对象（不要包裹在 markdown 代码块中），"
+        "严格遵循以下 `TaskExecutionResult` schema：\n"
+        "```json\n"
+        "{\n"
+        '  "control_state": "<enum: completed | failed>",\n'
+        '  "status": "<enum: success | partial | failed>",\n'
+        '  "analysis": "<string: 紧凑结论，不展开冗长推理>",\n'
+        '  "message": "<string: 最终可交付结果或失败原因>",\n'
+        '  "missing": "<array: 缺失信息列表；没有就填空数组>",\n'
+        '  "recommended_action": "<string: 建议补充项；没有就填空字符串>",\n'
+        '  "confidence": "<number: 0.0-1.0 置信度>",\n'
+        '  "pending_review": "<array: 需要审核的项；没有就填空数组>"\n'
+        "}\n"
+        "```\n"
+        "⚠️ 重要约束：\n"
+        "- 输出必须是可被 `json.loads()` 直接解析的纯 JSON，不要输出任何 JSON 之外的文字。\n"
+        "- `control_state` 只能是 `completed` 或 `failed`，不要返回 `waiting_input`。\n"
         "- 已完成任务：使用 `completed`，并在 `message` 中写最终可交付结果。\n"
-        "- 如果缺少关键信息无法继续：直接使用 `failed`，在 `message` 或 `analysis` 中写清楚缺什么、为什么无法继续；如有必要可在 `recommended_action` 中写建议补充项。\n"
-        "- 无法继续执行：使用 `failed`，在 `message` 或 `analysis` 中写明失败原因。\n"
-        "- `analysis` 只写紧凑结论，不展开冗长推理。\n"
-        "- `pending_review` 只有确实需要审核时才填写。\n"
-        "- `task_trace` 由系统补充，你不要自己展开执行轨迹。\n"
+        "- 缺少关键信息无法继续：使用 `failed`，在 `message` 或 `analysis` 中写清楚缺什么。\n"
+        "- `task_trace` 由系统补充，你不要自己填写。\n"
     )
 
 

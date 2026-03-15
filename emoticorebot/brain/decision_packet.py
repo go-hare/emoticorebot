@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Literal, TypedDict
 
 from emoticorebot.protocol.task_models import TaskSpec
@@ -146,6 +148,67 @@ def normalize_brain_packet(payload: Any, *, current_context: dict[str, Any]) -> 
     return packet
 
 
+# ---------------------------------------------------------------------------
+# Raw JSON parsing – used when the brain agent outputs plain text JSON
+# instead of structured_response.
+# ---------------------------------------------------------------------------
+
+_JSON_FENCE_RE = re.compile(
+    r"```(?:json)?\s*\n?(.*?)\n?\s*```",
+    re.DOTALL,
+)
+
+
+def parse_raw_brain_json(result: dict[str, Any]) -> dict[str, Any]:
+    """Extract and parse a JSON ``BrainControlPacket`` from an agent result.
+
+    The function first tries ``result["structured_response"]`` (backward-compat).
+    If that is *None*, it falls back to extracting the last AI message's text
+    content, strips optional markdown code fences, and parses the JSON.
+
+    Raises ``RuntimeError`` when the text cannot be parsed.
+    """
+    # Fast path: structured output still present
+    structured = result.get("structured_response")
+    if isinstance(structured, dict):
+        return structured
+
+    # Locate the last AI message text
+    messages = result.get("messages", [])
+    text = ""
+    for msg in reversed(messages):
+        content = getattr(msg, "content", None)
+        if content is None:
+            content = msg.get("content", "") if isinstance(msg, dict) else ""
+        if isinstance(content, list):
+            parts = [
+                str(item.get("text", "")) if isinstance(item, dict) and item.get("type") == "text" else str(item)
+                for item in content
+            ]
+            content = "\n".join(parts)
+        if isinstance(content, str) and content.strip():
+            text = content.strip()
+            break
+
+    if not text:
+        raise RuntimeError("Brain agent returned empty content; cannot parse BrainControlPacket JSON")
+
+    # Strip markdown ```json ... ``` fences if present
+    fence_match = _JSON_FENCE_RE.search(text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Brain agent output is not valid JSON: {exc}\n---\n{text[:500]}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Brain agent JSON is not an object: {type(payload).__name__}")
+
+    return payload
+
+
 __all__ = [
     "BrainControlPacket",
     "BrainFinalDecision",
@@ -153,4 +216,5 @@ __all__ = [
     "normalize_brain_packet",
     "normalize_str_list",
     "normalize_task_spec",
+    "parse_raw_brain_json",
 ]
