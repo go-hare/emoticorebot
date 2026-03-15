@@ -1,8 +1,8 @@
-"""Bootstrap host for the companion runtime stack.
+"""Bootstrap host for the application runtime stack.
 
 这个模块负责装配系统主通路：
 1. 消息调度（接收消息、分发处理）
-2. 协调主脑与 SessionRuntime
+2. 协调 transport、线程历史与新的 bus-driven runtime kernel
 3. 线程历史管理（加载/保存 `dialogue` 与 `internal`）
 4. 反思与后台服务调度
 """
@@ -21,20 +21,16 @@ from loguru import logger
 
 from emoticorebot.adapters.conversation_gateway import ConversationGateway
 from emoticorebot.adapters.outbound_dispatcher import OutboundDispatcher
-from emoticorebot.agent.reflection.input import build_reflection_input
-from emoticorebot.agent.reflection import MemoryService, ReflectionCoordinator
 from emoticorebot.agent.tool import ToolManager
-from emoticorebot.brain import CompanionBrain, EventNarrator
 from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersConfig
 from emoticorebot.agent.context import ContextBuilder
 from emoticorebot.agent.model import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.protocol.task_models import TaskSpec, TaskState
-from emoticorebot.runtime.event_bus import InboundMessage, OutboundMessage, RuntimeEventBus
-from emoticorebot.runtime.event_loop import TaskEventLoop
-from emoticorebot.runtime.manager import RuntimeManager
-from emoticorebot.runtime.session_runtime import SessionRuntime
+from emoticorebot.runtime.transport_bus import InboundMessage, OutboundMessage, TransportBus
+from emoticorebot.runtime.kernel import RuntimeKernel, TurnReply
 from emoticorebot.session.thread_store import ThreadStore
+from emoticorebot.utils.llm_utils import extract_message_text
 
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
@@ -42,13 +38,13 @@ if TYPE_CHECKING:
 
 
 class RuntimeHost:
-    """Top-level host that wires the companion application together."""
+    """Top-level host that wires the application runtime together."""
 
     def __init__(
         self,
-        bus: RuntimeEventBus,
+        bus: TransportBus,
         workspace: Path,
-        central_mode: "ModelModeConfig",
+        worker_mode: "ModelModeConfig",
         brain_mode: "ModelModeConfig",
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
@@ -64,9 +60,9 @@ class RuntimeHost:
 
         self.bus = bus
         self.workspace = workspace
-        self.central_mode = central_mode
+        self.worker_mode = worker_mode
         self.brain_mode = brain_mode
-        self.memory_window = central_mode.memory_window
+        self.memory_window = worker_mode.memory_window
         self.channels_config = channels_config
 
         self.thread_store = thread_store or ThreadStore(workspace)
@@ -79,27 +75,12 @@ class RuntimeHost:
 
         factory = LLMFactory(
             providers_config=providers_config,
-            central_mode=central_mode,
+            worker_mode=worker_mode,
             brain_mode=brain_mode,
         )
-        self.central_llm = factory.get_central()
+        self.worker_llm = factory.get_worker()
         self.brain_llm = factory.get_brain()
 
-        self.companion_brain = CompanionBrain(self.brain_llm, self.context, bus=self.bus)
-        self.event_narrator = EventNarrator(self.brain_llm, self.context, bus=self.bus)
-        self.memory_service = MemoryService(
-            workspace,
-            memory_config=memory_config,
-            providers_config=providers_config,
-        )
-        self.reflection_coordinator = ReflectionCoordinator(
-            workspace,
-            self.emotion_mgr,
-            self.memory_service,
-            reflection_llm=self.brain_llm,
-            memory_config=memory_config,
-            providers_config=providers_config,
-        )
         self.tool_manager = ToolManager(
             workspace,
             exec_config or ExecToolConfig(),
@@ -115,20 +96,17 @@ class RuntimeHost:
         self._turn_locks: dict[str, asyncio.Lock] = {}
         self._state_locks: dict[str, asyncio.Lock] = {}
         self.outbound_dispatcher = OutboundDispatcher(self.bus)
-        self.runtime_manager = RuntimeManager(self._build_session_runtime)
-        self.task_event_loop = TaskEventLoop(
-            runtime_manager=self.runtime_manager,
-            thread_store=self.thread_store,
-            dispatcher=self.outbound_dispatcher,
-            event_narrator=self.event_narrator,
-            emotion_mgr=self.emotion_mgr,
-            memory_window=self.memory_window,
-            new_message_id=self._new_message_id,
-            schedule_turn_reflection=self._schedule_turn_reflection,
-            state_lock_for=self._state_lock_for,
-        )
-        self.runtime_manager.set_on_runtime_created(
-            lambda session_id, runtime: self.task_event_loop.ensure_consumer(session_id, runtime)
+        self.kernel = RuntimeKernel(
+            workspace=workspace,
+            transport=self.bus,
+            brain_llm=self.brain_llm,
+            worker_llm=self.worker_llm,
+            reflection_llm=self.brain_llm,
+            context_builder=self.context,
+            tool_registry=self.tool_manager.get_registry(),
+            emotion_manager=self.emotion_mgr,
+            memory_config=memory_config,
+            providers_config=providers_config,
         )
         self.conversation_gateway = ConversationGateway(
             bus=self.bus,
@@ -145,6 +123,7 @@ class RuntimeHost:
         """主循环：接收消息并调度"""
         self._running = True
         await self.tool_manager.connect_mcp_servers(self._mcp_servers)
+        await self.kernel.start()
         logger.info("Emoticore runtime started")
         await self.conversation_gateway.run_forever(lambda: self._running)
 
@@ -248,8 +227,6 @@ class RuntimeHost:
             )
             self.thread_store.save(thread)
         self._save_proactive_target(msg.channel, msg.chat_id)
-        self._schedule_turn_reflection(session_key=key, state=final_state)
-        self._release_idle_session_runtime(key)
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -280,24 +257,38 @@ class RuntimeHost:
         """关闭 MCP 连接"""
         await self.tool_manager.close_mcp()
 
+    async def generate_proactive_message(self, prompt: str) -> str:
+        """Generate a proactive user-facing message without entering the task pipeline."""
+        fallback = "刚刚想到你了，就来打个招呼。"
+        model = self.brain_llm
+        if model is None:
+            return fallback
+        try:
+            if hasattr(model, "ainvoke"):
+                response = await model.ainvoke(prompt)
+            elif hasattr(model, "invoke"):
+                response = model.invoke(prompt)
+            else:
+                return fallback
+            text = extract_message_text(response)
+            return str(text or "").strip() or fallback
+        except Exception as exc:
+            logger.warning("Proactive generation failed: {}", exc)
+            return fallback
+
     def stop(self) -> None:
         """停止 Runtime"""
         self._running = False
         self.conversation_gateway.stop()
-        self.task_event_loop.stop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.kernel.stop(), name="runtime-kernel-stop")
 
     async def run_deep_reflection(self, *, reason: str = "", warm_limit: int = 15) -> Any:
         """运行深反思（供周期性触发或外部调用）"""
-        return await self.reflection_coordinator.run_deep_reflection(reason=reason, warm_limit=warm_limit)
-
-    def _build_session_runtime(self, session_id: str) -> SessionRuntime:
-        return SessionRuntime(
-            session_id=session_id,
-            thread_id=session_id,
-            central_llm=self.central_llm,
-            context_builder=self.context,
-            tool_registry=self.tool_manager.get_registry(),
-        )
+        return await self.kernel.run_deep_reflection(reason=reason, warm_limit=warm_limit)
 
     def _save_proactive_target(self, channel: str, chat_id: str) -> None:
         """保存主动对话目标（供潜意识服务使用）"""
@@ -364,7 +355,6 @@ class RuntimeHost:
         on_progress: Callable[..., Awaitable[None]] | None,
     ) -> tuple[str, dict[str, Any]]:
         pad = self._load_pad_from_workspace(self.workspace)
-        emotion = self._get_emotion_label(pad)
         final_state: dict[str, Any] = {
             "source_type": "user_turn",
             "user_input": user_input,
@@ -382,35 +372,38 @@ class RuntimeHost:
         if on_progress is not None:
             final_state["on_progress"] = on_progress
 
-        session_runtime = self.runtime_manager.get_or_create_runtime(session_id)
-        session_runtime.set_progress_handler(on_progress)
-        result = await self.companion_brain.handle_user_message(
-            user_input=user_input,
-            history=dialogue_history,
-            internal_history=internal_history,
-            emotion=emotion,
-            pad=pad,
-            task_system=session_runtime,
-            message_id=message_id,
+        turn = await self.kernel.handle_user_message(
+            session_id=session_id,
             channel=channel,
             chat_id=chat_id,
-            session_id=session_id,
-            media=media,
+            sender_id="user",
+            message_id=message_id,
+            content=user_input,
+            history_context=self._build_history_context(dialogue_history, internal_history),
+            attachments=media,
         )
 
-        message = str(result.get("final_message", "") or "").strip()
+        message = str(turn.content or "").strip()
         if not message:
             message = "我先处理这件事。"
 
-        execution_summary = str(result.get("execution_summary", "") or "").strip()
-        task_action = str(result.get("task_action", "none") or "none").strip() or "none"
-        final_decision = str(result.get("final_decision", "answer") or "answer").strip() or "answer"
+        task_action = "none"
+        latest_task = self.kernel.latest_task_for_session(session_id, include_terminal=True)
+        if latest_task is not None and latest_task.turn_id == turn.turn_id:
+            task_action = "create_task"
+        execution_summary = "brain/runtime kernel completed turn dispatch"
+        final_decision = "continue" if task_action != "none" else "answer"
 
         final_state["output"] = message
         final_state["assistant_output"] = message
         final_state["execution_summary"] = execution_summary
         final_state["done"] = True
-        final_state["brain"] = dict(result)
+        final_state["brain"] = {
+            "task_action": task_action,
+            "final_decision": final_decision,
+            "execution_summary": execution_summary,
+            "reply_event_type": turn.event_type,
+        }
         
         # 构建完整的 metadata 结构供 reflection 使用
         final_state["metadata"] = {
@@ -424,7 +417,7 @@ class RuntimeHost:
             "chat_id": chat_id,
         }
 
-        task_snapshot = self._resolve_turn_task_state(session_runtime=session_runtime, result=result)
+        task_snapshot = self._resolve_turn_task_state(session_id=session_id, turn=turn)
         if task_snapshot:
             final_state["task"] = task_snapshot
             final_state["metadata"]["task"] = dict(task_snapshot)
@@ -539,32 +532,42 @@ class RuntimeHost:
         media_items = self.context.build_media_context(media)
         return [{"type": "text", "text": str(content or "")}, *media_items]
 
-    def _resolve_turn_task_state(self, *, session_runtime: SessionRuntime, result: dict[str, Any]) -> TaskState:
-        task_payload = result.get("task")
-        if isinstance(task_payload, dict):
-            task_id = str(task_payload.get("task_id", "") or "").strip()
-            if task_id:
-                snapshot = session_runtime.get_task_snapshot(task_id)
-                compact_snapshot = self._compact_task_state_for_session(snapshot)
-                if compact_snapshot:
-                    return compact_snapshot
-            compact_params = self._compact_task_spec_for_session(task_payload)
-            fallback_task_id = str(task_payload.get("task_id", "") or "").strip()
-            fallback_title = str(task_payload.get("title", "") or "").strip()
-            if compact_params and fallback_task_id:
-                return {
-                    "invoked": True,
-                    "task_id": fallback_task_id,
-                    "title": fallback_title,
-                    "status": "running",
-                    "result_status": "pending",
-                    "control_state": "running",
-                    "params": compact_params,
-                }
-
-        latest_snapshot = session_runtime.latest_active_task_snapshot()
-        compact_latest = self._compact_task_state_for_session(latest_snapshot)
-        return compact_latest if compact_latest else {}
+    def _resolve_turn_task_state(self, *, session_id: str, turn: TurnReply) -> TaskState:
+        task = self.kernel.get_task(turn.related_task_id or "") if turn.related_task_id else None
+        if task is None:
+            task = self.kernel.latest_task_for_session(session_id, include_terminal=True)
+        if task is None:
+            return {}
+        snapshot = task.snapshot().model_dump(exclude_none=True)
+        request = task.request.model_dump(exclude_none=True)
+        status = str(snapshot.get("status", "") or "").strip()
+        result_status = {
+            "done": "success",
+            "failed": "failed",
+            "cancelled": "failed",
+        }.get(status, "pending")
+        control_state = {
+            "waiting_input": "waiting_input",
+            "done": "completed",
+            "failed": "failed",
+            "cancelled": "failed",
+        }.get(status, "running")
+        compact: TaskState = {
+            "invoked": True,
+            "task_id": snapshot.get("task_id", ""),
+            "title": snapshot.get("title", ""),
+            "status": status,
+            "result_status": result_status,
+            "control_state": control_state,
+            "summary": snapshot.get("summary", ""),
+            "error": snapshot.get("error", ""),
+            "stage_info": snapshot.get("last_progress", ""),
+            "params": self._compact_task_spec_for_session(request),
+        }
+        input_request = snapshot.get("input_request")
+        if isinstance(input_request, dict) and input_request:
+            compact["input_request"] = input_request
+        return self._compact_task_state_for_session(compact)
 
     @staticmethod
     def _new_message_id() -> str:
@@ -651,22 +654,6 @@ class RuntimeHost:
             compact["params"] = compact_params
         return compact
 
-    def _schedule_turn_reflection(self, *, session_key: str, state: dict[str, Any]) -> None:
-        """异步调度反思，不阻塞主流程"""
-        reflection_input = build_reflection_input(state)
-
-        async def _run():
-            try:
-                result = await self.reflection_coordinator.write_turn_reflection(reflection_input)
-                if result and getattr(result, "should_run_deep_reflection", False):
-                    await self.reflection_coordinator.run_deep_reflection(
-                        reason=str(getattr(result, "deep_reflection_reason", "") or ""),
-                    )
-            except Exception as exc:
-                logger.warning("Reflection failed for {}: {}", session_key, exc)
-        
-        asyncio.create_task(_run(), name=f"reflection:{session_key}")
-
     def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
         key = str(session_id or "__default__").strip() or "__default__"
         return self._turn_locks.setdefault(key, asyncio.Lock())
@@ -680,6 +667,34 @@ class RuntimeHost:
         dialogue_history = thread.get_history(max_messages=self.memory_window, include_task_context=False)
         internal_history = self.thread_store.get_internal_messages(session_id, max_messages=self.memory_window)
         return dialogue_history, internal_history
+
+    @staticmethod
+    def _build_history_context(
+        dialogue_history: list[dict[str, Any]],
+        internal_history: list[dict[str, Any]],
+    ) -> str:
+        lines: list[str] = []
+        for turn in dialogue_history[-6:]:
+            role = str(turn.get("role", "") or "").strip()
+            content = turn.get("content", "")
+            if isinstance(content, list):
+                text_parts = [
+                    str(block.get("text", "") or "").strip()
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                text = " ".join(part for part in text_parts if part).strip()
+            else:
+                text = str(content or "").strip()
+            if role and text:
+                lines.append(f"{role}: {text}")
+        for record in internal_history[-3:]:
+            content = record.get("content", {})
+            if isinstance(content, dict):
+                summary = str(content.get("summary", "") or "").strip()
+                if summary:
+                    lines.append(f"internal: {summary}")
+        return "\n".join(lines[-8:])
 
     def _persist_user_message(
         self,
@@ -703,18 +718,9 @@ class RuntimeHost:
         self.thread_store.invalidate(thread.thread_id)
 
     async def _reset_session(self, session_id: str) -> None:
-        runtime = self.runtime_manager.remove(session_id)
-        self.task_event_loop.release_session(session_id, runtime=None)
-        if runtime is not None:
-            await runtime.shutdown()
+        self.kernel.clear_session(session_id)
         async with self._state_lock_for(session_id):
             self._reset_session_thread(session_id)
-
-    def _release_idle_session_runtime(self, session_id: str) -> None:
-        runtime = self.runtime_manager.get(session_id)
-        if runtime is None or not runtime.is_idle():
-            return
-        self.task_event_loop.release_session(session_id, runtime=runtime)
 
     def initialize_subconscious(self, enable_reflection: bool = True, enable_heartbeat: bool = False) -> None:
         """初始化潜意识守护进程和心跳服务"""

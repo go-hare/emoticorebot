@@ -9,7 +9,7 @@ from telegram import BotCommand, Update, ReplyParameters
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
-from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
+from emoticorebot.runtime.transport_bus import OutboundMessage, TransportBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import TelegramConfig
 
@@ -120,7 +120,7 @@ class TelegramChannel(BaseChannel):
     def __init__(
         self,
         config: TelegramConfig,
-        bus: RuntimeEventBus,
+        bus: TransportBus,
         groq_api_key: str = "",
     ):
         super().__init__(config, bus)
@@ -415,7 +415,7 @@ class TelegramChannel(BaseChannel):
         # Start typing indicator before processing
         self._start_typing(str_chat_id)
         
-        # Forward to the message bus
+        # Forward to the transport bus
         await self._handle_message(
             sender_id=sender_id,
             chat_id=str_chat_id,

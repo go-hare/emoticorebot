@@ -16,7 +16,7 @@ from typing import Any
 
 from loguru import logger
 
-from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
+from emoticorebot.runtime.transport_bus import OutboundMessage, TransportBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import EmailConfig
 
@@ -49,7 +49,7 @@ class EmailChannel(BaseChannel):
         "Dec",
     )
 
-    def __init__(self, config: EmailConfig, bus: RuntimeEventBus):
+    def __init__(self, config: EmailConfig, bus: TransportBus):
         super().__init__(config, bus)
         self.config: EmailConfig = config
         self._last_subject_by_chat: dict[str, str] = {}

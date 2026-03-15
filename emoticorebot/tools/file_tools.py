@@ -30,7 +30,9 @@ class _WorkspaceTool(Tool):
 
     def _resolve(self, file_path: str) -> Path | str:
         """解析路径，校验是否在允许目录内，返回绝对 Path 或错误字符串。"""
-        path = (self.workspace / file_path).resolve()
+        raw = str(file_path or "").strip()
+        relative = raw[1:] if raw.startswith("/") else raw
+        path = (self.workspace / relative).resolve()
         if self.allowed_dir:
             try:
                 path.relative_to(self.allowed_dir.resolve())

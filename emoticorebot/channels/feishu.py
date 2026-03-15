@@ -11,7 +11,7 @@ from typing import Any
 
 from loguru import logger
 
-from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
+from emoticorebot.runtime.transport_bus import OutboundMessage, TransportBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import FeishuConfig
 
@@ -258,7 +258,7 @@ class FeishuChannel(BaseChannel):
     
     name = "feishu"
     
-    def __init__(self, config: FeishuConfig, bus: RuntimeEventBus):
+    def __init__(self, config: FeishuConfig, bus: TransportBus):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
         self._client: Any = None
@@ -740,7 +740,7 @@ class FeishuChannel(BaseChannel):
             if not content and not media_paths:
                 return
 
-            # Forward to message bus
+            # Forward to transport bus
             reply_to = chat_id if chat_type == "group" else sender_id
             await self._handle_message(
                 sender_id=sender_id,

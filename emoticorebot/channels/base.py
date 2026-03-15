@@ -5,7 +5,7 @@ from typing import Any
 
 from loguru import logger
 
-from emoticorebot.runtime.event_bus import InboundMessage, OutboundMessage, RuntimeEventBus
+from emoticorebot.runtime.transport_bus import InboundMessage, OutboundMessage, TransportBus
 
 
 class BaseChannel(ABC):
@@ -13,18 +13,18 @@ class BaseChannel(ABC):
     Abstract base class for chat channel implementations.
     
     Each channel (Telegram, Discord, etc.) should implement this interface
-    to integrate with the emoticorebot message bus.
+    to integrate with the emoticorebot transport bus.
     """
     
     name: str = "base"
     
-    def __init__(self, config: Any, bus: RuntimeEventBus):
+    def __init__(self, config: Any, bus: TransportBus):
         """
         Initialize the channel.
         
         Args:
             config: Channel-specific configuration.
-            bus: The message bus for communication.
+            bus: The transport bus for communication.
         """
         self.config = config
         self.bus = bus

@@ -1,4 +1,4 @@
-"""Current-process runtime event bus primitives."""
+"""Current-process transport bus primitives."""
 
 from __future__ import annotations
 
@@ -34,13 +34,14 @@ class OutboundMessage:
     channel: str
     chat_id: str
     content: str
+    message_id: str | None = None
     reply_to: str | None = None
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class RuntimeEventBus:
-    """Async bus for routing runtime ingress and egress messages."""
+class TransportBus:
+    """Async transport bus for routing channel ingress and egress messages."""
 
     def __init__(self):
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
@@ -73,4 +74,4 @@ class RuntimeEventBus:
         return self.outbound.qsize()
 
 
-__all__ = ["RuntimeEventBus", "InboundMessage", "OutboundMessage"]
+__all__ = ["TransportBus", "InboundMessage", "OutboundMessage"]

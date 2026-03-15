@@ -9,7 +9,7 @@ from typing import Any, Literal, TypedDict
 from emoticorebot.protocol.task_models import TaskSpec
 
 BrainFinalDecision = Literal["", "answer", "ask_user", "continue"]
-BrainTaskAction = Literal["", "none", "create_task", "fill_task"]
+BrainTaskAction = Literal["", "none", "create_task", "resume_task", "cancel_task"]
 
 
 class BrainControlPacket(TypedDict, total=False):
@@ -47,7 +47,7 @@ def normalize_str_list(value: Any) -> list[str]:
 
 
 def normalize_task_spec(payload: Any, actual: dict[str, Any] | None = None) -> TaskSpec:
-    """Normalize task spec and prefer real runtime-generated task fields."""
+    """Normalize task spec for v3 brain packets."""
     model_task = payload if isinstance(payload, dict) else {}
     source = dict(actual or {})
 
@@ -59,42 +59,31 @@ def normalize_task_spec(payload: Any, actual: dict[str, Any] | None = None) -> T
     task: TaskSpec = {}
     text_fields = (
         "task_id",
-        "origin_message_id",
         "title",
         "request",
         "goal",
         "expected_output",
         "history_context",
-        "channel",
-        "chat_id",
-        "session_id",
+        "review_policy",
+        "preferred_agent",
+        "reason",
     )
     for key in text_fields:
         value = str(_pick(key) or "").strip()
         if value:
             task[key] = value
 
-    list_fields = ("constraints", "success_criteria", "memory_bundle_ids", "skill_hints", "media")
+    list_fields = ("constraints", "success_criteria", "memory_refs", "skill_hints")
     for key in list_fields:
         values = normalize_str_list(_pick(key))
         if values:
             task[key] = values
 
-    history_value = _pick("history")
-    if isinstance(history_value, list):
-        task["history"] = [dict(item) for item in history_value if isinstance(item, dict)]
-
-    task_context_value = _pick("task_context")
-    if isinstance(task_context_value, dict) and task_context_value:
-        task["task_context"] = dict(task_context_value)
-
-    if "task_id" not in task:
-        raise RuntimeError("BrainControlPacket.task.task_id must not be empty")
     return task
 
 
 def normalize_brain_packet(payload: Any, *, current_context: dict[str, Any]) -> BrainControlPacket:
-    """Validate a structured brain packet and enforce task-action consistency."""
+    """Validate a structured brain packet for the v3 executive brain."""
     if not isinstance(payload, dict):
         raise RuntimeError("Brain agent did not return a structured BrainControlPacket")
 
@@ -118,32 +107,44 @@ def normalize_brain_packet(payload: Any, *, current_context: dict[str, Any]) -> 
         if key in payload and payload.get(key) not in (None, ""):
             packet[key] = payload.get(key)
 
-    if packet["task_action"] not in {"none", "create_task", "fill_task"}:
+    if packet["task_action"] not in {"none", "create_task", "resume_task", "cancel_task"}:
         raise RuntimeError(f"Invalid brain task_action: {packet['task_action']!r}")
     if packet["final_decision"] not in {"answer", "ask_user", "continue"}:
         raise RuntimeError(f"Invalid brain final_decision: {packet['final_decision']!r}")
     if not packet["final_message"]:
         raise RuntimeError("BrainControlPacket.final_message must not be empty")
 
-    tool_action = str(current_context.get("tool_action", "none") or "none").strip()
-    actual_task_spec = current_context.get("task_spec")
-    if tool_action != "none" and packet["task_action"] != tool_action:
-        raise RuntimeError(
-            f"BrainControlPacket.task_action={packet['task_action']!r} does not match actual tool action {tool_action!r}"
-        )
-    if tool_action == "create_task" and packet["final_decision"] != "continue":
-        raise RuntimeError("BrainControlPacket.final_decision must be 'continue' after create_task")
-    if tool_action == "fill_task" and packet["final_decision"] != "continue":
-        raise RuntimeError("BrainControlPacket.final_decision must be 'continue' after fill_task")
-
     model_task = payload.get("task")
-    if actual_task_spec is not None:
-        packet["task"] = normalize_task_spec(model_task, actual_task_spec)
-    elif isinstance(model_task, dict) and model_task:
-        packet["task"] = normalize_task_spec(model_task)
+    if packet["task_action"] == "create_task":
+        packet["task"] = normalize_task_spec(
+            model_task,
+            {
+                "request": str(current_context.get("user_input", "") or "").strip(),
+                "history_context": str(current_context.get("history_context", "") or "").strip(),
+                "review_policy": str(current_context.get("review_policy", "") or "").strip(),
+                "preferred_agent": str(current_context.get("preferred_agent", "") or "").strip(),
+            },
+        )
+        if not str(packet["task"].get("request", "") or "").strip():
+            raise RuntimeError("BrainControlPacket.task.request must not be empty for create_task")
+    elif packet["task_action"] in {"resume_task", "cancel_task"}:
+        packet["task"] = normalize_task_spec(
+            model_task,
+            {
+                "task_id": str(
+                    current_context.get("waiting_task_id", "")
+                    or current_context.get("active_task_id", "")
+                    or current_context.get("latest_task_id", "")
+                    or ""
+                ).strip(),
+                "reason": str(payload.get("task_reason", "") or "").strip(),
+            },
+        )
+        if not str(packet["task"].get("task_id", "") or "").strip():
+            raise RuntimeError(f"BrainControlPacket.task.task_id must not be empty for {packet['task_action']}")
 
-    if packet["task_action"] in {"create_task", "fill_task"} and "task" not in packet:
-        raise RuntimeError("BrainControlPacket.task is required when task_action is create_task or fill_task")
+    if packet["task_action"] in {"create_task", "resume_task", "cancel_task"} and "task" not in packet:
+        raise RuntimeError(f"BrainControlPacket.task is required when task_action is {packet['task_action']}")
 
     return packet
 
@@ -159,7 +160,11 @@ _JSON_FENCE_RE = re.compile(
 )
 
 
-def parse_raw_brain_json(result: dict[str, Any]) -> dict[str, Any]:
+def _looks_like_brain_packet(payload: Any) -> bool:
+    return isinstance(payload, dict) and "task_action" in payload and "final_decision" in payload and "final_message" in payload
+
+
+def parse_raw_brain_json(result: Any) -> dict[str, Any]:
     """Extract and parse a JSON ``BrainControlPacket`` from an agent result.
 
     The function first tries ``result["structured_response"]`` (backward-compat).
@@ -168,15 +173,28 @@ def parse_raw_brain_json(result: dict[str, Any]) -> dict[str, Any]:
 
     Raises ``RuntimeError`` when the text cannot be parsed.
     """
+    if _looks_like_brain_packet(result):
+        return result
+
+    if isinstance(result, str):
+        result = {"messages": [result]}
+    elif not isinstance(result, dict):
+        result = {"messages": [result]}
+
     # Fast path: structured output still present
     structured = result.get("structured_response")
-    if isinstance(structured, dict):
+    if _looks_like_brain_packet(structured):
         return structured
 
     # Locate the last AI message text
     messages = result.get("messages", [])
     text = ""
     for msg in reversed(messages):
+        if _looks_like_brain_packet(msg):
+            return msg
+        if isinstance(msg, str) and msg.strip():
+            text = msg.strip()
+            break
         content = getattr(msg, "content", None)
         if content is None:
             content = msg.get("content", "") if isinstance(msg, dict) else ""

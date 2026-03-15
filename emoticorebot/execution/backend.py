@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Literal, Protocol
+
+from pydantic import Field
 
 from emoticorebot.execution.skills import BUILTIN_SKILLS_DIR
+from emoticorebot.protocol.task_models import ProtocolModel
 from emoticorebot.protocol.task_result import TaskExecutionResult
 from emoticorebot.utils.helpers import ensure_dir
 
@@ -15,65 +20,191 @@ except Exception:
     PersistentMemorySaver = None
 
 try:
-    from deepagents import create_deep_agent
+    from langchain.agents import create_agent
 except Exception:
-    create_deep_agent = None
+    create_agent = None
+
+try:
+    from langchain.agents.middleware import HumanInTheLoopMiddleware, TodoListMiddleware
+except Exception:
+    HumanInTheLoopMiddleware = None
+    TodoListMiddleware = None
 
 try:
     from langgraph.checkpoint.memory import InMemorySaver
 except Exception:
     InMemorySaver = None
 
-if TYPE_CHECKING:
-    from emoticorebot.execution.central_executor import CentralExecutor
+
+class ExecutionAgentService(Protocol):
+    _agent: Any | None
+    _checkpointer: Any | None
+    worker_llm: Any
+    tools: Any
+    context: Any
+    tool_runtime: Any
+    assistant_role: str
+
+
+class WorkerStructuredResult(ProtocolModel):
+    control_state: Literal["completed", "waiting_input", "failed"]
+    status: Literal["success", "partial", "pending", "failed"]
+    analysis: str = ""
+    message: str = ""
+    missing: list[str] = Field(default_factory=list)
+    recommended_action: str = ""
+    confidence: float = 0.8
+    pending_review: list[dict[str, Any]] = Field(default_factory=list)
+    attempt_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerTaskProfile:
+    name: Literal["general", "simple_file"]
+    allow_exec: bool
+    system_hint: str = ""
+    task_hint: str = ""
+
+
+GENERAL_TASK_PROFILE = WorkerTaskProfile(name="general", allow_exec=True)
+_FILE_PATH_RE = re.compile(r"(?:^|[\s`'\"(])(?:[\w./-]+\.[A-Za-z0-9]{1,12})(?:$|[\s`'\"),])")
+_FILE_TARGET_TERMS = (
+    "文件",
+    "file",
+    "脚本",
+    "script",
+    "模块",
+    "module",
+)
+_FILE_ACTION_TERMS = (
+    "创建",
+    "新建",
+    "写入",
+    "编辑",
+    "修改",
+    "生成",
+    "补全",
+    "create",
+    "write",
+    "edit",
+    "update",
+)
+_EXEC_REQUIRED_TERMS = (
+    "运行",
+    "执行",
+    "命令",
+    "shell",
+    "bash",
+    "terminal",
+    "终端",
+    "测试",
+    "test",
+    "pytest",
+    "unittest",
+    "安装",
+    "install",
+    "pip ",
+    "uv ",
+    "poetry ",
+    "npm ",
+    "pnpm ",
+    "yarn ",
+    "docker",
+    "git ",
+    "make ",
+    "build",
+    "compile",
+    "启动",
+    "server",
+)
 
 
 def deep_agents_available() -> bool:
-    return create_deep_agent is not None
+    return create_agent is not None
 
 
-def ensure_agent(service: "CentralExecutor") -> Any:
-    if service._agent is None:
-        service._agent = build_agent(service)
-    return service._agent
+def build_task_profile(task_spec: dict[str, Any] | None) -> WorkerTaskProfile:
+    if not isinstance(task_spec, dict):
+        return GENERAL_TASK_PROFILE
+
+    text_parts: list[str] = []
+    for key in ("request", "goal", "expected_output", "history_context"):
+        value = str(task_spec.get(key, "") or "").strip()
+        if value:
+            text_parts.append(value.lower())
+    for key in ("constraints", "success_criteria", "skill_hints"):
+        values = [
+            str(item).strip().lower()
+            for item in list(task_spec.get(key) or [])
+            if str(item).strip()
+        ]
+        text_parts.extend(values)
+
+    text = "\n".join(text_parts)
+    if not text:
+        return GENERAL_TASK_PROFILE
+
+    has_file_target = bool(_FILE_PATH_RE.search(text)) or any(term in text for term in _FILE_TARGET_TERMS)
+    has_file_action = any(term in text for term in _FILE_ACTION_TERMS)
+    needs_exec = any(term in text for term in _EXEC_REQUIRED_TERMS)
+    if not (has_file_target and has_file_action) or needs_exec:
+        return GENERAL_TASK_PROFILE
+
+    return WorkerTaskProfile(
+        name="simple_file",
+        allow_exec=False,
+        system_hint=(
+            "## 本次任务策略\n"
+            "系统已将本次任务标记为简单文件任务。\n"
+            "1. 本次不要使用 `exec`。\n"
+            "2. 直接使用 `write_file` / `edit_file` / `read_file` 完成。\n"
+            "3. 写入成功后只做一次最小验证，然后立即结束。\n\n"
+        ),
+        task_hint=(
+            "执行策略（必须遵守）：这是一个简单文件任务。\n"
+            "- 直接使用文件工具完成，不要运行 shell。\n"
+            "- 不要为了确认结果而反复列目录、反复读取、或做多轮验证。\n"
+            "- 写入成功后最多做一次轻量 readback，然后立刻返回。\n"
+        ),
+    )
 
 
-def build_agent(service: "CentralExecutor") -> Any:
-    if create_deep_agent is None:
-        raise RuntimeError("deepagents is not available")
+def build_agent(
+    service: ExecutionAgentService,
+    *,
+    profile: WorkerTaskProfile | None = None,
+) -> Any:
+    if create_agent is None:
+        raise RuntimeError("langchain create_agent is not available")
 
-    tools = build_tools(service)
-    backend = build_backend(service)
-    use_virtual_skill_paths = backend is not None
-    skills = build_skill_paths(service, virtual_mode=use_virtual_skill_paths)
+    resolved_profile = profile or GENERAL_TASK_PROFILE
+    tools = build_tools(service, profile=resolved_profile)
     checkpointer = ensure_checkpointer(service)
-    interrupt_on = build_interrupt_on()
+    middleware = build_agent_middleware()
 
     try:
         kwargs: dict[str, Any] = {
-            "model": service.central_llm,
+            "model": service.worker_llm,
             "tools": tools,
-            "system_prompt": build_agent_instructions(service),
+            "system_prompt": build_agent_instructions(service, profile=resolved_profile),
+            "response_format": WorkerStructuredResult,
         }
-        if skills:
-            kwargs["skills"] = skills
-        if backend is not None:
-            kwargs["backend"] = backend
         if checkpointer is not None:
             kwargs["checkpointer"] = checkpointer
-        if interrupt_on:
-            kwargs["interrupt_on"] = interrupt_on
-        return create_deep_agent(**kwargs)
+        if middleware:
+            kwargs["middleware"] = middleware
+        return create_agent(**kwargs)
     except TypeError as exc:
-        raise RuntimeError(f"Deep Agents API mismatch: {exc}") from exc
+        raise RuntimeError(f"create_agent API mismatch: {exc}") from exc
 
 
-def ensure_checkpointer(service: "CentralExecutor") -> Any | None:
+def ensure_checkpointer(service: ExecutionAgentService) -> Any | None:
     if service._checkpointer is not None:
         return service._checkpointer
     workspace = Path(service.context.workspace).expanduser().resolve()
     checkpoint_dir = ensure_dir(workspace / "sessions" / "_checkpoints")
-    checkpoint_file = checkpoint_dir / "central.pkl"
+    role = str(getattr(service, "assistant_role", "worker") or "worker").strip()
+    checkpoint_file = checkpoint_dir / f"{role}.pkl"
     if PersistentMemorySaver is not None:
         service._checkpointer = PersistentMemorySaver(checkpoint_file)
         return service._checkpointer
@@ -87,18 +218,37 @@ def build_interrupt_on() -> dict[str, Any]:
     return {
         "cron": {
             "allowed_decisions": ["approve", "reject"],
-            "description": "请确认是否允许 central 创建或修改定时任务。",
+            "description": "请确认是否允许 worker 创建或修改定时任务。",
         },
     }
 
 
-def build_agent_instructions(service: "CentralExecutor") -> str:
+def build_agent_middleware() -> list[Any]:
+    chain: list[Any] = []
+    if HumanInTheLoopMiddleware is not None:
+        chain.append(HumanInTheLoopMiddleware(interrupt_on=build_interrupt_on()))
+    if TodoListMiddleware is not None:
+        chain.append(TodoListMiddleware())
+    return chain
+
+
+def build_agent_instructions(
+    service: ExecutionAgentService,
+    *,
+    profile: WorkerTaskProfile | None = None,
+) -> str:
     workspace = Path(service.context.workspace).expanduser().resolve()
+    role = str(getattr(service, "assistant_role", "worker") or "worker").strip()
+    resolved_profile = profile or GENERAL_TASK_PROFILE
     return (
-        "你是 `central`，负责复杂问题的规划、执行与结果收口。\n"
+        f"你是 `{role}`，负责复杂问题的规划、执行与结果收口。\n"
         f"当前工作区目录是 `{workspace}`。\n\n"
-        "默认文件路径（例如 `/foo.py`）对应当前工作区中的真实文件。\n"
-        "只有 `/state/` 前缀用于会话内临时文件；不要把最终交付物写到 `/state/`。\n\n"
+        "文件工具一律使用相对工作区路径，例如 `src/foo.py`、`add.py`、`.timing_probe/demo.py`。\n"
+        "不要传绝对路径 `/foo.py`，也不要把最终交付物写到 `/state/` 这类临时命名空间。\n"
+        "创建或修改文件时，优先使用 `write_file` / `edit_file` / 行编辑工具，而不是 `exec`。\n\n"
+        "`exec` 只在任务明确要求运行命令、安装依赖、启动进程、执行测试，或文件工具无法完成目标时才可使用。\n"
+        "不要用 `exec` 去列目录、读取文件、cat 内容、或给简单文件任务做例行验证。\n\n"
+        f"{resolved_profile.system_hint}"
         "## 职责\n"
         "1. 接收委托的问题并执行。\n"
         "2. 必要时调用工具，在单次执行内完成任务。\n"
@@ -107,13 +257,21 @@ def build_agent_instructions(service: "CentralExecutor") -> str:
         "1. 不负责最终对用户表达，只返回执行结果。\n"
         "2. 不负责人格维护、情绪陪伴。\n"
         "3. 不要输出原始日志、工具轨迹或 JSON 代码块。\n\n"
+        "## 阶段通知\n"
+        "1. 当你完成关键里程碑时，必须调用 `report_stage` 汇报一次。\n"
+        "2. 尤其是创建文件、修改文件、完成主要验证之后，要立刻汇报。\n"
+        "3. 不要为每个微小动作都汇报，只在用户真正关心的节点汇报。\n\n"
+        "## 收口原则\n"
+        "1. 简单文件任务在写入成功后，只做一次最小验证，然后立即返回 `completed`。\n"
+        "2. 不要为了润色答案而重复调用 `exec`、重复读写同一个文件、或做多轮无意义校验。\n"
+        "3. 如果 `write_file` / `edit_file` 已成功，且一次 readback 或一次轻量检查通过，就直接结束。\n\n"
         "## Task 结构化输出要求\n"
         "你必须且只能输出一个合法的 JSON 对象（不要包裹在 markdown 代码块中），"
         "严格遵循以下 `TaskExecutionResult` schema：\n"
         "```json\n"
         "{\n"
-        '  "control_state": "<enum: completed | failed>",\n'
-        '  "status": "<enum: success | partial | failed>",\n'
+        '  "control_state": "<enum: completed | waiting_input | failed>",\n'
+        '  "status": "<enum: success | partial | pending | failed>",\n'
         '  "analysis": "<string: 紧凑结论，不展开冗长推理>",\n'
         '  "message": "<string: 最终可交付结果或失败原因>",\n'
         '  "missing": "<array: 缺失信息列表；没有就填空数组>",\n'
@@ -124,14 +282,14 @@ def build_agent_instructions(service: "CentralExecutor") -> str:
         "```\n"
         "⚠️ 重要约束：\n"
         "- 输出必须是可被 `json.loads()` 直接解析的纯 JSON，不要输出任何 JSON 之外的文字。\n"
-        "- `control_state` 只能是 `completed` 或 `failed`，不要返回 `waiting_input`。\n"
         "- 已完成任务：使用 `completed`，并在 `message` 中写最终可交付结果。\n"
-        "- 缺少关键信息无法继续：使用 `failed`，在 `message` 或 `analysis` 中写清楚缺什么。\n"
+        "- 缺少关键信息但任务仍可恢复：使用 `waiting_input`，并在 `missing` / `recommended_action` 中写清楚缺什么。\n"
+        "- 无法恢复或执行报错：使用 `failed`，在 `message` 或 `analysis` 中说明原因。\n"
         "- `task_trace` 由系统补充，你不要自己填写。\n"
     )
 
 
-def build_backend(service: "CentralExecutor") -> Any | None:
+def build_backend(service: ExecutionAgentService) -> Any | None:
     workspace = Path(service.context.workspace).expanduser().resolve()
     workspace_skills_root = (workspace / "skills").resolve()
     builtin_skills_root = BUILTIN_SKILLS_DIR.resolve()
@@ -166,18 +324,25 @@ def build_backend(service: "CentralExecutor") -> Any | None:
     return build_agent_backend
 
 
-def build_tools(service: "CentralExecutor") -> list[Any]:
+def build_tools(
+    service: ExecutionAgentService,
+    *,
+    profile: WorkerTaskProfile | None = None,
+) -> list[Any]:
     tools: list[Any] = []
     stage_tool = build_stage_report_tool(service)
     if stage_tool is not None:
         tools.append(stage_tool)
     if service.tools is not None:
+        resolved_profile = profile or GENERAL_TASK_PROFILE
         tool_names = [name for name in service.tools.tool_names if name != "message"]
+        if not resolved_profile.allow_exec:
+            tool_names = [name for name in tool_names if name != "exec"]
         tools.extend(build_registry_tools(service, tool_names))
     return tools
 
 
-def build_stage_report_tool(service: "CentralExecutor") -> Any | None:
+def build_stage_report_tool(service: ExecutionAgentService) -> Any | None:
     """构建阶段性汇报工具，让 agent 可以主动汇报进展。"""
     try:
         from langchain_core.tools import StructuredTool
@@ -191,10 +356,11 @@ def build_stage_report_tool(service: "CentralExecutor") -> Any | None:
         next_step: str = Field(default="", description="下一步计划，可选")
 
     async def report_stage(summary: str, progress: float = 0.5, next_step: str = "") -> str:
+        role = str(getattr(service, "assistant_role", "worker") or "worker").strip()
         return await service.tool_runtime.report_progress(
             str(summary or "").strip(),
             event="task.stage",
-            producer="central",
+            producer=role,
             phase="stage",
             payload={
                 "progress": max(0.0, min(1.0, float(progress))),
@@ -213,7 +379,7 @@ def build_stage_report_tool(service: "CentralExecutor") -> Any | None:
     )
 
 
-def build_registry_tools(service: "CentralExecutor", names: list[str]) -> list[Any]:
+def build_registry_tools(service: ExecutionAgentService, names: list[str]) -> list[Any]:
     if service.tools is None:
         return []
 
@@ -225,7 +391,7 @@ def build_registry_tools(service: "CentralExecutor", names: list[str]) -> list[A
     return built
 
 
-def build_registry_tool(service: "CentralExecutor", name: str) -> Any | None:
+def build_registry_tool(service: ExecutionAgentService, name: str) -> Any | None:
     if service.tools is None:
         return None
 
@@ -254,7 +420,18 @@ def build_registry_tool(service: "CentralExecutor", name: str) -> Any | None:
     )  # type: ignore[call-overload]
 
     async def _runner(**kwargs: Any) -> str:
-        return await service.tools.execute(name, kwargs)
+        result = await service.tools.execute(name, kwargs)
+        summary = summarize_tool_progress(name=name, result=result)
+        if summary:
+            role = str(getattr(service, "assistant_role", "worker") or "worker").strip()
+            await service.tool_runtime.report_progress(
+                summary,
+                event="task.tool",
+                producer=role,
+                phase="tool",
+                tool_name=name,
+            )
+        return result
 
     _runner.__name__ = name
     _runner.__doc__ = str(registry_tool.description or name)
@@ -282,7 +459,34 @@ def json_schema_to_python_type(schema: dict[str, Any] | None) -> Any:
     return str
 
 
-def build_skill_paths(service: "CentralExecutor", *, virtual_mode: bool = False) -> list[str]:
+def summarize_tool_progress(*, name: str, result: Any) -> str:
+    watched = {
+        "write_file",
+        "edit_file",
+        "insert_lines",
+        "replace_lines",
+        "delete_lines",
+        "exec",
+    }
+    if name not in watched:
+        return ""
+
+    text = str(result or "").strip()
+    if not text or text.startswith("Error:"):
+        return ""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    headline = lines[0]
+    if name == "exec" and headline.lower().startswith("exit code:"):
+        if len(lines) > 1:
+            headline = f"{headline}; {lines[1]}"
+    return f"{name} 已完成：{headline[:160]}"
+
+
+def build_skill_paths(service: ExecutionAgentService, *, virtual_mode: bool = False) -> list[str]:
     workspace = getattr(service.context, "workspace", None)
     paths: list[str] = []
     workspace_skills: Path | None = None
@@ -299,4 +503,4 @@ def build_skill_paths(service: "CentralExecutor", *, virtual_mode: bool = False)
     return paths
 
 
-__all__ = ["deep_agents_available", "ensure_agent"]
+__all__ = ["GENERAL_TASK_PROFILE", "WorkerTaskProfile", "build_agent", "build_task_profile", "deep_agents_available", "ensure_checkpointer"]

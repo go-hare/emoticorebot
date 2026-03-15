@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
+from emoticorebot.runtime.transport_bus import OutboundMessage, TransportBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import MochatConfig
 from emoticorebot.utils.helpers import get_data_path
@@ -216,7 +216,7 @@ class MochatChannel(BaseChannel):
 
     name = "mochat"
 
-    def __init__(self, config: MochatConfig, bus: RuntimeEventBus):
+    def __init__(self, config: MochatConfig, bus: TransportBus):
         super().__init__(config, bus)
         self.config: MochatConfig = config
         self._http: httpx.AsyncClient | None = None

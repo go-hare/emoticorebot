@@ -1,0 +1,38 @@
+"""Priority model for the v3 runtime bus."""
+
+from __future__ import annotations
+
+from enum import IntEnum
+
+from .topics import EventType
+
+
+class EventPriority(IntEnum):
+    P0 = 0
+    P1 = 1
+    P2 = 2
+    P3 = 3
+    P4 = 4
+
+
+PRIORITY_BY_EVENT_TYPE: dict[str, EventPriority] = {
+    EventType.INPUT_INTERRUPT: EventPriority.P0,
+    EventType.CONTROL_STOP: EventPriority.P0,
+    EventType.INPUT_USER_MESSAGE: EventPriority.P1,
+    EventType.BRAIN_CREATE_TASK: EventPriority.P1,
+    EventType.TASK_EVENT_NEED_INPUT: EventPriority.P1,
+    EventType.TASK_EVENT_RESULT: EventPriority.P2,
+    EventType.TASK_EVENT_FAILED: EventPriority.P2,
+    EventType.OUTPUT_REPLY_READY: EventPriority.P2,
+    EventType.TASK_REPORT_PROGRESS: EventPriority.P3,
+    EventType.TASK_EVENT_STARTED: EventPriority.P3,
+    EventType.MEMORY_REFLECT_TURN: EventPriority.P4,
+    EventType.MEMORY_WRITE_REQUEST: EventPriority.P4,
+}
+
+
+def priority_for(event_type: EventType | str) -> EventPriority:
+    return PRIORITY_BY_EVENT_TYPE.get(str(event_type), EventPriority.P3)
+
+
+__all__ = ["EventPriority", "PRIORITY_BY_EVENT_TYPE", "priority_for"]

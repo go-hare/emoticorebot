@@ -6,7 +6,7 @@ from typing import Any
 
 from loguru import logger
 
-from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
+from emoticorebot.runtime.transport_bus import OutboundMessage, TransportBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import WhatsAppConfig
 
@@ -21,7 +21,7 @@ class WhatsAppChannel(BaseChannel):
     
     name = "whatsapp"
     
-    def __init__(self, config: WhatsAppConfig, bus: RuntimeEventBus):
+    def __init__(self, config: WhatsAppConfig, bus: TransportBus):
         super().__init__(config, bus)
         self.config: WhatsAppConfig = config
         self._ws = None

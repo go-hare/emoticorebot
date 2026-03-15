@@ -1,8 +1,8 @@
 """ToolManager - 工具管理服务。
 
-职责（单一）：注册 / 配置 / 连接 / 释放所有工具，向 CentralExecutor 提供 ToolRegistry。
+职责（单一）：注册 / 配置 / 连接 / 释放所有工具，向执行层提供 ToolRegistry。
 
-工具注册逻辑集中在此，避免分散到 Runtime 或 CentralExecutor 内部。
+工具注册逻辑集中在此，避免分散到 Runtime 或 WorkerAgent 内部。
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from emoticorebot.tools import (
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ExecToolConfig
     from emoticorebot.cron.service import CronService
-from emoticorebot.runtime.event_bus import RuntimeEventBus
+from emoticorebot.runtime.transport_bus import TransportBus
 
 
 class ToolManager:
@@ -47,7 +47,7 @@ class ToolManager:
         self,
         workspace: Path,
         exec_config: "ExecToolConfig",
-        bus: "RuntimeEventBus | None" = None,
+        bus: "TransportBus | None" = None,
         cron_service: "CronService | None" = None,
         brave_api_key: str | None = None,
         restrict_to_workspace: bool = False,
@@ -156,7 +156,7 @@ class ToolManager:
             logger.info("MCP servers closed")
 
     def get_registry(self) -> ToolRegistry:
-        """获取工具注册表（供 CentralExecutor 使用）。"""
+        """获取工具注册表（供执行层使用）。"""
         return self.registry
 
 

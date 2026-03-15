@@ -8,7 +8,7 @@ from typing import Awaitable, Callable
 from loguru import logger
 
 from emoticorebot.adapters.outbound_dispatcher import OutboundDispatcher
-from emoticorebot.runtime.event_bus import InboundMessage, OutboundMessage, RuntimeEventBus
+from emoticorebot.runtime.transport_bus import InboundMessage, OutboundMessage, TransportBus
 
 MessageProcessor = Callable[
     [InboundMessage, str | None, Callable[..., Awaitable[None]] | None],
@@ -22,7 +22,7 @@ class ConversationGateway:
     def __init__(
         self,
         *,
-        bus: RuntimeEventBus,
+        bus: TransportBus,
         dispatcher: OutboundDispatcher,
         message_processor: MessageProcessor,
     ):
@@ -48,9 +48,7 @@ class ConversationGateway:
     async def dispatch(self, msg: InboundMessage) -> None:
         lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
         async with lock:
-            response = await self._message_processor(msg, None, None)
-            if response is not None:
-                await self.dispatcher.publish(response)
+            await self._message_processor(msg, None, None)
 
     def _on_dispatch_done(self, task: asyncio.Task) -> None:
         self._dispatch_tasks.discard(task)

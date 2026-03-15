@@ -47,34 +47,34 @@ _PROVIDER_BASE_URLS: dict[str, str] = {
 
 
 class LLMFactory:
-    """根据 brain / central 模式配置和 provider 凭证构建 LangChain chat model。
+    """根据 brain / worker 模式配置和 provider 凭证构建 LangChain chat model。
 
     Usage::
 
         factory = LLMFactory(
             providers_config=config.providers,
-            central_mode=config.agents.defaults.central_mode,
+            worker_mode=config.agents.defaults.worker_mode,
             brain_mode=config.agents.defaults.brain_mode,
         )
-        central_llm = factory.get_central()
+        worker_llm = factory.get_worker()
         brain_llm = factory.get_brain()
     """
 
     def __init__(
         self,
         providers_config: "ProvidersConfig",
-        central_mode: "ModelModeConfig",
+        worker_mode: "ModelModeConfig",
         brain_mode: "ModelModeConfig",
     ) -> None:
         self._providers = providers_config
-        self._central = central_mode
+        self._worker = worker_mode
         self._brain = brain_mode
 
     # ── 公共接口 ──────────────────────────────────────────────────────────────
 
-    def get_central(self) -> Any:
-        """构建 central 主力大模型实例。"""
-        return self._build(self._central)
+    def get_worker(self) -> Any:
+        """构建 worker 执行模型实例。"""
+        return self._build(self._worker)
 
     def get_brain(self) -> Any:
         """构建 brain 模型实例。"""

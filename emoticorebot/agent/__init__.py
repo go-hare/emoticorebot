@@ -5,36 +5,21 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
-    "CompanionBrain",
-    "EventNarrator",
-    "CentralExecutor",
-    "MemoryService",
-    "ReflectionCoordinator",
+    "DeepAgentExecutor",
+    "ExecutiveBrain",
     "ToolManager",
 ]
 
 
 def __getattr__(name: str) -> Any:
-    if name == "CompanionBrain":
-        from emoticorebot.brain.companion_brain import CompanionBrain
+    if name == "DeepAgentExecutor":
+        from emoticorebot.execution.deep_agent_executor import DeepAgentExecutor
 
-        return CompanionBrain
-    if name == "EventNarrator":
-        from emoticorebot.brain.event_narrator import EventNarrator
+        return DeepAgentExecutor
+    if name == "ExecutiveBrain":
+        from emoticorebot.brain.executive import ExecutiveBrain
 
-        return EventNarrator
-    if name == "CentralExecutor":
-        from emoticorebot.execution.central_executor import CentralExecutor
-
-        return CentralExecutor
-    if name == "MemoryService":
-        from emoticorebot.agent.reflection import MemoryService
-
-        return MemoryService
-    if name == "ReflectionCoordinator":
-        from emoticorebot.agent.reflection import ReflectionCoordinator
-
-        return ReflectionCoordinator
+        return ExecutiveBrain
     if name == "ToolManager":
         from emoticorebot.agent.tool import ToolManager
 

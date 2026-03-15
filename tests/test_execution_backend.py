@@ -4,7 +4,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from emoticorebot.execution.backend import build_backend, build_interrupt_on
+from emoticorebot.execution.backend import build_backend, build_interrupt_on, build_tools, build_task_profile
+from emoticorebot.tools import ExecTool, ToolRegistry, WriteFileTool
 
 
 def _build_service(workspace: Path) -> SimpleNamespace:
@@ -50,3 +51,24 @@ def test_backend_interrupts_do_not_include_message_tool() -> None:
 
     assert "message" not in interrupt_on
     assert "cron" in interrupt_on
+
+
+def test_simple_file_tasks_do_not_expose_exec_tool() -> None:
+    with TemporaryDirectory() as tmp_dir:
+        workspace = Path(tmp_dir)
+        registry = ToolRegistry()
+        registry.register(WriteFileTool(workspace=workspace))
+        registry.register(ExecTool(working_dir=str(workspace)))
+        service = SimpleNamespace(
+            context=SimpleNamespace(workspace=str(workspace)),
+            assistant_role="worker",
+            tools=registry,
+            tool_runtime=SimpleNamespace(report_progress=None),
+        )
+
+        profile = build_task_profile({"request": "创建一个 add.py 文件，返回 a+b"})
+        tools = build_tools(service, profile=profile)
+        names = {tool.name for tool in tools}
+
+        assert "write_file" in names
+        assert "exec" not in names

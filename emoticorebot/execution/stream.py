@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from emoticorebot.utils.llm_utils import normalize_content_blocks
@@ -15,12 +15,9 @@ try:
 except Exception:
     Command = None
 
-if TYPE_CHECKING:
-    from emoticorebot.execution.central_executor import CentralExecutor
-
 
 async def invoke_agent(
-    service: "CentralExecutor",
+    _service: Any,
     agent: Any,
     prompt: str,
     *,
@@ -32,7 +29,6 @@ async def invoke_agent(
     on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     resume_value: Any | None = None,
 ) -> Any:
-    del service
     payload: Any
     if resume_value is not None and Command is not None:
         payload = Command(resume=resume_value)
@@ -44,7 +40,7 @@ async def invoke_agent(
             "thread_id": thread_id,
         },
         "metadata": {
-            "assistant_id": "emoticorebot-central",
+            "assistant_id": "emoticorebot-worker",
             "run_id": run_id,
             "channel": channel,
             "chat_id": chat_id,
@@ -66,7 +62,7 @@ def build_thread_id(*, channel: str, chat_id: str, session_id: str, run_id: str)
         channel_text = str(channel or "").strip()
         chat_text = str(chat_id or "").strip()
         base = f"{channel_text}:{chat_text}" if channel_text or chat_text else "default"
-    return f"central:{base}:{run_id}"
+    return f"worker:{base}:{run_id}"
 
 
 def new_run_id() -> str:

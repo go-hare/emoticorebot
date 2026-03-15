@@ -1,101 +1,91 @@
-"""Central executor backed by Deep Agent."""
+"""Protocol-native deep-agent executor used by the worker role."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
 from emoticorebot.execution import backend as executor_backend
 from emoticorebot.execution import stream as executor_stream
 from emoticorebot.execution.executor_context import ExecutorContext
-from emoticorebot.execution.tool_runtime import ExecutionToolRuntime
+from emoticorebot.execution.tool_runtime import DetailedProgressReporter, ExecutionToolRuntime
 from emoticorebot.protocol.task_models import TaskSpec
 from emoticorebot.protocol.task_result import TaskExecutionResult
-from emoticorebot.runtime.running_task import RunningTask
-from emoticorebot.runtime.session_runtime import SessionRuntime
 from emoticorebot.utils.llm_utils import blocks_to_llm_content
 
-if TYPE_CHECKING:
-    from emoticorebot.agent.context import ContextBuilder
-    from emoticorebot.tools import ToolRegistry
 
-
-class CentralExecutor:
-    """Executor that delegates complex tasks to the Deep Agent stack."""
+class DeepAgentExecutor:
+    """Runs a task spec against the deep-agent backend without runtime coupling."""
 
     DEFAULT_TASK_TIMEOUT_S = 120.0
+    _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
+    assistant_role = "worker"
 
-    def __init__(
-        self,
-        central_llm,
-        tool_registry: "ToolRegistry | None",
-        context_builder: "ContextBuilder",
-    ):
+    def __init__(self, worker_llm: Any, tool_registry: Any, context_builder: Any) -> None:
         self.executor_context = ExecutorContext(
-            central_llm=central_llm,
+            worker_llm=worker_llm,
             tool_registry=tool_registry,
             context_builder=context_builder,
         )
         self.tool_runtime = ExecutionToolRuntime()
-
-        # Compatibility for shared helper modules that inspect these attributes.
-        self.central_llm = self.executor_context.central_llm
+        self.worker_llm = self.executor_context.worker_llm
         self.tools = self.executor_context.tool_registry
         self.context = self.executor_context.context_builder
-
         self._agent: Any | None = None
         self._checkpointer: Any | None = None
-        self._current_runtime: SessionRuntime | None = None
-        self._current_task: RunningTask | None = None
         self._trace_log: list[dict[str, Any]] = []
 
-    async def run_task(self, task: RunningTask, runtime: SessionRuntime) -> TaskExecutionResult:
-        """Execute a single task instance end-to-end."""
+    async def execute(
+        self,
+        task_spec: TaskSpec,
+        *,
+        task_id: str,
+        progress_reporter: DetailedProgressReporter | None = None,
+    ) -> TaskExecutionResult:
         if not executor_backend.deep_agents_available():
             return self._build_result(
                 control_state="failed",
                 status="failed",
-                message="Deep Agents 依赖尚未安装，central 当前无法执行内部任务。",
-                analysis="系统缺少 deepagents 依赖",
+                message="Worker agent 依赖当前不可用，worker 无法执行内部任务。",
+                analysis="系统缺少 create_agent 执行能力",
                 confidence=0.0,
             )
 
-        task_spec: TaskSpec = dict(task.params or {})
         request = str(task_spec.get("request", "") or "").strip()
         if not request:
             return self._build_result(
                 control_state="failed",
                 status="failed",
-                message="central 未收到有效请求。",
+                message="worker 未收到有效请求。",
                 analysis="任务请求为空",
                 confidence=0.0,
             )
 
-        agent = executor_backend.ensure_agent(self)
-        thread_id = self._build_thread_id(task_spec, task.task_id)
+        task_profile = executor_backend.build_task_profile(task_spec)
+        agent = executor_backend.build_agent(self, profile=task_profile)
+        thread_id = self._build_thread_id(task_spec, task_id)
         run_id = f"run_{uuid4().hex[:12]}"
-
-        self._current_runtime = runtime
-        self._current_task = task
-        self.tool_runtime.bind(runtime=runtime, task=task)
+        self.tool_runtime.bind_reporter(progress_reporter)
         self._trace_log = []
 
         history = [item for item in list(task_spec.get("history") or []) if isinstance(item, dict)]
         media = [str(item).strip() for item in list(task_spec.get("media") or []) if str(item).strip()]
         task_context = dict(task_spec.get("task_context") or {})
-        agent_task: asyncio.Task | None = None
+        agent_task: asyncio.Task[Any] | None = None
 
         try:
-            await runtime.report_progress(
-                task,
-                "正在执行内部任务",
-                event="task.progress",
-                producer="central",
-                phase="stage",
-            )
+            if progress_reporter is not None:
+                await progress_reporter(
+                    "正在执行内部任务",
+                    {
+                        "event": "task.progress",
+                        "producer": "worker",
+                        "phase": "stage",
+                    },
+                )
 
             timeout_s = self._resolve_task_timeout(task_spec)
             agent_task = asyncio.create_task(
@@ -107,8 +97,9 @@ class CentralExecutor:
                     history=history,
                     media=media,
                     task_context=task_context,
+                    task_profile=task_profile,
                 ),
-                name=f"central-agent:{task.task_id}",
+                name=f"deep-agent:{task_id}",
             )
             try:
                 agent_result = await asyncio.wait_for(asyncio.shield(agent_task), timeout=timeout_s)
@@ -119,8 +110,8 @@ class CentralExecutor:
                 return self._build_result(
                     control_state="failed",
                     status="failed",
-                    message=f"central 执行超时（{timeout_text}s），本次任务已终止。",
-                    analysis="CentralExecutor 在限定时间内未返回结果。",
+                    message=f"worker 执行超时（{timeout_text}s），本次任务已终止。",
+                    analysis="worker executor 在限定时间内未返回结果。",
                     confidence=0.0,
                 )
             return self._normalize_task_result(self._extract_structured_result(agent_result))
@@ -131,17 +122,15 @@ class CentralExecutor:
             raise
         finally:
             self.tool_runtime.clear()
-            self._current_runtime = None
-            self._current_task = None
 
     def _build_thread_id(self, task_spec: TaskSpec, task_id: str) -> str:
         session_id = str(task_spec.get("session_id", "") or "").strip()
         if session_id:
-            return f"central:{session_id}:{task_id}"
+            return f"worker:{session_id}:{task_id}"
         channel = str(task_spec.get("channel", "") or "").strip()
         chat_id = str(task_spec.get("chat_id", "") or "").strip()
         base = f"{channel}:{chat_id}" if channel or chat_id else "default"
-        return f"central:{base}:{task_id}"
+        return f"worker:{base}:{task_id}"
 
     def _resolve_task_timeout(self, task_spec: TaskSpec) -> float:
         raw_timeout = task_spec.get("timeout_s")
@@ -154,7 +143,7 @@ class CentralExecutor:
         return timeout_s
 
     @staticmethod
-    def _consume_background_task_result(task: asyncio.Task) -> None:
+    def _consume_background_task_result(task: asyncio.Task[Any]) -> None:
         try:
             task.result()
         except asyncio.CancelledError:
@@ -172,12 +161,13 @@ class CentralExecutor:
         history: list[dict[str, Any]] | None = None,
         media: list[str] | None = None,
         task_context: dict[str, Any] | None = None,
+        task_profile: executor_backend.WorkerTaskProfile | None = None,
     ) -> Any:
         messages: list[dict[str, Any]] = []
         for turn in (history or [])[-10:]:
             role = str(turn.get("role", "") or "").strip()
             content = turn.get("content", "")
-            if role in ("user", "assistant") and content:
+            if role in {"user", "assistant"} and content:
                 llm_content = blocks_to_llm_content(content)
                 if llm_content:
                     messages.append({"role": role, "content": llm_content})
@@ -192,7 +182,10 @@ class CentralExecutor:
             if str(item).strip()
         ]
 
-        user_parts = [request]
+        user_parts: list[str] = []
+        if task_profile is not None and task_profile.task_hint:
+            user_parts.append(task_profile.task_hint)
+        user_parts.append(request)
         if goal:
             user_parts.append(f"\n\n任务目标：{goal}")
         if constraints:
@@ -201,10 +194,11 @@ class CentralExecutor:
             user_parts.append("\n\n完成标准：\n- " + "\n- ".join(success_criteria))
         if expected_output:
             user_parts.append(f"\n\n期望输出：{expected_output}")
+
         context_parts: list[str] = []
-        top_level_history_context = str(task_spec.get("history_context", "") or "").strip()
-        if top_level_history_context:
-            context_parts.append(top_level_history_context)
+        history_context = str(task_spec.get("history_context", "") or "").strip()
+        if history_context:
+            context_parts.append(history_context)
         if task_context:
             nested_history_context = str(task_context.get("history_context", "") or "").strip()
             if nested_history_context and nested_history_context not in context_parts:
@@ -230,8 +224,7 @@ class CentralExecutor:
 
         media_items = self.context.build_media_context(media) if self.context else []
         if media_items:
-            user_content: Any = [{"type": "text", "text": "".join(user_parts)}, *media_items]
-            messages.append({"role": "user", "content": user_content})
+            messages.append({"role": "user", "content": [{"type": "text", "text": "".join(user_parts)}, *media_items]})
         else:
             if media:
                 user_parts.append(f"\n\n[附件: {', '.join(media)}]")
@@ -240,7 +233,7 @@ class CentralExecutor:
         payload = {"messages": messages}
         config = {
             "configurable": {"thread_id": thread_id},
-            "metadata": {"assistant_id": "emoticorebot-central", "run_id": run_id},
+            "metadata": {"assistant_id": "emoticorebot-worker", "run_id": run_id},
         }
 
         if hasattr(agent, "astream"):
@@ -265,28 +258,24 @@ class CentralExecutor:
                 continue
             for record in executor_stream.build_trace_records(mode=mode, namespace=namespace, data=data):
                 self._trace_log.append(record)
-
         if last_values is None:
             raise RuntimeError("Deep Agent stream did not produce final state")
         return last_values
 
-    _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
-
     def _extract_structured_result(self, result: Any) -> dict[str, Any]:
-        """Extract and parse a JSON TaskExecutionResult from an agent result.
-
-        Tries structured_response first (backward-compat), then falls back to
-        parsing the last AI message's text content as JSON.
-        """
+        if hasattr(result, "model_dump"):
+            payload = result.model_dump()
+            if isinstance(payload, dict):
+                return payload
         if isinstance(result, dict):
-            # Fast path: structured output still present
             structured = result.get("structured_response")
+            if hasattr(structured, "model_dump"):
+                structured = structured.model_dump()
             if isinstance(structured, dict):
                 return structured
             if "control_state" in result or "status" in result:
                 return result
 
-            # Fallback: parse raw JSON from the last AI message
             messages = result.get("messages", [])
             text = ""
             for msg in reversed(messages):
@@ -304,11 +293,9 @@ class CentralExecutor:
                     break
 
             if text:
-                # Strip markdown ```json ... ``` fences if present
                 fence_match = self._JSON_FENCE_RE.search(text)
                 if fence_match:
                     text = fence_match.group(1).strip()
-
                 try:
                     payload = json.loads(text)
                     if isinstance(payload, dict):
@@ -316,11 +303,11 @@ class CentralExecutor:
                 except json.JSONDecodeError:
                     pass
 
-        raise RuntimeError("Central agent did not return a structured TaskExecutionResult")
+        raise RuntimeError("Worker agent did not return a structured TaskExecutionResult")
 
     def _normalize_task_result(self, payload: dict[str, Any]) -> TaskExecutionResult:
         if not isinstance(payload, dict):
-            raise RuntimeError("Central task result must be a dict")
+            raise RuntimeError("Worker task result must be a dict")
 
         control_state = str(payload.get("control_state", "completed") or "completed").strip()
         if control_state not in {"waiting_input", "completed", "failed"}:
@@ -345,9 +332,7 @@ class CentralExecutor:
             request_hint = recommended_action or f"请补充以下信息：{missing[0]}"
             missing_summary = "、".join(missing)
             message = message or f"缺少继续执行所需信息：{missing_summary}。{request_hint}"
-            analysis = analysis or "Central 当前单次执行无法继续，需由主脑决定是否重新发起新任务。"
-            control_state = "failed"
-            status = "failed"
+            analysis = analysis or "当前执行缺少必要输入，等待用户补充后继续。"
             recommended_action = request_hint
         elif control_state == "completed":
             if status not in {"success", "partial"}:
@@ -370,7 +355,7 @@ class CentralExecutor:
         if not trace_items:
             trace_items = [dict(item) for item in list(payload.get("task_trace", []) or []) if isinstance(item, dict)]
 
-        normalized: TaskExecutionResult = {
+        return {
             "control_state": control_state,
             "status": status,
             "analysis": analysis,
@@ -382,7 +367,6 @@ class CentralExecutor:
             "attempt_count": attempt_count,
             "task_trace": trace_items,
         }
-        return normalized
 
     @staticmethod
     def _build_result(
@@ -410,6 +394,8 @@ class CentralExecutor:
     def _default_status_for_control_state(control_state: str) -> str:
         if control_state == "failed":
             return "failed"
+        if control_state == "waiting_input":
+            return "pending"
         return "success"
 
     @staticmethod
@@ -430,7 +416,7 @@ class CentralExecutor:
                 record["severity"] = severity
             if "blocking" in item:
                 record["blocking"] = bool(item.get("blocking"))
-            evidence = CentralExecutor._normalize_str_list(item.get("evidence"))
+            evidence = DeepAgentExecutor._normalize_str_list(item.get("evidence"))
             if evidence:
                 record["evidence"] = evidence
             payload = item.get("payload")
@@ -480,4 +466,4 @@ class CentralExecutor:
         return max(1, retry_count + 1)
 
 
-__all__ = ["CentralExecutor"]
+__all__ = ["DeepAgentExecutor"]

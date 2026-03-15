@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 class ExecutorContext:
     """Immutable dependencies used by an executor instance."""
 
-    central_llm: Any
+    worker_llm: Any
     tool_registry: ToolRegistry | None
     context_builder: "ContextBuilder"
 

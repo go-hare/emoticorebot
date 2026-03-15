@@ -1,4 +1,4 @@
-"""Serializable task state owned by SessionRuntime."""
+"""Serializable task state for lightweight execution wrappers."""
 
 from __future__ import annotations
 

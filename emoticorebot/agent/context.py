@@ -11,7 +11,7 @@ from typing import Any
 from emoticorebot.agent.cognitive import CognitiveEvent
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.execution.skills import SkillsLoader
-from emoticorebot.memory import MemoryStore
+from emoticorebot.memory.retrieval import MemoryRetrieval
 
 
 class ContextBuilder:
@@ -26,17 +26,17 @@ class ContextBuilder:
     ):
         self.workspace = workspace
         self.skills = SkillsLoader(workspace)
-        self.memory_store = MemoryStore(
+        self.memory = MemoryRetrieval(
             workspace,
             memory_config=memory_config,
             providers_config=providers_config,
         )
 
     def query_brain_memories(self, *, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        return self.memory_store.query(query, audiences=("brain", "shared"), limit=limit)
+        return self.memory.query_brain_memories(query=query, limit=limit)
 
     def build_task_memory_bundle(self, *, query: str, limit: int = 6) -> dict[str, list[dict[str, Any]]]:
-        return self.memory_store.build_task_bundle(query=query, limit=limit)
+        return self.memory.build_task_memory_bundle(query=query, limit=limit)
 
     def build_brain_system_prompt(
         self,
@@ -59,7 +59,7 @@ class ContextBuilder:
         if user:
             parts.append(f"## 用户锚点（USER）\n\n{user}")
 
-        long_term_memory = self.memory_store.build_brain_context(query=query, limit=8)
+        long_term_memory = self.memory.build_brain_context(query=query, limit=8)
         if long_term_memory:
             parts.append(long_term_memory)
 
@@ -84,6 +84,48 @@ class ContextBuilder:
 
         return "\n\n---\n\n".join(parts)
 
+    def build_brain_reply_context(
+        self,
+        *,
+        query: str = "",
+        current_emotion: str = "平静",
+        pad_state: tuple[float, float, float] | None = None,
+        internal_task_summaries: list[str] | None = None,
+    ) -> str:
+        parts = [self._get_brain_identity()]
+
+        soul = self._load_file("SOUL.md")
+        if soul:
+            parts.append(f"## 灵魂锚点（SOUL）\n\n{soul}")
+
+        user = self._load_file("USER.md")
+        if user:
+            parts.append(f"## 用户锚点（USER）\n\n{user}")
+
+        long_term_memory = self.memory.build_brain_context(query=query, limit=8)
+        if long_term_memory:
+            parts.append(long_term_memory)
+
+        state = self._load_file("current_state.md")
+        if state:
+            parts.append(f"## 当前状态\n\n{state}")
+
+        task_summaries = [
+            str(item).strip() for item in (internal_task_summaries or []) if str(item).strip()
+        ]
+        if task_summaries:
+            parts.append("## 最近任务摘要\n\n" + "\n".join(f"- {item}" for item in task_summaries[:5]))
+
+        parts.extend(
+            CognitiveEvent.build_cognitive_sections(
+                self.workspace,
+                query=query,
+                current_emotion=current_emotion,
+                pad_state=pad_state,
+            )
+        )
+        return "\n\n---\n\n".join(parts)
+
     def _get_brain_identity(self) -> str:
         return f"""# Brain
 
@@ -96,21 +138,21 @@ class ContextBuilder:
 ## 核心职责
 1. 处理所有用户可见对话。
 2. 综合 `SOUL.md`、`USER.md`、统一长期 `memory`、当前状态和最近认知事件。
-3. 判断当前轮应该直接回复，还是创建 `task` 并委托给 `central`。
-4. 由你自己完成长期记忆检索；`central` 不允许直接检索长期记忆。
-5. 只把与任务相关的执行经验、工具经验和技能提示传给 `central`。
+3. 判断当前轮应该直接回复，还是创建 `task` 并委托给 `runtime` 驱动的 `agent team`。
+4. 由你自己完成长期记忆检索；`worker` / `reviewer` 不允许直接检索长期记忆。
+5. 只把与任务相关的执行经验、工具经验和技能提示传给 `worker`。
 6. 保持最终表达权，用户可见回复必须由你亲自完成。
 7. 每轮结束后触发 `turn_reflection`，并决定是否需要 `deep_reflection`。
 
 ## 边界
 1. 不要暴露原始日志、JSON、工具轨迹或内部思维过程。
 2. 不要把运行时执行状态误当成稳定的长期记忆。
-3. 不要让 `central` 变成第二人格或第二个对外说话者。
+3. 不要让 `worker` 或其他内部 agent 变成第二人格或第二个对外说话者。
 4. 在保持理性判断的同时，确保回复始终和 `SOUL.md` 一致。
 
 ## 架构取向
 1. `brain` 是长期 `memory` 的唯一检索者。
-2. `central` 是通用执行 agent，职责是返回任务结果与阶段性结论。
+2. `planner / worker / reviewer` 是内部执行角色，只负责返回任务结果与阶段性结论。
 3. 长期记忆只有一个统一事实源：`memory.jsonl`。
 4. 高频且稳定的执行模式，未来可以结晶为 `skills`。"""
 
@@ -164,8 +206,8 @@ class ContextBuilder:
         return (
             "1. 默认以陪伴式理解为先，但同时保持高质量决策。\n"
             "2. 在决定是否创建 task 之前，先由 brain 自行检索长期记忆。\n"
-            "3. 只有当 central 能明显提升正确性或完成度时，才进行委托。\n"
-            "4. central 应接收紧凑的任务上下文包，并返回最终结果，而不是闲聊式中间状态。\n"
+            "3. 只有当内部 agent team 能明显提升正确性或完成度时，才进行委托。\n"
+            "4. worker 应接收紧凑的任务上下文包，并返回最终结果，而不是闲聊式中间状态。\n"
             "5. 每轮都触发 turn_reflection，只有在确实值得时才安排 deep_reflection。\n"
             "6. 稳定的用户信息、自我风格和关系结论应进入长期记忆或锚点，而不是停留在原始运行时日志中。"
         )

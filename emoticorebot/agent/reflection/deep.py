@@ -1,19 +1,12 @@
-"""Periodic deep reflection for unified long-term memory."""
+"""Proposal-only deep reflection service."""
 
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import dataclass, field
-from importlib.resources import files
-from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
-from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
-from emoticorebot.memory import MemoryStore
-from emoticorebot.agent.reflection.skill import SkillMaterializer
 from emoticorebot.types import DeepReflectionOutput
 
 
@@ -27,12 +20,20 @@ class DeepReflectionResult:
     materialized_skill_count: int = 0
     updated_soul: bool = False
     updated_user: bool = False
+    user_updates: list[str] = field(default_factory=list)
+    soul_updates: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class DeepReflectionProposal:
+    summary: str = ""
+    memory_candidates: list[dict[str, Any]] = field(default_factory=list)
+    user_updates: list[str] = field(default_factory=list)
+    soul_updates: list[str] = field(default_factory=list)
 
 
 class DeepReflectionService:
-    """Consolidate recent cognitive events into unified long-term memory."""
-
-    _SKILL_MEMORY_TYPES = {"skill_hint", "skill"}
+    """Consolidate recent cognitive events into a structured deep-reflection proposal."""
 
     _PROMPT = """
 你是 `brain` 的深反思过程。
@@ -140,36 +141,16 @@ class DeepReflectionService:
 }}
 """.strip()
 
-    _AUTO_SECTION_TITLE = "## 深反思沉淀（自动维护）"
-    _SOUL_MARKER_START = "<!-- DEEP_REFLECTION_SOUL_START -->"
-    _SOUL_MARKER_END = "<!-- DEEP_REFLECTION_SOUL_END -->"
-    _USER_MARKER_START = "<!-- DEEP_REFLECTION_USER_START -->"
-    _USER_MARKER_END = "<!-- DEEP_REFLECTION_USER_END -->"
-
-    def __init__(
-        self,
-        workspace: Path,
-        llm: Any,
-        *,
-        memory_config: MemoryConfig | None = None,
-        providers_config: ProvidersConfig | None = None,
-    ):
-        self.workspace = workspace
+    def __init__(self, llm: Any):
         self.llm = llm
-        self.memory_store = MemoryStore(
-            workspace,
-            memory_config=memory_config,
-            providers_config=providers_config,
-        )
-        self.skill_materializer = SkillMaterializer(workspace, self.memory_store)
 
-    async def run_cycle(self, events: list[dict[str, Any]]) -> DeepReflectionResult:
+    async def propose(self, events: list[dict[str, Any]]) -> DeepReflectionProposal:
         if not events:
-            return DeepReflectionResult()
+            return DeepReflectionProposal()
 
         fallback = self._fallback_payload(events)
         if not self.llm:
-            return self._persist_payload(fallback)
+            return self._proposal_from_payload(fallback)
 
         prompt = self._PROMPT.format(event_block=self._build_event_block(events))
         try:
@@ -181,178 +162,20 @@ class DeepReflectionService:
         payload = self._normalize_payload(parsed if isinstance(parsed, dict) else fallback)
         if not payload["memory_candidates"] and fallback["memory_candidates"]:
             payload = fallback
-        return self._persist_payload(payload)
+        return self._proposal_from_payload(payload)
 
-    def _persist_payload(self, payload: dict[str, Any]) -> DeepReflectionResult:
-        memory_candidates = list(payload.get("memory_candidates", []) or [])
-        memory_ids = self.memory_store.append_many(memory_candidates)
-        skill_hint_count = sum(
-            1 for record in memory_candidates if str(record.get("type", "") or "").strip() in self._SKILL_MEMORY_TYPES
-        )
-        materialization = self.skill_materializer.materialize_from_memory()
-        updated_user = self.write_managed_reflection_section(
-            filename="USER.md",
-            updates=payload.get("user_updates"),
-            marker_start=self._USER_MARKER_START,
-            marker_end=self._USER_MARKER_END,
-            intro="以下条目沉淀用户的稳定画像，由 `deep_reflection` 自动维护。",
-        )
-        updated_soul = self.write_managed_reflection_section(
-            filename="SOUL.md",
-            updates=payload.get("soul_updates"),
-            marker_start=self._SOUL_MARKER_START,
-            marker_end=self._SOUL_MARKER_END,
-            intro="以下条目沉淀主脑的稳定风格与长期策略，由 `deep_reflection` 自动维护。",
-        )
-        return DeepReflectionResult(
+    @staticmethod
+    def _proposal_from_payload(payload: dict[str, Any]) -> DeepReflectionProposal:
+        return DeepReflectionProposal(
             summary=str(payload.get("summary", "") or "").strip(),
-            memory_ids=memory_ids,
-            memory_count=len(memory_ids),
-            skill_hint_count=skill_hint_count,
-            materialized_skills=list(materialization.skill_names),
-            materialized_skill_count=int(materialization.created_count + materialization.updated_count),
-            updated_soul=updated_soul,
-            updated_user=updated_user,
+            memory_candidates=[
+                *list(payload.get("memory_candidates", []) or []),
+                *DeepReflectionService._normalize_skill_hints(payload.get("skill_hints")),
+            ],
+            user_updates=DeepReflectionService._normalize_str_list(payload.get("user_updates")),
+            soul_updates=DeepReflectionService._normalize_str_list(payload.get("soul_updates")),
         )
 
-    def write_managed_reflection_section(
-        self,
-        *,
-        filename: str,
-        updates: Any,
-        marker_start: str,
-        marker_end: str,
-        intro: str,
-        section_title: str | None = None,
-        max_entries: int | None = None,
-    ) -> bool:
-        normalized_updates = self._normalize_anchor_updates(updates)
-        if not normalized_updates:
-            return False
-
-        current = self._ensure_md_file(filename)
-        existing_updates = self._extract_managed_updates(
-            current,
-            marker_start=marker_start,
-            marker_end=marker_end,
-        )
-        merged_updates = self._merge_updates(existing_updates, normalized_updates)
-        if max_entries is not None and max_entries > 0:
-            merged_updates = merged_updates[-max_entries:]
-        block = self._render_managed_block(
-            section_title=section_title or self._AUTO_SECTION_TITLE,
-            marker_start=marker_start,
-            marker_end=marker_end,
-            intro=intro,
-            updates=merged_updates,
-        )
-        updated = self._replace_or_append_managed_block(
-            current,
-            marker_start=marker_start,
-            marker_end=marker_end,
-            block=block,
-        )
-        if updated == current:
-            return False
-        return self._safe_write_text(self.workspace / filename, updated)
-
-    def _ensure_md_file(self, filename: str) -> str:
-        target = self.workspace / filename
-        if target.exists():
-            return target.read_text(encoding="utf-8")
-        template = self._load_template(filename)
-        if template:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(template, encoding="utf-8")
-            return template
-        return ""
-
-    @staticmethod
-    def _load_template(filename: str) -> str:
-        try:
-            return (files("emoticorebot") / "templates" / filename).read_text(encoding="utf-8")
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _normalize_anchor_updates(value: Any) -> list[str]:
-        if not isinstance(value, list):
-            return []
-        items: list[str] = []
-        for item in value:
-            text = str(item or "").strip()
-            text = re.sub(r"^[-*•]\s*", "", text)
-            text = re.sub(r"^\d+[.)、]\s*", "", text)
-            text = " ".join(text.split())
-            if text and text not in items:
-                items.append(text)
-        return items[:8]
-
-    @staticmethod
-    def _extract_managed_updates(
-        text: str,
-        *,
-        marker_start: str,
-        marker_end: str,
-    ) -> list[str]:
-        pattern = re.compile(rf"{re.escape(marker_start)}([\s\S]*?){re.escape(marker_end)}")
-        match = pattern.search(text or "")
-        if not match:
-            return []
-        items: list[str] = []
-        for line in match.group(1).splitlines():
-            stripped = line.strip()
-            if not stripped.startswith("- "):
-                continue
-            value = stripped[2:].strip()
-            if value and value not in items:
-                items.append(value)
-        return items
-
-    @staticmethod
-    def _merge_updates(existing: list[str], incoming: list[str]) -> list[str]:
-        merged: list[str] = []
-        for item in [*existing, *incoming]:
-            value = str(item or "").strip()
-            if value and value not in merged:
-                merged.append(value)
-        return merged
-
-    def _render_managed_block(
-        self,
-        *,
-        section_title: str,
-        marker_start: str,
-        marker_end: str,
-        intro: str,
-        updates: list[str],
-    ) -> str:
-        lines = [
-            marker_start,
-            section_title,
-            f"> {intro}",
-            "",
-            *(f"- {item}" for item in updates),
-            marker_end,
-        ]
-        return "\n".join(lines).strip() + "\n"
-
-    @staticmethod
-    def _replace_or_append_managed_block(
-        current: str,
-        *,
-        marker_start: str,
-        marker_end: str,
-        block: str,
-    ) -> str:
-        pattern = re.compile(rf"{re.escape(marker_start)}[\s\S]*?{re.escape(marker_end)}")
-        stripped_block = block.strip()
-        if pattern.search(current or ""):
-            updated = pattern.sub(stripped_block, current, count=1)
-        else:
-            base = (current or "").rstrip()
-            updated = f"{base}\n\n{stripped_block}" if base else stripped_block
-        return updated.rstrip() + "\n"
 
     def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         candidates = self._normalize_candidates(payload.get("memory_candidates"))
@@ -531,32 +354,4 @@ class DeepReflectionService:
             return compact
         return compact[: limit - 1] + "…"
 
-    @staticmethod
-    def _safe_write_text(target: Path, content: str) -> bool:
-        backup = target.with_suffix(target.suffix + ".bak")
-        temp = target.with_suffix(target.suffix + ".tmp")
-        previous = target.read_text(encoding="utf-8") if target.exists() else None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if previous is not None:
-                backup.write_text(previous, encoding="utf-8")
-            temp.write_text(content, encoding="utf-8")
-            temp.replace(target)
-            return True
-        except Exception as exc:
-            logger.warning("DeepReflectionService safe write failed for {}: {}", target.name, exc)
-            try:
-                if previous is not None:
-                    target.write_text(previous, encoding="utf-8")
-            except Exception:
-                pass
-            return False
-        finally:
-            if temp.exists():
-                try:
-                    temp.unlink()
-                except Exception:
-                    pass
-
-
-__all__ = ["DeepReflectionResult", "DeepReflectionService"]
+__all__ = ["DeepReflectionProposal", "DeepReflectionResult", "DeepReflectionService"]

@@ -1,25 +1,19 @@
-"""Structured executor results returned to runtime."""
+"""Structured task result model aligned with the v3 task protocol."""
 
 from __future__ import annotations
 
-from typing import TypedDict
+from pydantic import Field
 
-from .task_models import ReviewItem, TaskControlState, TaskResultStatus, TraceItem
+from .task_models import ContentBlock, ProtocolModel
 
 
-class TaskExecutionResult(TypedDict, total=False):
-    """task/executor 执行结束后返回的结构化结果。"""
-
-    control_state: TaskControlState
-    status: TaskResultStatus
-    analysis: str
-    message: str
-    missing: list[str]
-    pending_review: list[ReviewItem]
-    recommended_action: str
-    confidence: float
-    attempt_count: int
-    task_trace: list[TraceItem]
+class TaskExecutionResult(ProtocolModel):
+    summary: str | None = None
+    result_text: str | None = None
+    result_blocks: list[ContentBlock] = Field(default_factory=list)
+    artifacts: list[ContentBlock] = Field(default_factory=list)
+    confidence: float | None = None
+    reviewer_required: bool | None = None
 
 
 __all__ = ["TaskExecutionResult"]

@@ -1,7 +1,7 @@
 """Background package - 后台守护进程。
 
 后台进程与 agent/ 的区别：
-- agent/      → 每次请求都会调用的、有状态的执行单元（brain / central / reflection / tool）
+- agent/      → 每次请求都会调用的、有状态的执行单元（brain / worker / reflection / tool）
 - background/ → 独立运行的长生命周期守护进程（不依赖请求触发）
 
 子模块：

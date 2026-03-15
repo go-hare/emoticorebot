@@ -1,13 +1,18 @@
 """Brain-layer exports."""
 
-from emoticorebot.brain.companion_brain import CompanionBrain
+from emoticorebot.brain.dialogue_policy import DialoguePolicy
+from emoticorebot.brain.executive import ExecutiveBrain
 from emoticorebot.brain.decision_packet import BrainControlPacket, BrainFinalDecision, BrainTaskAction
-from emoticorebot.brain.event_narrator import EventNarrator
+from emoticorebot.brain.reply_builder import ReplyBuilder
+from emoticorebot.brain.task_policy import TaskPolicy, TurnDirective
 
 __all__ = [
     "BrainControlPacket",
     "BrainFinalDecision",
     "BrainTaskAction",
-    "CompanionBrain",
-    "EventNarrator",
+    "DialoguePolicy",
+    "ExecutiveBrain",
+    "ReplyBuilder",
+    "TaskPolicy",
+    "TurnDirective",
 ]

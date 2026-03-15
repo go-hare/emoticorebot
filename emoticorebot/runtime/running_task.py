@@ -1,21 +1,23 @@
-"""Live task handles owned by SessionRuntime."""
+"""Live task handles used by execution wrappers."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Protocol
 
 from emoticorebot.protocol.task_models import TaskInputRequest, TaskLifecycleState, TaskSpec, TaskState
-from emoticorebot.protocol.task_result import TaskExecutionResult
 from emoticorebot.runtime.task_state import RuntimeTaskState
 
-if TYPE_CHECKING:
-    from emoticorebot.runtime.session_runtime import SessionRuntime
+from emoticorebot.protocol.task_result import TaskExecutionResult
 
 
-TaskWorker = Callable[["RunningTask", "SessionRuntime"], Awaitable[Any]]
+class TaskRuntime(Protocol):
+    async def report_progress(self, task: "RunningTask", message: str, **payload: Any) -> None: ...
+
+
+TaskWorker = Callable[["RunningTask", TaskRuntime], Awaitable[Any]]
 
 
 @dataclass
@@ -167,4 +169,4 @@ class RunningTask:
         self.state.sync_from_result(result)
 
 
-__all__ = ["RunningTask", "TaskWorker"]
+__all__ = ["RunningTask", "TaskRuntime", "TaskWorker"]

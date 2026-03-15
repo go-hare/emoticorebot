@@ -265,7 +265,7 @@ def gateway(
 ):
     """Start the emoticorebot gateway."""
     from emoticorebot.config.loader import load_config, get_data_dir
-    from emoticorebot.runtime.event_bus import RuntimeEventBus
+    from emoticorebot.runtime.transport_bus import TransportBus
     from emoticorebot.bootstrap import RuntimeHost
     from emoticorebot.channels.manager import ChannelManager
     from emoticorebot.session.thread_store import ThreadStore
@@ -279,7 +279,7 @@ def gateway(
     console.print(f"{__logo__} Starting emoticorebot gateway on port {port}...")
     
     config = load_config()
-    bus = RuntimeEventBus()
+    bus = TransportBus()
     thread_store = ThreadStore(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
@@ -290,7 +290,7 @@ def gateway(
     agent = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        central_mode=config.agents.defaults.central_mode,
+        worker_mode=config.agents.defaults.worker_mode,
         brain_mode=config.agents.defaults.brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
@@ -313,7 +313,7 @@ def gateway(
             chat_id=job.payload.to or "direct",
         )
         if job.payload.deliver and job.payload.to:
-            from emoticorebot.runtime.event_bus import OutboundMessage
+            from emoticorebot.runtime.transport_bus import OutboundMessage
             await bus.publish_outbound(OutboundMessage(
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to,
@@ -383,14 +383,14 @@ def agent(
 ):
     """Interact with the agent directly."""
     from emoticorebot.config.loader import load_config, get_data_dir
-    from emoticorebot.runtime.event_bus import RuntimeEventBus
+    from emoticorebot.runtime.transport_bus import TransportBus
     from emoticorebot.bootstrap import RuntimeHost
     from emoticorebot.cron.service import CronService
     from loguru import logger
     
     config = load_config()
     
-    bus = RuntimeEventBus()
+    bus = TransportBus()
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
@@ -403,7 +403,7 @@ def agent(
     agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        central_mode=config.agents.defaults.central_mode,
+        worker_mode=config.agents.defaults.worker_mode,
         brain_mode=config.agents.defaults.brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
@@ -443,7 +443,7 @@ def agent(
         asyncio.run(run_once())
     else:
         # Interactive mode — route through bus like other channels
-        from emoticorebot.runtime.event_bus import InboundMessage
+        from emoticorebot.runtime.transport_bus import InboundMessage
         _init_prompt_session()
         console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
 
@@ -535,7 +535,7 @@ def agent(
                             await turn_done.wait()
 
                         if turn_response:
-                            _print_agent_response(turn_response[0], render_markdown=markdown)
+                            _print_agent_response_interactive(turn_response[0], render_markdown=markdown)
                         pending_turn_message_id = None
                     except KeyboardInterrupt:
                         pending_turn_message_id = None
@@ -901,16 +901,16 @@ def cron_run(
     from emoticorebot.config.loader import load_config, get_data_dir
     from emoticorebot.cron.service import CronService
     from emoticorebot.cron.types import CronJob
-    from emoticorebot.runtime.event_bus import RuntimeEventBus
+    from emoticorebot.runtime.transport_bus import TransportBus
     from emoticorebot.bootstrap import RuntimeHost
     logger.disable("emoticorebot")
 
     config = load_config()
-    bus = RuntimeEventBus()
+    bus = TransportBus()
     agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        central_mode=config.agents.defaults.central_mode,
+        worker_mode=config.agents.defaults.worker_mode,
         brain_mode=config.agents.defaults.brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
@@ -974,4 +974,3 @@ def status():
 
 if __name__ == "__main__":
     app()
-

@@ -44,7 +44,7 @@ class MessageTool(Tool):
 
     async def execute(self, content: str, **kwargs: Any) -> str:
         try:
-            from emoticorebot.runtime.event_bus import OutboundMessage
+            from emoticorebot.runtime.transport_bus import OutboundMessage
 
             msg = OutboundMessage(
                 channel=self._channel,

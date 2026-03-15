@@ -1,4 +1,4 @@
-"""Typed submissions accepted by RuntimeManager / SessionRuntime."""
+"""Typed submissions accepted by the runtime ingress layer."""
 
 from __future__ import annotations
 

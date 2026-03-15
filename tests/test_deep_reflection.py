@@ -5,8 +5,8 @@ from tempfile import TemporaryDirectory
 
 from emoticorebot.agent.cognitive import CognitiveEvent
 from emoticorebot.agent.reflection.deep import DeepReflectionService
-from emoticorebot.agent.reflection.skill import SkillMaterializer
 from emoticorebot.config.schema import MemoryConfig, MemoryVectorConfig
+from emoticorebot.memory.crystallizer import SkillMaterializer
 from emoticorebot.memory import MemoryStore
 
 

@@ -155,12 +155,11 @@ class SubconsciousDaemon:
         emotion_prompt = self.emotion_mgr.get_emotion_prompt()
         prompt = self._PROACTIVE_PROMPT.format(emotion_prompt=emotion_prompt)
         try:
-            # 通过 CompanionBrain 生成主动消息
-            content = await self.runtime.companion_brain.generate_proactive(prompt)
+            content = await self.runtime.generate_proactive_message(prompt)
             if not content:
                 return
 
-            from emoticorebot.runtime.event_bus import OutboundMessage
+            from emoticorebot.runtime.transport_bus import OutboundMessage
 
             await self.runtime.bus.publish_outbound(
                 OutboundMessage(

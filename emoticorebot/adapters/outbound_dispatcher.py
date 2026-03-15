@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from emoticorebot.runtime.event_bus import OutboundMessage, RuntimeEventBus
+from emoticorebot.runtime.transport_bus import OutboundMessage, TransportBus
 
 
 class OutboundDispatcher:
-    """Single place that publishes outbound messages to the runtime bus."""
+    """Single place that publishes outbound messages to the transport bus."""
 
-    def __init__(self, bus: RuntimeEventBus):
+    def __init__(self, bus: TransportBus):
         self.bus = bus
 
     async def publish(self, message: OutboundMessage) -> None:

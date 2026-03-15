@@ -77,7 +77,7 @@ def _normalize_brain_packet(value: Any) -> BrainControlPacket:
             normalized[key] = text
 
     task_action = _as_text(payload.get("task_action")) or "none"
-    if task_action in {"none", "create_task", "fill_task"}:
+    if task_action in {"none", "create_task", "resume_task", "cancel_task"}:
         normalized["task_action"] = task_action
 
     final_decision = _as_text(payload.get("final_decision")) or "answer"
@@ -193,7 +193,7 @@ def _build_execution_info(
 
     summary = execution_summary or _as_text(task.get("summary")) or _as_text(task.get("analysis"))
 
-    invoked = bool(task) or bool(execution_summary) or task_action in {"create_task", "fill_task"}
+    invoked = bool(task) or bool(execution_summary) or task_action in {"create_task", "resume_task", "cancel_task"}
     if not invoked and status == "none":
         return None
 

@@ -1,4 +1,4 @@
-"""Materialize repeated `skill_hint` memories into workspace skills."""
+"""Skill crystallization from repeated long-term memory patterns."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from emoticorebot.execution.skills import BUILTIN_SKILLS_DIR
-from emoticorebot.memory import MemoryStore
+
+from .store import MemoryStore
 
 
 @dataclass(frozen=True)
@@ -296,21 +297,23 @@ class SkillMaterializer:
         else:
             lines.append("- 先明确最终目标，再在单次执行链路内收敛到最终结果。")
 
-        lines.extend([
-            "",
-            "## 执行流程",
-            "",
-            "1. 先读取 `brain` 传入的 `goal`、`request`、`constraints` 与 `success_criteria`。",
-            "2. 优先复用主脑传入的执行经验、工具经验和其他 `skill_hint`，不要自己检索长期 `memory`。",
-            "3. 尽量在一次执行内收敛，只有在真的被阻塞时才返回 `missing` 或 `pending_review`。",
-            "4. 最终按 task 协议返回结构化结果，交由 `brain` 做对外表达。",
-            "",
-            "## 边界",
-            "",
-            "- 不直接面向用户。",
-            "- 不直接检索或写入长期 `memory`。",
-            "- 不更新 `SOUL.md`、`USER.md` 或其他技能。",
-        ])
+        lines.extend(
+            [
+                "",
+                "## 执行流程",
+                "",
+                "1. 先读取 `brain` 传入的 `goal`、`request`、`constraints` 与 `success_criteria`。",
+                "2. 优先复用主脑传入的执行经验、工具经验和其他 `skill_hint`，不要自己检索长期 `memory`。",
+                "3. 尽量在一次执行内收敛，只有在真的被阻塞时才返回 `missing` 或 `pending_review`。",
+                "4. 最终按 task 协议返回结构化结果，交由 `brain` 做对外表达。",
+                "",
+                "## 边界",
+                "",
+                "- 不直接面向用户。",
+                "- 不直接检索或写入长期 `memory`。",
+                "- 不更新 `SOUL.md`、`USER.md` 或其他技能。",
+            ]
+        )
 
         if tools:
             lines.extend(["", "## 工具适配", ""])

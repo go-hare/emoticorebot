@@ -4,14 +4,13 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-**emoticorebot** is an ultra-lightweight personal AI assistant built around a **brain -> central** architecture and derived 
+**emoticorebot** is a personal AI assistant built around a **brain + runtime + agent team** architecture.
 
-It keeps `brain` as the only outward-facing subject, delegates complex work to a **Deep Agents-based `central`** when needed, and evolves through `turn_reflection + deep_reflection`.
+`brain` remains the only outward-facing subject. A typed runtime owns task state and routing, internal agents execute delegated work, and reflection keeps memory/persona evolving after the first reply.
 
 Detailed architecture design:
 
-- [docs/non-compatible-runtime-refactor.md](docs/non-compatible-runtime-refactor.md)
-- [docs/non-compatible-runtime-refactor.zh-CN.md](docs/non-compatible-runtime-refactor.zh-CN.md)
+- [docs/final-brain-runtime-architecture.zh-CN.md](docs/final-brain-runtime-architecture.zh-CN.md)
 
 ---
 
@@ -52,7 +51,7 @@ This creates `~/.emoticorebot/` with default config, `SOUL.md` (persona), `USER.
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       },
-      "centralMode": {
+      "workerMode": {
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       }
@@ -77,221 +76,73 @@ emoticorebot gateway
 
 ## Architecture
 
-### `brain -> central` Loop
+emoticorebot v3 is organized around a typed, bus-driven runtime:
 
-emoticorebot now uses an **explicit turn loop** instead of an outer LangGraph state machine. The runtime stays simple: `brain` decides, `central` executes when needed, and reflection happens asynchronously after the user-facing response.
-
-```
-User Input
-    │
-    ▼
-session / internal / checkpointer
-    │
-    ▼
-brain ──→ central (optional)
-    │             │
-    └──────←──────┘
-    │
-    ▼
-User Reply
-    │
-    ▼
-cognitive_event -> turn_reflection -> deep_reflection -> memory
+```text
+Inbound Message
+  -> TransportBus
+  -> ConversationGateway
+  -> RuntimeKernel
+  -> PriorityPubSubBus
+  -> ExecutiveBrain
+  -> RuntimeService / TaskStore
+  -> Planner / Worker / Reviewer
+  -> SafetyGuard
+  -> DeliveryService
+  -> TransportBus
+  -> ReflectionCoordinator / MemoryGovernor (async)
 ```
 
-Only `brain` can terminate the turn and produce the user-facing message.
+Only `ExecutiveBrain` is allowed to decide the user-facing reply. Internal agents are execution roles, not separate personas.
 
-**Runtime responsibilities:**
+`TransportBus` is only the channel I/O bridge. The actual internal business event bus is still `PriorityPubSubBus`.
+
+### Core Responsibilities
 
 | Component | Role |
 |------|------|
-| `brain` | Only subject. Interprets intent, controls central, preserves relationship continuity, and produces the final user-facing reply. |
-| `RuntimeHost` | Top-level assembly host that wires gateway, brain, runtime, reflection, and background services together. |
-| `central` | Deep Agents-based execution layer. Handles planning, tools, skills, and long-running complex tasks. |
-| `reflection` | Async post-turn process. Produces `turn_reflection` every turn and `deep_reflection` on demand or by periodic signal. |
+| `ExecutiveBrain` | Interprets the turn, decides whether to reply directly or create/resume/cancel a task, and owns the final user-facing wording. |
+| `RuntimeKernel` | Owns task lifecycle, scheduling, assignment, recovery, and canonical state transitions. |
+| `PriorityPubSubBus` | Typed event bus with priority routing, fan-out, and interceptor support. |
+| `AgentTeam` | Registers `planner`, `worker`, and `reviewer` as internal execution roles. |
+| `SafetyGuard` | Reviews reply drafts and sensitive task results before delivery. |
+| `DeliveryService` | The only component that actually delivers replies to channels. |
+| `MemoryGovernor` | Consumes post-turn signals for reflection, persona updates, and durable memory writes. |
+| `ThreadStore` | Persists user-visible dialogue plus compact internal records. |
 
-**Turn contract:**
+### Turn Flow
 
-- `brain -> central`: delegate only one clear internal request, plus resume metadata when a paused task should continue.
-- `central -> brain`: return a compact packet with `control_state`, `status`, `analysis`, `risks`, `missing`, `recommended_action`, `confidence`, and optional `pending_review`.
-- `brain -> user`: only `brain` can answer, ask for missing info, or decide to continue internal work.
-- `post-turn reflection`: after the first user-facing reply, the runtime writes turn records, builds `cognitive_event`, runs `turn_reflection`, and schedules `deep_reflection` only when warranted.
+1. Channel input first enters `TransportBus`; `ConversationGateway` then bridges it into internal `input.event.user_message`.
+2. `ExecutiveBrain` emits either `brain.command.reply`, `brain.command.ask_user`, or a task command such as `brain.command.create_task` / `brain.command.resume_task`.
+3. `RuntimeKernel` persists the task, updates state, and publishes `runtime.command.assign_agent` or `runtime.command.resume_agent`.
+4. `planner`, `worker`, and `reviewer` publish typed `task.report.*` events; runtime converts them into canonical `task.event.*` snapshots.
+5. `RuntimeService` converts `brain.command.reply` / `brain.command.ask_user` into `output.event.reply_ready`.
+6. `SafetyGuard` intercepts that draft and either approves, redacts, or blocks it before `DeliveryService` sends anything.
+7. After delivery, reflection and memory signals run asynchronously and update long-term state.
 
-### Deep Agents in `central`
+### Agent Team
 
-The current `central` no longer uses the older expert-overlay pipeline. Instead, it is powered by Deep Agents while preserving the compact `brain -> central` contract.
+- Simple tasks usually go straight to `worker`.
+- Higher-complexity tasks can go `planner -> worker`.
+- High-risk or high-value outputs can additionally go through `reviewer`.
+- The current `worker` implementation is backed by `DeepAgentExecutor`, but that is an execution detail. The outer contract is role-based and bus-driven.
 
-| Component | Role |
-|---|---|
-| Planner | Breaks down the internal task and decides how to proceed |
-| Tools | Executes registered capabilities such as file operations, shell execution, web search, fetch, messaging, and cron |
-| Step-level concurrency | Runs independent tool or analysis steps in parallel when safe |
-| Skills | Reuses local workflow instructions from the workspace `skills/` directory |
-
-The contract remains **brain-led**:
-
-- `brain` decides whether `central` is needed and what internal task should be delegated
-- `central` plans and executes using tools, skills, and step-level concurrency
-- `central` returns a normalized packet with `control_state`, `status`, `analysis`, `risks`, `missing`, `recommended_action`, and `confidence`
-- `brain` decides whether to answer, ask the user, or continue internal deliberation
-
-This keeps the outer loop stable while allowing the inner execution kernel to become more capable over time.
-
-### Typical Workflows
-
-#### 1. Normal request → delegated execution
-
-Example: “Help me summarize this file.”
-
-```text
-User
-  → brain decides central help is useful
-  → brain delegates one concrete internal request
-  → central plans and executes it
-  → brain finalizes the user-facing reply
-```
-
-Properties:
-
-- simple handoff from `brain` to `central`
-- no raw tool output is exposed directly to the user
-- `brain` still controls the final wording
-
-#### 2. Resume / follow-up request → continuity + resumed execution
-
-Example:
-
-- previous turn: “Check the weather for me.”
-- assistant: “Which city?”
-- user: “Shanghai.”
-
-```text
-User follow-up
-  → brain detects likely pending-task recovery
-  → brain reconstructs continuity from session, internal history, and paused task state
-  → central continues the delegated task with the recovered context
-  → brain reviews the merged result and answers naturally
-```
-
-Properties:
-
-- optimized for unfinished-task recovery
-- keeps cross-turn continuity on the `brain` side
-- avoids asking the same missing question again when enough context exists
-
-#### 3. Sensitive / low-confidence request → central analysis + brain safeguard
-
-Example: “Run this command and delete the old files.”
-
-```text
-User request
-  → brain detects possible external action / higher risk
-  → brain delegates a cautious internal task
-  → central evaluates feasibility, risks, and missing safeguards
-  → brain either answers conservatively, asks the user first, or continues internal deliberation
-```
-
-Properties:
-
-- optimized for safety and overconfidence control
-- useful when tools are involved or confidence is low
-- keeps the user-facing voice unified through `brain`
-
----
-
-### Decision Inputs & Prompt Construction
-
-The current implementation no longer depends on an outer router layer. Turn planning comes directly from `brain`, session state, and the central packet.
-
-**`brain` prompt construction (`ContextBuilder.build_brain_system_prompt`)**
-
-- loads `brain` rules from workspace `AGENTS.md`
-- loads persona anchors from `SOUL.md` and user cognition from `USER.md`
-- loads `current_state.md` for PAD / state grounding
-- retrieves recent `cognitive_event` context
-- asks `brain` to decide whether to answer directly or delegate to `central`
-
-**`central` prompt construction (`emoticorebot.execution.backend.build_agent_instructions`)**
-
-- enforces the `brain -> central` contract
-- injects workspace / builtin skill routes and skill summaries
-- constrains output to the compact central packet
-- uses tool registry, Deep Agents backend routing, and checkpointer-backed resume state
-
-**Session and continuation inputs**
-
-- `dialogue.jsonl` preserves user-visible conversation history
-- `internal.jsonl` preserves compact `brain <-> central` summaries and control decisions
-- paused task metadata carries `thread_id`, `run_id`, `missing`, and `pending_review`
-- checkpointer state lets `central` resume from the previous interruption point
-
-In short, the working loop is now: **history + cognitive context + paused task → `brain` planning → `central` execution (optional) → `brain` finalization**.
-
----
-
-### Memory Layer
-
-The architecture now separates **runtime material**, **cognitive events**, and **durable memory**:
+### Persistence
 
 | Layer | File / Store | Purpose |
 |-------|------|---------|
-| `session` | `sessions/<session_key>/dialogue.jsonl` | User-visible `user <-> brain` conversation |
-| `internal` | `sessions/<session_key>/internal.jsonl` | Compact `brain <-> central` summaries, control actions, pause/resume hints |
-| `checkpointer` | `sessions/_checkpoints/central.pkl` | Central pause / resume state |
-| `cognitive_event` | `memory/cognitive_events.jsonl` | Structured per-turn slices built after the reply |
-| `self_memory` | `memory/self_memory.jsonl` | Stable `brain` patterns |
-| `relation_memory` | `memory/relation_memory.jsonl` | Stable user / relationship knowledge |
-| `insight_memory` | `memory/insight_memory.jsonl` | Deep insights, durable execution patterns, skill candidates |
+| `dialogue` | `sessions/<session_key>/dialogue.jsonl` | User-visible conversation history |
+| `internal` | `sessions/<session_key>/internal.jsonl` | Compact turn decisions, task summaries, and runtime facts |
+| `checkpointer` | `sessions/_checkpoints/worker.pkl` | Worker execution resume state |
+| `memory` | `memory/memory.jsonl` | Unified long-term memory source of truth |
+| `vector mirror` | local vector index | Retrieval mirror of `memory.jsonl`, not the canonical source |
+| `skills` | `skills/<name>/SKILL.md` | Reusable workflow knowledge and execution guidance |
 
-The runtime flow is:
+### Current Constraints
 
-1. Write `dialogue` and `internal` turn records.
-2. Build `cognitive_event` from the completed turn.
-3. Run `turn_reflection` after every turn.
-4. Schedule `deep_reflection` only when `brain` judges the turn worth deeper consolidation, or when a periodic signal triggers reflection.
-5. Write only stable conclusions into long-term memory, and optionally update `SOUL.md`, `USER.md`, or future `skills`.
-
-The `central` only receives the delegated internal request plus resume metadata. It does not replay the entire user conversation; cross-turn continuity remains `brain`-led.
-
-The **PAD model** (Pleasure-Arousal-Dominance) is used to track the bot's continuous emotional state across sessions. It is loaded at startup from `current_state.md` and written back after every turn.
-
----
-
-### Current Limitations
-
-The current architecture is already usable, but it is intentionally still conservative in a few places:
-
-- Deep Agents output still needs normalization into a compact `central` packet, so richer intermediate traces are still mostly kept in runtime material.
-- The current tool set is intentionally narrow; broader workspace and research coverage can still be added.
-- Cross-turn continuity is still `brain`-centric and conservative; implicit follow-up recovery can become stronger.
-- `deep_reflection` stores durable summaries rather than full raw execution traces.
-- Skill promotion is still reflection-led and conservative instead of fully automatic.
-
-### Roadmap
-
-Recommended next steps for this architecture:
-
-1. **Improve Deep Agents observability**
-   - preserve richer execution traces without bloating session history
-   - expose better debugging hooks for internal planning and execution
-
-2. **Strengthen continuity recovery**
-   - improve implicit follow-up detection
-   - better reconcile paused task / memory / user follow-up signals
-
-3. **Deepen reflection outputs**
-   - enrich `turn_reflection.execution_review` and `deep_reflection` with stronger causal tags
-   - let future turns retrieve not only the outcome but also the failure mode that triggered it
-
-4. **Refactor the central internally**
-   - split planning / execution / merging more clearly
-   - preserve the current lightweight behavior while making extension easier
-
-5. **Expand tools and skills carefully**
-   - only after the current Deep Agents workflow is stable
-   - examples: richer workspace helpers, stronger verification flows, domain-specific skills
-
-In short: the current version optimizes for **clarity, controllable cost, and recoverable history**, and future work should improve central quality without adding another outer orchestration layer.
+- `brain` is still the only long-term-memory retriever.
+- Internal agents do not speak directly to the user.
+- Safety currently focuses on reply/output filtering and leaves embodied actuation as a future layer.
 
 ---
 
@@ -311,7 +162,7 @@ Three concurrent `asyncio.Task` loops:
 #### ReflectionEngine (meta-cognition)
 Called by the subconscious reflect loop. It runs `deep_reflection` with a periodic signal and may:
 
-- append stable memories into `self_memory.jsonl`, `relation_memory.jsonl`, and `insight_memory.jsonl`
+- append stable memories into `memory/memory.jsonl`
 - rewrite `SOUL.md` when a stable self-pattern is confirmed
 - rewrite `USER.md` when a stable user-pattern is confirmed
 
@@ -327,7 +178,7 @@ Two-phase background task checker:
 
 ### Tools
 
-Built-in tools available to the `central`:
+Built-in tools available to the execution layer:
 
 | Tool | Description |
 |------|-------------|
@@ -375,7 +226,7 @@ Supported messaging channels (configured under `channels` in `config.json`):
 | Matrix | nio; optional E2EE |
 | Mochat | Socket.IO |
 
-All channels emit `InboundMessage` events onto the `MessageBus` and receive `OutboundMessage` from the runtime.
+All channels emit `InboundMessage` objects onto `TransportBus` and receive `OutboundMessage` back from `DeliveryService`. Internal typed events still run on `PriorityPubSubBus`.
 
 ---
 
@@ -416,7 +267,7 @@ emoticorebot uses **LangChain** adapters and **litellm** for broad model support
 | Groq | `langchain-groq` |
 | Ollama (local) | `langchain-ollama` |
 
-`brain` and `central` can each use a **different model** through `agents.defaults.brainMode` and `agents.defaults.centralMode`, enabling cost/quality trade-offs.
+`brain` and `worker` can use different models through `agents.defaults.brainMode` and `agents.defaults.workerMode`.
 
 ---
 
@@ -499,29 +350,54 @@ emoticorebot/
 ├── background/          # Background daemon + periodic reflection entrypoints
 ├── bootstrap.py         # RuntimeHost, top-level assembly host
 ├── brain/
-│   ├── companion_brain.py
 │   ├── decision_packet.py
-│   └── event_narrator.py
+│   ├── dialogue_policy.py
+│   ├── executive.py
+│   ├── reply_builder.py
+│   └── task_policy.py
+├── bus/
+│   ├── interceptor.py
+│   ├── priority_queue.py
+│   ├── pubsub.py
+│   └── router.py
+├── delivery/
+│   └── service.py
 ├── execution/
 │   ├── backend.py
-│   ├── central_executor.py
+│   ├── deep_agent_executor.py
 │   ├── executor_context.py
 │   ├── skills.py
 │   ├── stream.py
+│   ├── team.py
 │   └── tool_runtime.py
+├── memory/
+│   └── governor.py
 ├── protocol/            # Typed runtime submissions / events / task results
+│   ├── commands.py
+│   ├── envelope.py
+│   ├── events.py
+│   ├── memory_models.py
+│   ├── safety_models.py
+│   ├── task_models.py
+│   ├── task_result.py
+│   └── topics.py
 ├── runtime/
-│   ├── event_bus.py
-│   ├── event_loop.py
+│   ├── assignment.py
 │   ├── input_gate.py
-│   ├── manager.py
+│   ├── kernel.py
+│   ├── recovery.py
 │   ├── running_task.py
-│   ├── session_runtime.py
+│   ├── scheduler.py
+│   ├── service.py
+│   ├── state_machine.py
+│   ├── task_store.py
+│   ├── transport_bus.py
 │   └── task_state.py
+├── safety/
+│   └── guard.py
 ├── session/
 │   ├── history_store.py
 │   └── thread_store.py
-├── memory/
 ├── tools/
 ├── channels/
 ├── providers/
@@ -543,4 +419,3 @@ See `COMMUNICATION.md`.
 ## License
 
 MIT.
-

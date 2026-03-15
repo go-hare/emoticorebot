@@ -24,7 +24,7 @@ except ImportError as e:
         "Matrix dependencies not installed. Run: pip install emoticorebot-ai[matrix]"
     ) from e
 
-from emoticorebot.runtime.event_bus import OutboundMessage
+from emoticorebot.runtime.transport_bus import OutboundMessage
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.loader import get_data_dir
 from emoticorebot.utils.helpers import safe_filename

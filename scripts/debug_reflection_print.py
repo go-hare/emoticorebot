@@ -17,7 +17,7 @@ async def main() -> None:
     config = load_config()
     factory = LLMFactory(
         providers_config=config.providers,
-        central_mode=config.agents.defaults.central_mode,
+        worker_mode=config.agents.defaults.worker_mode,
         brain_mode=config.agents.defaults.brain_mode,
     )
     brain_llm = factory.get_brain()
