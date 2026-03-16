@@ -56,6 +56,26 @@ class BaseChannel(ABC):
             msg: The message to send.
         """
         pass
+
+    async def send_stream_delta(self, msg: OutboundMessage, state: dict[str, Any]) -> None:
+        """Deliver an incremental stream update for this channel.
+
+        Channels that support in-place message updates should override this.
+        The default fallback degrades to sending delta chunks as normal messages.
+        """
+        if msg.content:
+            await self.send(msg)
+            state["sent_any"] = True
+
+    async def send_stream_final(self, msg: OutboundMessage, state: dict[str, Any]) -> None:
+        """Deliver the terminal stream packet for this channel.
+
+        The default fallback avoids duplicating a final full-text message when
+        earlier delta chunks have already been emitted.
+        """
+        if state.get("sent_any"):
+            return
+        await self.send(msg)
     
     def is_allowed(self, sender_id: str) -> bool:
         """

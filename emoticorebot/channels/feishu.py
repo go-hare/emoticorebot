@@ -30,6 +30,8 @@ try:
         GetFileRequest,
         GetMessageResourceRequest,
         P2ImMessageReceiveV1,
+        UpdateMessageRequest,
+        UpdateMessageRequestBody,
     )
     FEISHU_AVAILABLE = True
 except ImportError:
@@ -441,6 +443,13 @@ class FeishuChannel(BaseChannel):
 
         return elements or [{"tag": "markdown", "content": content}]
 
+    def _build_interactive_card_content(self, content: str) -> str:
+        card = {
+            "config": {"wide_screen_mode": True},
+            "elements": self._build_card_elements(content),
+        }
+        return json.dumps(card, ensure_ascii=False)
+
     _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tiff", ".tif"}
     _AUDIO_EXTS = {".opus"}
     _FILE_TYPE_MAP = {
@@ -590,7 +599,9 @@ class FeishuChannel(BaseChannel):
 
         return None, f"[{msg_type}: download failed]"
 
-    def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
+    def _send_message_sync(
+        self, receive_id_type: str, receive_id: str, msg_type: str, content: str,
+    ) -> str | None:
         """Send a single message (text/image/file/interactive) synchronously."""
         try:
             request = CreateMessageRequest.builder() \
@@ -608,11 +619,36 @@ class FeishuChannel(BaseChannel):
                     "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
                     msg_type, response.code, response.msg, response.get_log_id()
                 )
-                return False
-            logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
-            return True
+                return None
+            message_id = str(getattr(getattr(response, "data", None), "message_id", "") or "").strip()
+            logger.debug("Feishu {} message sent to {} ({})", msg_type, receive_id, message_id or "no-id")
+            return message_id or None
         except Exception as e:
             logger.error("Error sending Feishu {} message: {}", msg_type, e)
+            return None
+
+    def _update_message_sync(self, message_id: str, msg_type: str, content: str) -> bool:
+        """Update an existing Feishu message synchronously."""
+        try:
+            request = UpdateMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(
+                    UpdateMessageRequestBody.builder()
+                    .msg_type(msg_type)
+                    .content(content)
+                    .build()
+                ).build()
+            response = self._client.im.v1.message.update(request)
+            if not response.success():
+                logger.error(
+                    "Failed to update Feishu {} message {}: code={}, msg={}, log_id={}",
+                    msg_type, message_id, response.code, response.msg, response.get_log_id(),
+                )
+                return False
+            logger.debug("Feishu {} message updated: {}", msg_type, message_id)
+            return True
+        except Exception as e:
+            logger.error("Error updating Feishu {} message {}: {}", msg_type, message_id, e)
             return False
 
     async def send(self, msg: OutboundMessage) -> None:
@@ -647,14 +683,81 @@ class FeishuChannel(BaseChannel):
                         )
 
             if msg.content and msg.content.strip():
-                card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
                 await loop.run_in_executor(
                     None, self._send_message_sync,
-                    receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False),
+                    receive_id_type, msg.chat_id, "interactive", self._build_interactive_card_content(msg.content),
                 )
 
         except Exception as e:
             logger.error("Error sending Feishu message: {}", e)
+
+    async def send_stream_delta(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self._client:
+            logger.warning("Feishu client not initialized")
+            return
+
+        rendered = f"{state.get('rendered_text', '')}{msg.content or ''}"
+        rendered = str(rendered)
+        if not rendered.strip():
+            return
+        state["rendered_text"] = rendered
+
+        loop = asyncio.get_running_loop()
+        message_id = str(state.get("message_id", "") or "").strip()
+        if not message_id:
+            receive_id_type = "chat_id" if msg.chat_id.startswith("oc_") else "open_id"
+            created_id = await loop.run_in_executor(
+                None,
+                self._send_message_sync,
+                receive_id_type,
+                msg.chat_id,
+                "interactive",
+                self._build_interactive_card_content(rendered),
+            )
+            if created_id:
+                state["message_id"] = created_id
+            return
+
+        await loop.run_in_executor(
+            None,
+            self._update_message_sync,
+            message_id,
+            "interactive",
+            self._build_interactive_card_content(rendered),
+        )
+
+    async def send_stream_final(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self._client:
+            logger.warning("Feishu client not initialized")
+            return
+
+        final_text = str(msg.content or "").strip()
+        if not final_text:
+            return
+
+        loop = asyncio.get_running_loop()
+        message_id = str(state.get("message_id", "") or "").strip()
+        if not message_id:
+            receive_id_type = "chat_id" if msg.chat_id.startswith("oc_") else "open_id"
+            created_id = await loop.run_in_executor(
+                None,
+                self._send_message_sync,
+                receive_id_type,
+                msg.chat_id,
+                "interactive",
+                self._build_interactive_card_content(final_text),
+            )
+            if created_id:
+                state["message_id"] = created_id
+            return
+
+        await loop.run_in_executor(
+            None,
+            self._update_message_sync,
+            message_id,
+            "interactive",
+            self._build_interactive_card_content(final_text),
+        )
     
     def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:
         """

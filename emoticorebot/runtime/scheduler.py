@@ -117,6 +117,7 @@ class RuntimeScheduler:
             title=title,
             review_policy=request.review_policy or "skip",
             review_required=request.review_policy == "required",
+            suppress_delivery=bool(payload.metadata.get("suppress_delivery")),
         )
         self._tasks.add(task)
 
@@ -136,6 +137,7 @@ class RuntimeScheduler:
 
     def _on_resume_task(self, event: BusEnvelope[BrainResumeTaskPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
+        task.suppress_delivery = task.suppress_delivery or bool(event.payload.metadata.get("suppress_delivery"))
         task.status = TaskStateMachine.resume_task(task.status)
         task.touch()
 
@@ -153,6 +155,7 @@ class RuntimeScheduler:
 
     def _on_cancel_task(self, event: BusEnvelope[BrainCancelTaskPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
+        task.suppress_delivery = task.suppress_delivery or bool(event.payload.metadata.get("suppress_delivery"))
         task.status = TaskStateMachine.cancel_task(task.status)
         task.error = event.payload.reason or ""
         task.touch()

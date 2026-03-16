@@ -8,10 +8,11 @@ from typing import Any
 
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.execution.deep_agent_executor import DeepAgentExecutor
-from emoticorebot.protocol.commands import AssignAgentPayload, ResumeAgentPayload
+from emoticorebot.protocol.commands import AssignAgentPayload, CancelAgentPayload, ResumeAgentPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.events import (
     TaskApprovedReportPayload,
+    TaskCancelledReportPayload,
     TaskFailedReportPayload,
     TaskNeedInputReportPayload,
     TaskPlanReadyReportPayload,
@@ -194,73 +195,132 @@ class WorkerAgent(_AsyncAgent):
         self._context_builder = context_builder
         self._tool_registry = tool_registry
         self._executor: DeepAgentExecutor | None = None
+        self._active_runs: dict[str, asyncio.Task[None]] = {}
+        self._cancel_reported: set[str] = set()
 
     def register(self) -> None:
         self._bus.subscribe(consumer="worker", event_type=EventType.RUNTIME_ASSIGN_AGENT, handler=self._handle_assign)
         self._bus.subscribe(consumer="worker", event_type=EventType.RUNTIME_RESUME_AGENT, handler=self._handle_resume)
+        self._bus.subscribe(consumer="worker", event_type=EventType.RUNTIME_CANCEL_AGENT, handler=self._handle_cancel)
 
     async def _handle_assign(self, event: BusEnvelope[AssignAgentPayload]) -> None:
         if event.target != "worker":
             return
-        self._spawn(self._run_assign(event), name=f"worker:{event.payload.task_id}:assign")
+        self._spawn_run(event.payload.task_id, self._run_assign(event), name=f"worker:{event.payload.task_id}:assign")
 
     async def _handle_resume(self, event: BusEnvelope[ResumeAgentPayload]) -> None:
         if event.target != "worker":
             return
-        self._spawn(self._run_resume(event), name=f"worker:{event.payload.task_id}:resume")
+        self._spawn_run(event.payload.task_id, self._run_resume(event), name=f"worker:{event.payload.task_id}:resume")
+
+    async def _handle_cancel(self, event: BusEnvelope[CancelAgentPayload]) -> None:
+        if event.target != "worker":
+            return
+        task = self._active_runs.get(event.payload.task_id)
+        if task is not None and not task.done():
+            task.cancel()
+        assignment_id = ""
+        record = self._task_store.get(event.payload.task_id)
+        if record is not None:
+            assignment_id = str(record.current_assignment_id or "").strip()
+        await self._publish_cancelled_once(
+            session_id=event.session_id,
+            turn_id=event.turn_id,
+            task_id=event.payload.task_id,
+            assignment_id=assignment_id,
+            correlation_id=event.correlation_id,
+            causation_id=event.event_id,
+            reason=event.payload.reason or "interrupted",
+        )
+
+    def _spawn_run(self, task_id: str, coro: Any, *, name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        self._active_runs[task_id] = task
+        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(lambda finished, current_task_id=task_id: self._discard_run(current_task_id, finished))
+
+    def _discard_run(self, task_id: str, task: asyncio.Task[None]) -> None:
+        if self._active_runs.get(task_id) is task:
+            self._active_runs.pop(task_id, None)
+        self._cancel_reported.discard(task_id)
 
     async def _run_assign(self, event: BusEnvelope[AssignAgentPayload]) -> None:
         task = self._task_store.require(event.payload.task_id)
-        await self._publish_started(
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            task_id=event.payload.task_id,
-            assignment_id=event.payload.assignment_id,
-            causation_id=event.event_id,
-        )
-        outcome = await self._execute(
-            task=task,
-            assignment_id=event.payload.assignment_id,
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            correlation_id=event.correlation_id,
-        )
-        await self._publish_outcome(
-            outcome=outcome,
-            task=task,
-            assignment_id=event.payload.assignment_id,
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            correlation_id=event.correlation_id,
-            causation_id=event.event_id,
-        )
+        try:
+            await self._publish_started(
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                task_id=event.payload.task_id,
+                assignment_id=event.payload.assignment_id,
+                causation_id=event.event_id,
+            )
+            outcome = await self._execute(
+                task=task,
+                assignment_id=event.payload.assignment_id,
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                correlation_id=event.correlation_id,
+            )
+            await self._publish_outcome(
+                outcome=outcome,
+                task=task,
+                assignment_id=event.payload.assignment_id,
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                correlation_id=event.correlation_id,
+                causation_id=event.event_id,
+            )
+        except asyncio.CancelledError:
+            await self._publish_cancelled_once(
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                task_id=event.payload.task_id,
+                assignment_id=event.payload.assignment_id,
+                correlation_id=event.correlation_id,
+                causation_id=event.event_id,
+                reason="interrupted",
+            )
+            raise
 
     async def _run_resume(self, event: BusEnvelope[ResumeAgentPayload]) -> None:
         task = self._task_store.require(event.payload.task_id)
-        await self._publish_started(
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            task_id=event.payload.task_id,
-            assignment_id=event.payload.assignment_id,
-            causation_id=event.event_id,
-        )
-        outcome = await self._execute(
-            task=task,
-            assignment_id=event.payload.assignment_id,
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            correlation_id=event.correlation_id,
-            resume_input=event.payload.resume_input,
-        )
-        await self._publish_outcome(
-            outcome=outcome,
-            task=task,
-            assignment_id=event.payload.assignment_id,
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            correlation_id=event.correlation_id,
-            causation_id=event.event_id,
-        )
+        try:
+            await self._publish_started(
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                task_id=event.payload.task_id,
+                assignment_id=event.payload.assignment_id,
+                causation_id=event.event_id,
+            )
+            outcome = await self._execute(
+                task=task,
+                assignment_id=event.payload.assignment_id,
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                correlation_id=event.correlation_id,
+                resume_input=event.payload.resume_input,
+            )
+            await self._publish_outcome(
+                outcome=outcome,
+                task=task,
+                assignment_id=event.payload.assignment_id,
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                correlation_id=event.correlation_id,
+                causation_id=event.event_id,
+            )
+        except asyncio.CancelledError:
+            await self._publish_cancelled_once(
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                task_id=event.payload.task_id,
+                assignment_id=event.payload.assignment_id,
+                correlation_id=event.correlation_id,
+                causation_id=event.event_id,
+                reason="interrupted",
+            )
+            raise
 
     async def _execute(
         self,
@@ -432,6 +492,39 @@ class WorkerAgent(_AsyncAgent):
                     agent_role="worker",
                     assignment_id=assignment_id,
                     summary="worker 已开始执行",
+                ),
+            )
+        )
+
+    async def _publish_cancelled_once(
+        self,
+        *,
+        session_id: str | None,
+        turn_id: str | None,
+        task_id: str,
+        assignment_id: str,
+        correlation_id: str | None,
+        causation_id: str,
+        reason: str,
+    ) -> None:
+        if task_id in self._cancel_reported:
+            return
+        self._cancel_reported.add(task_id)
+        await self._bus.publish(
+            build_envelope(
+                event_type=EventType.TASK_REPORT_CANCELLED,
+                source="worker",
+                target="runtime",
+                session_id=session_id,
+                turn_id=turn_id,
+                task_id=task_id,
+                correlation_id=correlation_id or task_id,
+                causation_id=causation_id,
+                payload=TaskCancelledReportPayload(
+                    task_id=task_id,
+                    agent_role="worker",
+                    assignment_id=assignment_id,
+                    reason=reason,
                 ),
             )
         )

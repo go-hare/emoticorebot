@@ -48,6 +48,7 @@ class RuntimeTaskRecord:
     latest_result: TaskResultReportPayload | None = None
     latest_rejection_reason: str | None = None
     latest_findings: list[ReviewItem] = field(default_factory=list)
+    suppress_delivery: bool = False
 
     def snapshot(self) -> TaskStateSnapshot:
         return TaskStateSnapshot(

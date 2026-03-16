@@ -108,6 +108,17 @@ def _build_matrix_text_content(text: str) -> dict[str, object]:
     return content
 
 
+def _build_matrix_edit_content(text: str, *, target_event_id: str) -> dict[str, object]:
+    """Build a Matrix edit event targeting an existing message."""
+    return {
+        "msgtype": "m.text",
+        "body": f"* {text}",
+        "m.new_content": _build_matrix_text_content(text),
+        "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
+        "m.mentions": {},
+    }
+
+
 class _NioLoguruHandler(logging.Handler):
     """Route matrix-nio stdlib logs into Loguru."""
 
@@ -250,14 +261,19 @@ class MatrixChannel(BaseChannel):
         room = getattr(self.client, "rooms", {}).get(room_id)
         return bool(getattr(room, "encrypted", False))
 
-    async def _send_room_content(self, room_id: str, content: dict[str, Any]) -> None:
+    async def _send_room_content(self, room_id: str, content: dict[str, Any]) -> str | None:
         """Send m.room.message with E2EE options."""
         if not self.client:
-            return
+            return None
         kwargs: dict[str, Any] = {"room_id": room_id, "message_type": "m.room.message", "content": content}
         if self.config.e2ee_enabled:
             kwargs["ignore_unverified_devices"] = True
-        await self.client.room_send(**kwargs)
+        response = await self.client.room_send(**kwargs)
+        if isinstance(response, RoomSendError):
+            logger.warning("Matrix send failed for {}: {}", room_id, response)
+            return None
+        event_id = getattr(response, "event_id", None)
+        return event_id if isinstance(event_id, str) and event_id else None
 
     async def _resolve_server_upload_limit_bytes(self) -> int | None:
         """Query homeserver upload limit once per channel lifecycle."""
@@ -362,6 +378,56 @@ class MatrixChannel(BaseChannel):
         finally:
             if not is_progress:
                 await self._stop_typing_keepalive(msg.chat_id, clear_typing=True)
+
+    async def send_stream_delta(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self.client:
+            return
+
+        await self._stop_typing_keepalive(msg.chat_id, clear_typing=True)
+
+        rendered = f"{state.get('rendered_text', '')}{msg.content or ''}"
+        rendered = str(rendered)
+        if not rendered.strip():
+            return
+        state["rendered_text"] = rendered
+
+        event_id = str(state.get("event_id", "") or "").strip()
+        if not event_id:
+            content = _build_matrix_text_content(rendered)
+            if relates_to := self._build_thread_relates_to(msg.metadata):
+                content["m.relates_to"] = relates_to
+            if created_id := await self._send_room_content(msg.chat_id, content):
+                state["event_id"] = created_id
+            return
+
+        await self._send_room_content(
+            msg.chat_id,
+            _build_matrix_edit_content(rendered, target_event_id=event_id),
+        )
+
+    async def send_stream_final(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self.client:
+            return
+
+        await self._stop_typing_keepalive(msg.chat_id, clear_typing=True)
+
+        final_text = str(msg.content or "").strip()
+        if not final_text:
+            return
+
+        event_id = str(state.get("event_id", "") or "").strip()
+        if not event_id:
+            content = _build_matrix_text_content(final_text)
+            if relates_to := self._build_thread_relates_to(msg.metadata):
+                content["m.relates_to"] = relates_to
+            if created_id := await self._send_room_content(msg.chat_id, content):
+                state["event_id"] = created_id
+            return
+
+        await self._send_room_content(
+            msg.chat_id,
+            _build_matrix_edit_content(final_text, target_event_id=event_id),
+        )
 
     def _register_event_callbacks(self) -> None:
         self.client.add_event_callback(self._on_message, RoomMessageText)

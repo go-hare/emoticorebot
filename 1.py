@@ -1,19 +1,34 @@
 import asyncio
 import json
 import time
+from pathlib import Path
 
 from emoticorebot.bootstrap import RuntimeHost
 from emoticorebot.config.loader import load_config
-from emoticorebot.protocol.envelope import BusEnvelope
-from emoticorebot.protocol.task_models import ProtocolModel
-from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import TransportBus
 
-WATCH_EVENTS = [
-    EventType.OUTPUT_REPLY_APPROVED,
-    EventType.TASK_EVENT_PROGRESS,
-    EventType.TASK_EVENT_RESULT,
-]
+
+def compact_trace_item(item: dict) -> dict:
+    out = {
+        'role': item.get('role', '"''"'),
+        'timestamp': item.get('timestamp', '"''"'),
+    }
+    if item.get('tool_calls'):
+        out['tool_calls'] = [call.get('name', '"''"') for call in item.get('tool_calls', [])]
+    if item.get('name'):
+        out['name'] = item.get('name')
+    content = item.get('content')
+    if isinstance(content, list):
+        texts = []
+        for block in content:
+            if isinstance(block, dict):
+                text = str(block.get('text', '"''"') or block.get('content', '"''"') or '"''"').strip()
+                if text:
+                    texts.append(text)
+        out['content'] = ' | '.join(texts)[:200]
+    else:
+        out['content'] = str(content or '"''"')[:200]
+    return out
 
 async def main() -> None:
     config = load_config()
@@ -32,43 +47,25 @@ async def main() -> None:
         channels_config=config.channels,
     )
 
-    probe_rel = f'.timing_probe/create_agent_add_{int(time.time())}.py'
-    session_id = f'cli:create_agent_probe:{int(time.time())}'
-    message_id = f'msg_create_agent_probe_{int(time.time())}'
+    probe_rel = f'.timing_probe/trace_add_{int(time.time())}.py'
+    session_id = f'cli:timing_trace:{int(time.time())}'
+    message_id = f'msg_trace_{int(time.time())}'
     prompt = f'创建一个 {probe_rel} 文件 add(a,b) 返回 a+b'
     host.tool_manager.set_context('cli', 'direct', message_id, session_id)
 
-    timeline = []
-    t0 = time.perf_counter()
-
-    def now_ms() -> int:
-        return int((time.perf_counter() - t0) * 1000)
-
-    async def capture(event: BusEnvelope[ProtocolModel]) -> None:
-        payload = event.payload
-        summary = '"''"'
-        if hasattr(payload, 'summary') and getattr(payload, 'summary'):
-            summary = str(getattr(payload, 'summary'))
-        elif hasattr(payload, 'reply') and getattr(payload, 'reply', None) is not None:
-            summary = str(getattr(getattr(payload, 'reply'), 'plain_text', '"''"') or '"''"')
-        timeline.append({'t_ms': now_ms(), 'event': str(event.event_type), 'summary': summary[:180], 'task_id': event.task_id})
-
-    for idx, event_type in enumerate(WATCH_EVENTS):
-        host.kernel._bus.subscribe(consumer=f'probe:{idx}', event_type=event_type, handler=capture)
-
-    async def collect_outbound() -> list[dict[str, object]]:
+    async def collect_outbound() -> list[str]:
         outputs = []
         deadline = time.perf_counter() + 180
-        while time.perf_counter() < deadline and len(outputs) < 4:
+        while time.perf_counter() < deadline and len(outputs) < 2:
             try:
                 msg = await asyncio.wait_for(transport.consume_outbound(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
-            outputs.append({'t_ms': now_ms(), 'content': msg.content})
+            outputs.append(msg.content)
         return outputs
 
     outbound_task = asyncio.create_task(collect_outbound())
-    first = await host.kernel.handle_user_message(
+    await host.kernel.handle_user_message(
         session_id=session_id,
         channel='cli',
         chat_id='direct',
@@ -79,7 +76,14 @@ async def main() -> None:
     )
     outputs = await outbound_task
 
-    print(json.dumps({'first_reply': first.content, 'outbound': outputs, 'timeline': timeline}, ensure_ascii=False, indent=2))
+    executor = host.kernel._team._worker._executor
+    trace = [] if executor is None else list(getattr(executor, '_trace_log', []))
+    print(json.dumps({
+        'probe_rel': probe_rel,
+        'outputs': outputs,
+        'trace_count': len(trace),
+        'trace_tail': [compact_trace_item(item) for item in trace[-12:]],
+    }, ensure_ascii=False, indent=2))
 
     await host.close_mcp()
     await host.kernel.stop()

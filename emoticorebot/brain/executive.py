@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import re
+from typing import Any, cast
 from uuid import uuid4
+
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.brain.decision_packet import BrainControlPacket, normalize_brain_packet, parse_raw_brain_json
 from emoticorebot.protocol.commands import BrainCancelTaskPayload, BrainCreateTaskPayload, BrainResumeTaskPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.events import (
+    InterruptPayload,
     ReplyBlockedPayload,
     TaskCancelledEventPayload,
     TaskFailedEventPayload,
@@ -26,9 +31,83 @@ from emoticorebot.runtime.task_store import TaskStore
 from .dialogue_policy import DialoguePolicy
 from .reply_builder import ReplyBuilder
 
+_USER_TAG = "####user####"
+_TASK_TAG = "####task####"
+_STREAM_FLUSH_RE = re.compile(r"[。！？.!?\n]")
+
 
 def _new_command_id() -> str:
     return f"cmd_{uuid4().hex[:12]}"
+
+
+def _chunk_text(chunk: Any) -> str:
+    content = getattr(chunk, "content", chunk)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return str(content or "")
+
+
+def _task_tag_overlap(text: str) -> int:
+    max_overlap = min(len(text), len(_TASK_TAG) - 1)
+    for size in range(max_overlap, 0, -1):
+        if _TASK_TAG.startswith(text[-size:]):
+            return size
+    return 0
+
+
+def _extract_streamable_user_text(full_text: str) -> tuple[str | None, bool]:
+    start = full_text.find(_USER_TAG)
+    if start < 0:
+        return None, False
+    body = full_text[start + len(_USER_TAG) :]
+    if body.startswith("\r\n"):
+        body = body[2:]
+    elif body.startswith("\n"):
+        body = body[1:]
+    task_pos = body.find(_TASK_TAG)
+    if task_pos >= 0:
+        return body[:task_pos].rstrip(), True
+    overlap = _task_tag_overlap(body)
+    if overlap:
+        return body[:-overlap], False
+    return body, False
+
+
+class _UserReplyStreamer:
+    def __init__(self) -> None:
+        self._emitted_chars = 0
+        self._pending = ""
+
+    def feed(self, full_text: str) -> list[str]:
+        candidate, completed = _extract_streamable_user_text(full_text)
+        if candidate is None:
+            return []
+        fresh = candidate[self._emitted_chars :]
+        self._emitted_chars = len(candidate)
+        if fresh:
+            self._pending += fresh
+        if not self._pending:
+            return []
+        if completed or len(self._pending) >= 24 or _STREAM_FLUSH_RE.search(self._pending):
+            chunk = self._pending
+            self._pending = ""
+            return [chunk]
+        return []
+
+    def finish(self) -> list[str]:
+        if not self._pending:
+            return []
+        chunk = self._pending
+        self._pending = ""
+        return [chunk]
 
 
 class ExecutiveBrain:
@@ -53,6 +132,8 @@ class ExecutiveBrain:
         self._session_origins: dict[str, MessageRef] = {}
         self._cancel_replied_task_ids: set[str] = set()
         self._last_progress_replies: dict[str, str] = {}
+        self._tasks_in_flight: set[asyncio.Task[None]] = set()
+        self._active_user_turns: dict[str, asyncio.Task[None]] = {}
 
     def register(self) -> None:
         self._bus.subscribe(consumer="brain", topic=Topic.INPUT_EVENT, handler=self._on_input_event)
@@ -66,20 +147,103 @@ class ExecutiveBrain:
         self._bus.subscribe(consumer="brain", event_type=EventType.MEMORY_UPDATE_PERSONA, handler=self._ignore)
         self._bus.subscribe(consumer="brain", event_type=EventType.MEMORY_UPDATE_USER_MODEL, handler=self._ignore)
 
-    async def _on_input_event(self, event: BusEnvelope[UserMessagePayload]) -> None:
+    async def _on_input_event(self, event: BusEnvelope[object]) -> None:
+        if event.event_type == EventType.INPUT_INTERRUPT:
+            self._cancel_active_user_turn(event.session_id or "")
+            await self._on_interrupt(cast(BusEnvelope[InterruptPayload], event))
+            return
         if event.event_type != EventType.INPUT_USER_MESSAGE:
             return
+        session_id = event.session_id or ""
+        self._cancel_active_user_turn(session_id)
+        self._spawn_user_turn(session_id, cast(BusEnvelope[UserMessagePayload], event))
 
+    def _spawn_user_turn(self, session_id: str, event: BusEnvelope[UserMessagePayload]) -> None:
+        task = asyncio.create_task(self._run_user_turn(event), name=f"brain-user-turn:{session_id or 'default'}")
+        self._tasks_in_flight.add(task)
+        self._active_user_turns[session_id] = task
+        task.add_done_callback(self._tasks_in_flight.discard)
+        task.add_done_callback(lambda finished, key=session_id: self._discard_user_turn(key, finished))
+
+    def _discard_user_turn(self, session_id: str, task: asyncio.Task[None]) -> None:
+        if self._active_user_turns.get(session_id) is task:
+            self._active_user_turns.pop(session_id, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
+    def _cancel_active_user_turn(self, session_id: str) -> None:
+        task = self._active_user_turns.get(session_id)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _run_user_turn(self, event: BusEnvelope[UserMessagePayload]) -> None:
         payload = event.payload
         user_text = self._user_text(payload)
         session_id = event.session_id or ""
         self._session_origins[session_id] = payload.message
         tasks = self._tasks.for_session(session_id)
         origin = payload.message
-        packet = await self._decide_user_turn(event=event, user_text=user_text, tasks=tasks)
+        suppress_delivery = self._suppress_delivery_from_metadata(payload.metadata)
+        stream_id = f"stream_{event.turn_id or uuid4().hex[:12]}"
+        stream_counter = 0
+        stream_enabled = self._can_stream_user_reply(origin)
+
+        async def _publish_stream_chunk(text: str) -> None:
+            nonlocal stream_counter
+            chunk = str(text or "")
+            if not chunk:
+                return
+            stream_counter += 1
+            await self._bus.publish(
+                self._replies.reply(
+                    session_id=session_id,
+                    turn_id=event.turn_id,
+                    text=chunk,
+                    origin_message=origin,
+                    causation_id=event.event_id,
+                    correlation_id=event.turn_id,
+                    kind="answer",
+                    reply_id=f"{stream_id}_{stream_counter}",
+                    reply_metadata=self._reply_metadata(
+                        extra={
+                            "stream_id": stream_id,
+                            "stream_state": "delta",
+                            "stream_index": stream_counter,
+                        },
+                        suppress_delivery=suppress_delivery,
+                    ),
+                )
+            )
+
+        packet = await self._decide_user_turn(
+            event=event,
+            user_text=user_text,
+            tasks=tasks,
+            on_user_stream=_publish_stream_chunk if stream_enabled else None,
+        )
         task_action = str(packet.get("task_action", "none") or "none").strip()
         reply_text = str(packet.get("final_message", "") or "").strip()
+        if not reply_text:
+            reply_text = self._default_user_turn_reply(
+                task_action=task_action,
+                final_decision=str(packet.get("final_decision", "") or "").strip(),
+            )
         reflection_task = None
+        final_reply_metadata = (
+            self._reply_metadata(
+                extra={
+                    "stream_id": stream_id,
+                    "stream_state": "final",
+                },
+                suppress_delivery=suppress_delivery,
+            )
+            if stream_enabled and stream_counter > 0
+            else self._reply_metadata(suppress_delivery=suppress_delivery)
+        )
 
         if task_action == "create_task":
             task = packet.get("task", {}) if isinstance(packet.get("task"), dict) else {}
@@ -109,6 +273,7 @@ class ExecutiveBrain:
                         review_policy=str(task.get("review_policy", "") or "").strip() or self._review_policy(payload),
                         preferred_agent=str(task.get("preferred_agent", "") or "").strip() or self._preferred_agent(payload),
                         origin_message=origin,
+                        metadata=self._command_metadata(suppress_delivery=suppress_delivery),
                     ),
                 )
             )
@@ -120,10 +285,12 @@ class ExecutiveBrain:
                 causation_id=event.event_id,
                 correlation_id=event.turn_id,
                 kind="status",
+                reply_metadata=final_reply_metadata,
             )
         elif task_action == "resume_task":
             task_id = str((packet.get("task") or {}).get("task_id", "") or "").strip()
             reflection_task = self._tasks.get(task_id)
+            suppress_task_reply = suppress_delivery or self._task_suppress_delivery(reflection_task)
             await self._bus.publish(
                 build_envelope(
                     event_type=EventType.BRAIN_RESUME_TASK,
@@ -152,6 +319,7 @@ class ExecutiveBrain:
                         ),
                         origin_message=origin,
                         resume_reason=str(packet.get("task_reason", "") or "").strip() or "user_follow_up",
+                        metadata=self._command_metadata(suppress_delivery=suppress_task_reply),
                     ),
                 )
             )
@@ -164,11 +332,16 @@ class ExecutiveBrain:
                 causation_id=event.event_id,
                 correlation_id=task_id or event.turn_id,
                 kind="status",
+                reply_metadata=self._reply_metadata(
+                    extra=final_reply_metadata,
+                    suppress_delivery=suppress_task_reply,
+                ),
             )
         elif task_action == "cancel_task":
             task_id = str((packet.get("task") or {}).get("task_id", "") or "").strip()
             task = self._tasks.get(task_id)
             reflection_task = task
+            suppress_task_reply = suppress_delivery or self._task_suppress_delivery(task)
             await self._bus.publish(
                 build_envelope(
                     event_type=EventType.BRAIN_CANCEL_TASK,
@@ -186,6 +359,7 @@ class ExecutiveBrain:
                         user_visible_reason=reply_text,
                         hard_stop=False,
                         origin_message=origin,
+                        metadata=self._command_metadata(suppress_delivery=suppress_task_reply),
                     ),
                 )
             )
@@ -199,6 +373,10 @@ class ExecutiveBrain:
                 causation_id=event.event_id,
                 correlation_id=task_id or event.turn_id,
                 kind="status",
+                reply_metadata=self._reply_metadata(
+                    extra=final_reply_metadata,
+                    suppress_delivery=suppress_task_reply,
+                ),
             )
         else:
             await self._publish_user_turn_reply(
@@ -209,6 +387,7 @@ class ExecutiveBrain:
                 causation_id=event.event_id,
                 correlation_id=event.turn_id,
                 kind="ask_user" if packet.get("final_decision") == "ask_user" else "answer",
+                reply_metadata=final_reply_metadata,
             )
 
         await self._publish_reflection(
@@ -224,6 +403,48 @@ class ExecutiveBrain:
             ),
         )
 
+    async def _on_interrupt(self, event: BusEnvelope[InterruptPayload]) -> None:
+        task_id = str(event.payload.target_task_id or "").strip()
+        if not task_id:
+            task = self._tasks.latest_for_session(event.session_id or "", include_terminal=False)
+            if task is None:
+                return
+            task_id = task.task_id
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        self._cancel_replied_task_ids.add(task_id)
+        self._last_progress_replies.pop(task_id, None)
+        await self._bus.publish(
+            build_envelope(
+                event_type=EventType.BRAIN_CANCEL_TASK,
+                source="brain",
+                target="runtime",
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                task_id=task_id,
+                correlation_id=task_id,
+                causation_id=event.event_id,
+                payload=BrainCancelTaskPayload(
+                    command_id=_new_command_id(),
+                    task_id=task_id,
+                    reason="interrupted_by_new_user_message",
+                    hard_stop=True,
+                    origin_message=event.payload.message,
+                    metadata=self._merge_reply_metadata(
+                        {"interrupt_type": event.payload.interrupt_type},
+                        self._command_metadata(
+                            suppress_delivery=(
+                                self._suppress_delivery_from_metadata(event.payload.metadata)
+                                or self._task_suppress_delivery(task)
+                            ),
+                        ),
+                    )
+                    or {},
+                ),
+            )
+        )
+
     async def _on_need_input(self, event: BusEnvelope[TaskNeedInputEventPayload]) -> None:
         task = self._tasks.get(event.payload.task_id)
         await self._bus.publish(
@@ -235,6 +456,7 @@ class ExecutiveBrain:
                 related_task_id=event.payload.task_id,
                 causation_id=event.event_id,
                 correlation_id=event.correlation_id or event.payload.task_id,
+                reply_metadata=self._reply_metadata(task=task),
             )
         )
 
@@ -257,6 +479,7 @@ class ExecutiveBrain:
                 causation_id=event.event_id,
                 correlation_id=event.correlation_id or event.payload.task_id,
                 kind="status",
+                reply_metadata=self._reply_metadata(task=task),
             )
         )
 
@@ -273,6 +496,7 @@ class ExecutiveBrain:
                 related_task_id=event.payload.task_id,
                 causation_id=event.event_id,
                 correlation_id=event.correlation_id or event.payload.task_id,
+                reply_metadata=self._reply_metadata(task=task),
             )
         )
         metadata = self._task_event_reflection_metadata(
@@ -306,6 +530,7 @@ class ExecutiveBrain:
                 related_task_id=event.payload.task_id,
                 causation_id=event.event_id,
                 correlation_id=event.correlation_id or event.payload.task_id,
+                reply_metadata=self._reply_metadata(task=task),
             )
         )
         metadata = self._task_event_reflection_metadata(
@@ -343,6 +568,7 @@ class ExecutiveBrain:
                 causation_id=event.event_id,
                 correlation_id=event.correlation_id or event.payload.task_id,
                 kind="status",
+                reply_metadata=self._reply_metadata(task=task),
             )
         )
         metadata = self._task_event_reflection_metadata(
@@ -376,6 +602,7 @@ class ExecutiveBrain:
                 correlation_id=event.correlation_id or event.task_id or event.turn_id,
                 kind="safety_fallback",
                 safe_fallback=True,
+                reply_metadata=self._reply_metadata(task=task),
             )
         )
 
@@ -433,22 +660,57 @@ class ExecutiveBrain:
             return getattr(task, "origin_message")
         return self._session_origins.get(session_id)
 
+    @staticmethod
+    def _suppress_delivery_from_metadata(metadata: dict[str, Any] | None) -> bool:
+        return bool((metadata or {}).get("suppress_delivery"))
+
+    @staticmethod
+    def _task_suppress_delivery(task: object | None) -> bool:
+        return bool(getattr(task, "suppress_delivery", False)) if task is not None else False
+
+    @staticmethod
+    def _command_metadata(*, suppress_delivery: bool) -> dict[str, Any]:
+        return {"suppress_delivery": True} if suppress_delivery else {}
+
+    @staticmethod
+    def _merge_reply_metadata(*parts: dict[str, Any] | None) -> dict[str, Any] | None:
+        merged: dict[str, Any] = {}
+        for part in parts:
+            if part:
+                merged.update(part)
+        return merged or None
+
+    def _reply_metadata(
+        self,
+        *,
+        extra: dict[str, Any] | None = None,
+        suppress_delivery: bool = False,
+        task: object | None = None,
+    ) -> dict[str, Any] | None:
+        return self._merge_reply_metadata(
+            extra,
+            self._command_metadata(
+                suppress_delivery=suppress_delivery or self._task_suppress_delivery(task),
+            ),
+        )
+
     async def _decide_user_turn(
         self,
         *,
         event: BusEnvelope[UserMessagePayload],
         user_text: str,
         tasks: list[object],
+        on_user_stream: Any | None = None,
     ) -> BrainControlPacket:
         if self._brain_llm is None:
             raise RuntimeError("ExecutiveBrain requires brain_llm for user-turn decisions")
 
-        prompt = self._build_brain_decision_prompt(
+        messages = self._build_brain_decision_messages(
             user_text=user_text,
             history_context=str(event.payload.metadata.get("history_context", "") or "").strip(),
             tasks=tasks,
         )
-        response = await self._invoke_brain(prompt)
+        response = await self._invoke_brain(messages, on_user_stream=on_user_stream)
         raw_payload = parse_raw_brain_json(response)
         return normalize_brain_packet(
             raw_payload,
@@ -463,31 +725,75 @@ class ExecutiveBrain:
             },
         )
 
-    async def _invoke_brain(self, prompt: str) -> Any:
+    async def _invoke_brain(
+        self,
+        messages: list[SystemMessage | HumanMessage],
+        *,
+        on_user_stream: Any | None = None,
+    ) -> Any:
+        if on_user_stream is not None and hasattr(self._brain_llm, "astream"):
+            full_text = ""
+            streamer = _UserReplyStreamer()
+            async for chunk in self._brain_llm.astream(messages):
+                text = _chunk_text(chunk)
+                if not text:
+                    continue
+                full_text += text
+                for item in streamer.feed(full_text):
+                    await on_user_stream(item)
+            for item in streamer.finish():
+                await on_user_stream(item)
+            return full_text
         if hasattr(self._brain_llm, "ainvoke"):
-            return await self._brain_llm.ainvoke(prompt)
+            return await self._brain_llm.ainvoke(messages)
         if hasattr(self._brain_llm, "invoke"):
-            return self._brain_llm.invoke(prompt)
+            return self._brain_llm.invoke(messages)
         raise RuntimeError("brain_llm does not support invoke/ainvoke")
 
-    def _build_brain_decision_prompt(self, *, user_text: str, history_context: str, tasks: list[object]) -> str:
-        system_prompt = (
-            self._context_builder.build_brain_system_prompt(query=user_text)
-            if self._context_builder is not None and hasattr(self._context_builder, "build_brain_system_prompt")
-            else ""
-        )
-        parts = [part for part in [system_prompt.strip(), self._user_turn_instruction(history_context, tasks, user_text)] if part]
-        return "\n\n".join(parts)
+    @staticmethod
+    def _can_stream_user_reply(origin: MessageRef) -> bool:
+        return bool(str(origin.channel or "").strip() and str(origin.chat_id or "").strip())
+
+    def _build_brain_decision_messages(
+        self,
+        *,
+        user_text: str,
+        history_context: str,
+        tasks: list[object],
+    ) -> list[SystemMessage | HumanMessage]:
+        system_prompt = ""
+        if self._context_builder is not None and hasattr(self._context_builder, "build_brain_decision_system_prompt"):
+            system_prompt = self._context_builder.build_brain_decision_system_prompt(query=user_text)
+        elif self._context_builder is not None and hasattr(self._context_builder, "build_brain_system_prompt"):
+            system_prompt = self._context_builder.build_brain_system_prompt(query=user_text)
+        messages: list[SystemMessage | HumanMessage] = []
+        if system_prompt.strip():
+            messages.append(SystemMessage(content=system_prompt.strip()))
+        messages.append(HumanMessage(content=self._user_turn_instruction(history_context, tasks, user_text)))
+        return messages
 
     def _user_turn_instruction(self, history_context: str, tasks: list[object], user_text: str) -> str:
         lines = [
             "## 当前轮执行要求",
-            "你现在要对这条用户输入做一次完整决策，并且只输出一个合法 JSON BrainControlPacket。",
+            "你现在要对这条用户输入做一次完整决策，并且只能输出两个文本区块：`####user####` 和 `####task####`。",
             "不要输出 markdown，不要输出解释，不要输出额外文本。",
-            "如果只是简单问答、闲聊、解释、计算，直接 task_action=none。",
-            "如果确实需要进入任务执行，再输出 create_task / resume_task / cancel_task。",
-            "凡是用户要求创建文件、修改文件、运行命令、检查环境、调用工具、生成产物，必须输出 create_task。",
-            "不要假装任务已经完成；只要还没有经过 runtime/worker 执行，就不能在 final_message 里声称文件已创建、命令已运行或结果已落盘。",
+            "格式固定如下：",
+            "####user####",
+            "<给用户看的自然语言回复>",
+            "",
+            "####task####",
+            "mode=<answer|ask_user|continue>",
+            "action=<none|create_task|resume_task|cancel_task>",
+            "task_id=<仅 resume_task / cancel_task 时填写>",
+            "",
+            "`####user####` 里的内容会直接发给用户，必须自然、简洁。",
+            "`####task####` 只给系统看，必须是紧凑 key=value 行。",
+            "`create_task` 默认不要写 request；runtime 会直接用用户原始请求创建任务。",
+            "如果只是简单问答、闲聊、解释、计算，输出 `mode=answer` 和 `action=none`。",
+            "如果需要追问但不创建任务，输出 `mode=ask_user` 和 `action=none`。",
+            "如果确实需要进入任务执行，再输出 `mode=continue`，并把 `action` 设为 `create_task / resume_task / cancel_task`。",
+            "凡是用户要求创建文件、修改文件、运行命令、检查环境、调用工具、生成产物，必须输出 `action=create_task`。",
+            "不要假装任务已经完成；只要还没有经过 runtime/worker 执行，就不能在 `####user####` 里声称文件已创建、命令已运行或结果已落盘。",
         ]
         task_lines = self._task_context_lines(tasks)
         if history_context:
@@ -518,6 +824,18 @@ class ExecutiveBrain:
             lines.append(f"- {item}")
         return lines
 
+    @staticmethod
+    def _default_user_turn_reply(*, task_action: str, final_decision: str) -> str:
+        if task_action == "create_task":
+            return "收到，我开始处理。"
+        if task_action == "resume_task":
+            return "收到，我继续处理。"
+        if task_action == "cancel_task":
+            return "收到，我先停下这个任务。"
+        if final_decision == "ask_user":
+            return "你再补充一点信息，我就继续。"
+        return "收到。"
+
     async def _publish_user_turn_reply(
         self,
         *,
@@ -529,6 +847,7 @@ class ExecutiveBrain:
         causation_id: str | None = None,
         correlation_id: str | None = None,
         kind: str = "answer",
+        reply_metadata: dict[str, Any] | None = None,
     ) -> None:
         if not text:
             return
@@ -543,8 +862,15 @@ class ExecutiveBrain:
                 causation_id=causation_id,
                 correlation_id=correlation_id,
                 kind=("status" if kind == "status" else "answer") if kind != "ask_user" else "ask_user",
+                reply_metadata=reply_metadata,
             )
         )
+
+    async def stop(self) -> None:
+        for task in list(self._tasks_in_flight):
+            task.cancel()
+        if self._tasks_in_flight:
+            await asyncio.gather(*self._tasks_in_flight, return_exceptions=True)
 
     def _user_turn_reflection_metadata(
         self,
@@ -655,7 +981,7 @@ class ExecutiveBrain:
     @staticmethod
     def _execution_from_packet(packet: BrainControlPacket, *, task: object) -> dict[str, Any]:
         action = str(packet.get("task_action", "none") or "none").strip()
-        summary = str(packet.get("execution_summary", "") or "").strip() or "主脑完成了当前轮判断。"
+        summary = "主脑完成了当前轮判断。"
         if action == "create_task":
             return ExecutiveBrain._execution_payload(status="running", summary=summary, invoked=True)
         if action == "resume_task":

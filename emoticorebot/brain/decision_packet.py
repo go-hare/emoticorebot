@@ -13,26 +13,28 @@ BrainTaskAction = Literal["", "none", "create_task", "resume_task", "cancel_task
 
 
 class BrainControlPacket(TypedDict, total=False):
-    """Structured brain output used by decision and narration layers."""
+    """Structured brain output used by decision and narration layers.
+
+    Core fields are intentionally minimal:
+    - ``task_action``
+    - ``final_decision``
+    - ``final_message``
+
+    Other fields are optional hints. ``task`` may also be omitted when the
+    runtime can derive it from current context, for example using the user's
+    raw message as ``request`` for ``create_task``.
+
+    Recommended minimal shapes:
+    - ``none``: only the 3 core fields
+    - ``create_task``: only the 3 core fields
+    - ``resume_task`` / ``cancel_task``: the 3 core fields + ``task.task_id``
+    """
 
     task_action: BrainTaskAction
     task_reason: str
     final_decision: BrainFinalDecision
     final_message: str
-    task_brief: str
     task: TaskSpec
-    intent: str
-    working_hypothesis: str
-    notify_user: bool
-    execution_summary: str
-    retrieval_query: str
-    retrieval_focus: list[str]
-    retrieved_memory_ids: list[str]
-    message_id: str
-    model_name: str
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
 
 
 def normalize_str_list(value: Any) -> list[str]:
@@ -88,31 +90,16 @@ def normalize_brain_packet(payload: Any, *, current_context: dict[str, Any]) -> 
         raise RuntimeError("Brain agent did not return a structured BrainControlPacket")
 
     packet: BrainControlPacket = {
-        "message_id": str(payload.get("message_id", "") or current_context.get("message_id", "") or "").strip(),
-        "intent": str(payload.get("intent", "") or "").strip(),
-        "working_hypothesis": str(payload.get("working_hypothesis", "") or "").strip(),
         "task_action": str(payload.get("task_action", "none") or "none").strip(),
         "task_reason": str(payload.get("task_reason", "") or "").strip(),
         "final_decision": str(payload.get("final_decision", "answer") or "answer").strip(),
         "final_message": str(payload.get("final_message", "") or "").strip(),
-        "task_brief": str(payload.get("task_brief", "") or "").strip(),
-        "execution_summary": str(payload.get("execution_summary", "") or "").strip(),
-        "notify_user": bool(payload.get("notify_user", True)),
-        "retrieval_query": str(payload.get("retrieval_query", "") or "").strip(),
-        "retrieval_focus": normalize_str_list(payload.get("retrieval_focus")),
-        "retrieved_memory_ids": normalize_str_list(payload.get("retrieved_memory_ids")),
     }
-
-    for key in ("model_name", "prompt_tokens", "completion_tokens", "total_tokens"):
-        if key in payload and payload.get(key) not in (None, ""):
-            packet[key] = payload.get(key)
 
     if packet["task_action"] not in {"none", "create_task", "resume_task", "cancel_task"}:
         raise RuntimeError(f"Invalid brain task_action: {packet['task_action']!r}")
     if packet["final_decision"] not in {"answer", "ask_user", "continue"}:
         raise RuntimeError(f"Invalid brain final_decision: {packet['final_decision']!r}")
-    if not packet["final_message"]:
-        raise RuntimeError("BrainControlPacket.final_message must not be empty")
 
     model_task = payload.get("task")
     if packet["task_action"] == "create_task":
@@ -158,43 +145,29 @@ _JSON_FENCE_RE = re.compile(
     r"```(?:json)?\s*\n?(.*?)\n?\s*```",
     re.DOTALL,
 )
+_TAG_SECTION_RE = re.compile(r"^\s*####([a-zA-Z_]+)####\s*$", re.MULTILINE)
 
 
 def _looks_like_brain_packet(payload: Any) -> bool:
     return isinstance(payload, dict) and "task_action" in payload and "final_decision" in payload and "final_message" in payload
 
 
-def parse_raw_brain_json(result: Any) -> dict[str, Any]:
-    """Extract and parse a JSON ``BrainControlPacket`` from an agent result.
-
-    The function first tries ``result["structured_response"]`` (backward-compat).
-    If that is *None*, it falls back to extracting the last AI message's text
-    content, strips optional markdown code fences, and parses the JSON.
-
-    Raises ``RuntimeError`` when the text cannot be parsed.
-    """
-    if _looks_like_brain_packet(result):
-        return result
-
+def _extract_brain_text(result: Any) -> str:
     if isinstance(result, str):
         result = {"messages": [result]}
     elif not isinstance(result, dict):
         result = {"messages": [result]}
 
-    # Fast path: structured output still present
     structured = result.get("structured_response")
     if _looks_like_brain_packet(structured):
-        return structured
+        return json.dumps(structured, ensure_ascii=False)
 
-    # Locate the last AI message text
     messages = result.get("messages", [])
-    text = ""
     for msg in reversed(messages):
         if _looks_like_brain_packet(msg):
-            return msg
+            return json.dumps(msg, ensure_ascii=False)
         if isinstance(msg, str) and msg.strip():
-            text = msg.strip()
-            break
+            return msg.strip()
         content = getattr(msg, "content", None)
         if content is None:
             content = msg.get("content", "") if isinstance(msg, dict) else ""
@@ -205,11 +178,120 @@ def parse_raw_brain_json(result: Any) -> dict[str, Any]:
             ]
             content = "\n".join(parts)
         if isinstance(content, str) and content.strip():
-            text = content.strip()
-            break
+            return content.strip()
+    return ""
 
+
+def _parse_tagged_brain_text(text: str) -> dict[str, Any] | None:
+    matches = list(_TAG_SECTION_RE.finditer(text))
+    if not matches:
+        return None
+
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        name = str(match.group(1) or "").strip().lower()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[start:end].strip()
+        if body:
+            sections[name] = body
+
+    user_text = str(sections.get("user", "") or "").strip()
+    task_text = str(sections.get("task", "") or "").strip()
+    if not user_text:
+        raise RuntimeError("Brain tagged output requires a non-empty ####user#### section")
+    if not task_text:
+        raise RuntimeError("Brain tagged output requires a non-empty ####task#### section")
+
+    task_fields: dict[str, str] = {}
+    for raw in task_text.splitlines():
+        line = str(raw or "").strip()
+        if not line:
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+        elif ":" in line:
+            key, value = line.split(":", 1)
+        else:
+            raise RuntimeError(f"Invalid brain task line: {line!r}")
+        key = key.strip().lower()
+        value = value.strip()
+        if key:
+            task_fields[key] = value
+
+    action = str(task_fields.get("action", task_fields.get("task_action", "none")) or "none").strip()
+    decision = str(task_fields.get("mode", task_fields.get("final_decision", "")) or "").strip()
+    if not decision:
+        decision = "continue" if action != "none" else "answer"
+
+    payload: dict[str, Any] = {
+        "task_action": action,
+        "final_decision": decision,
+        "final_message": user_text,
+    }
+
+    task: dict[str, Any] = {}
+    text_fields = (
+        "task_id",
+        "title",
+        "request",
+        "goal",
+        "expected_output",
+        "history_context",
+        "review_policy",
+        "preferred_agent",
+        "reason",
+    )
+    list_fields = ("constraints", "success_criteria", "memory_refs", "skill_hints")
+
+    for key in text_fields:
+        value = str(task_fields.get(key, "") or "").strip()
+        if value:
+            task[key] = value
+
+    for key in list_fields:
+        raw_value = str(task_fields.get(key, "") or "").strip()
+        if not raw_value:
+            continue
+        if raw_value.startswith("["):
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                parsed = None
+            values = normalize_str_list(parsed)
+            if values:
+                task[key] = values
+                continue
+        values = [item.strip() for item in raw_value.split("|") if item.strip()]
+        if values:
+            task[key] = values
+
+    if task:
+        payload["task"] = task
+    return payload
+
+
+def parse_raw_brain_json(result: Any) -> dict[str, Any]:
+    """Extract a ``BrainControlPacket`` from an agent result.
+
+    The function first tries ``result["structured_response"]`` (backward-compat).
+    If that is *None*, it falls back to extracting the last AI message's text
+    content. It supports:
+    - plain JSON objects
+    - tagged output blocks: ``####user####`` and ``####task####``
+
+    Raises ``RuntimeError`` when the text cannot be parsed.
+    """
+    if _looks_like_brain_packet(result):
+        return result
+
+    text = _extract_brain_text(result)
     if not text:
-        raise RuntimeError("Brain agent returned empty content; cannot parse BrainControlPacket JSON")
+        raise RuntimeError("Brain agent returned empty content; cannot parse BrainControlPacket")
+
+    tagged_payload = _parse_tagged_brain_text(text)
+    if tagged_payload is not None:
+        return tagged_payload
 
     # Strip markdown ```json ... ``` fences if present
     fence_match = _JSON_FENCE_RE.search(text)
@@ -219,7 +301,7 @@ def parse_raw_brain_json(result: Any) -> dict[str, Any]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Brain agent output is not valid JSON: {exc}\n---\n{text[:500]}") from exc
+        raise RuntimeError(f"Brain agent output is neither tagged text nor valid JSON: {exc}\n---\n{text[:500]}") from exc
 
     if not isinstance(payload, dict):
         raise RuntimeError(f"Brain agent JSON is not an object: {type(payload).__name__}")

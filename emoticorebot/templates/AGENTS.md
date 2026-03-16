@@ -32,30 +32,32 @@
 
 ## 输出协议
 
-必须且只能输出一个合法的 JSON 对象（不要包裹在 markdown 代码块中），严格遵循 `BrainControlPacket` schema：
+必须且只能输出两个区块，不要输出 JSON，不要输出 markdown 代码块，不要输出额外解释：
 
-```json
-{
-  "intent": "<string: 对用户当前诉求的判断>",
-  "working_hypothesis": "<string: 当前工作假设>",
-  "task_action": "<enum: none | create_task | resume_task | cancel_task>",
-  "task_reason": "<string: 为什么采取该动作>",
-  "final_decision": "<enum: answer | ask_user | continue>",
-  "final_message": "<string: 给用户的自然语言回复。即使本轮要创建/恢复/取消任务，也要给出本轮立即回复>",
-  "task_brief": "<string: 当本轮发生任务动作时，给 runtime 的简要说明；无动作时为空字符串>",
-  "task": "<object|null: task_action=create_task 时填写任务规格；resume_task/cancel_task 时至少填写 task_id>",
-  "execution_summary": "<string: 一句话总结本轮做了什么；没有执行就填空字符串>"
-}
+```text
+####user####
+<给用户看的自然语言回复>
+
+####task####
+mode=<answer|ask_user|continue>
+action=<none|create_task|resume_task|cancel_task>
+task_id=<仅 resume_task / cancel_task 时填写>
 ```
 
+最小协议优先：
+
+- `####user####` 负责用户可见回复
+- `####task####` 负责系统内部动作
+- `create_task` 默认不要额外写 `request`，runtime 会直接使用用户原始输入
+- `resume_task` / `cancel_task` 时补 `task_id`
+
 **规则：**
-- 直接回复用户：`"task_action":"none"`, `"final_decision":"answer"`
-- 需要追问但不创建任务：`"task_action":"none"`, `"final_decision":"ask_user"`
-- 需要创建任务：`"task_action":"create_task"`；`final_message` 写给用户，`task` 写任务规格
-- 需要恢复等待输入的任务：`"task_action":"resume_task"`；`task.task_id` 指向要恢复的任务
-- 需要取消任务：`"task_action":"cancel_task"`；`task.task_id` 指向要取消的任务
-- `task_action != "none"` 时，优先使用 `"final_decision":"continue"`，表示 runtime 接下来会继续处理
-- 不要伪造不存在的 task_id；如果上下文里没有可恢复/可取消的任务，就不要输出 `resume_task/cancel_task`
+- 直接回复用户：`mode=answer`, `action=none`
+- 需要追问但不创建任务：`mode=ask_user`, `action=none`
+- 需要创建任务：`mode=continue`, `action=create_task`
+- 需要恢复等待输入的任务：`mode=continue`, `action=resume_task`, 并填写 `task_id`
+- 需要取消任务：`mode=continue`, `action=cancel_task`, 并填写 `task_id`
+- 不要伪造不存在的 `task_id`；如果上下文里没有可恢复/可取消的任务，就不要输出 `resume_task/cancel_task`
 
 ## 长期记忆原则
 

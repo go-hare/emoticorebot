@@ -7,7 +7,6 @@ from typing import Awaitable, Callable
 
 from loguru import logger
 
-from emoticorebot.adapters.outbound_dispatcher import OutboundDispatcher
 from emoticorebot.runtime.transport_bus import InboundMessage, OutboundMessage, TransportBus
 
 MessageProcessor = Callable[
@@ -17,20 +16,18 @@ MessageProcessor = Callable[
 
 
 class ConversationGateway:
-    """Handles inbound dispatch, session locking, and direct processing."""
+    """Handles inbound dispatch with per-session preemption and direct processing."""
 
     def __init__(
         self,
         *,
         bus: TransportBus,
-        dispatcher: OutboundDispatcher,
         message_processor: MessageProcessor,
     ):
         self.bus = bus
-        self.dispatcher = dispatcher
         self._message_processor = message_processor
         self._dispatch_tasks: set[asyncio.Task] = set()
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._active_dispatch_by_session: dict[str, asyncio.Task[None]] = {}
 
     async def run_forever(self, should_continue: Callable[[], bool], idle_timeout: float = 1.0) -> None:
         while should_continue():
@@ -41,17 +38,21 @@ class ConversationGateway:
             self.spawn_dispatch(msg)
 
     def spawn_dispatch(self, msg: InboundMessage) -> None:
+        active_task = self._active_dispatch_by_session.get(msg.session_key)
+        if active_task is not None and not active_task.done():
+            active_task.cancel()
         task = asyncio.create_task(self.dispatch(msg), name=f"conversation:{msg.session_key}")
+        self._active_dispatch_by_session[msg.session_key] = task
         self._dispatch_tasks.add(task)
-        task.add_done_callback(self._on_dispatch_done)
+        task.add_done_callback(lambda finished, session_key=msg.session_key: self._on_dispatch_done(session_key, finished))
 
     async def dispatch(self, msg: InboundMessage) -> None:
-        lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
-        async with lock:
-            await self._message_processor(msg, None, None)
+        await self._message_processor(msg, None, None)
 
-    def _on_dispatch_done(self, task: asyncio.Task) -> None:
+    def _on_dispatch_done(self, session_key: str, task: asyncio.Task) -> None:
         self._dispatch_tasks.discard(task)
+        if self._active_dispatch_by_session.get(session_key) is task:
+            self._active_dispatch_by_session.pop(session_key, None)
         try:
             task.result()
         except asyncio.CancelledError:
@@ -71,6 +72,7 @@ class ConversationGateway:
     def stop(self) -> None:
         for task in list(self._dispatch_tasks):
             task.cancel()
+        self._active_dispatch_by_session.clear()
 
 
 __all__ = ["ConversationGateway"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Callable
 
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
@@ -15,19 +16,45 @@ from emoticorebot.runtime.transport_bus import OutboundMessage, TransportBus
 class DeliveryService:
     """Bridges approved replies to the transport-facing outbound queue."""
 
-    def __init__(self, *, bus: PriorityPubSubBus, transport: TransportBus | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        bus: PriorityPubSubBus,
+        transport: TransportBus | None = None,
+        should_deliver: Callable[[BusEnvelope[ReplyReadyPayload]], bool] | None = None,
+    ) -> None:
         self._bus = bus
         self._transport = transport
+        self._should_deliver = should_deliver
 
     def register(self) -> None:
         self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_REPLY_APPROVED, handler=self._deliver)
         self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_REPLY_REDACTED, handler=self._deliver)
 
     async def _deliver(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
+        if self._should_deliver is not None and not self._should_deliver(event):
+            await self._publish_failed(event, reason="stale_reply_dropped")
+            return
         payload = event.payload
+        reply_metadata = dict(payload.reply.metadata or {})
+        stream_state = str(reply_metadata.get("stream_state", "") or "").strip()
         origin = payload.origin_message or MessageRef()
         channel = payload.channel_override or origin.channel
         chat_id = payload.chat_id_override or origin.chat_id
+        if self._is_suppressed(reply_metadata):
+            if stream_state == "delta":
+                return
+            delivered_at = self._utc_now()
+            await self._publish_replied(
+                event,
+                channel=channel,
+                chat_id=chat_id,
+                delivery_message_id=self._suppressed_message_id(payload.reply.reply_id),
+                delivery_mode="suppressed",
+                delivered_at=delivered_at,
+                reply_to_message_id=payload.reply.reply_to_message_id or origin.message_id,
+            )
+            return
         if not channel or not chat_id:
             await self._publish_failed(event, reason="missing_delivery_route")
             return
@@ -45,8 +72,13 @@ class DeliveryService:
             reply_to=payload.reply.reply_to_message_id or origin.message_id,
             metadata={
                 "reply_id": payload.reply.reply_id,
+                "reply_kind": payload.reply.kind,
                 "session_id": event.session_id,
                 "task_id": event.task_id,
+                "_stream": bool(reply_metadata.get("stream_id")),
+                "_stream_id": str(reply_metadata.get("stream_id", "") or "").strip(),
+                "_stream_state": stream_state,
+                "_stream_index": reply_metadata.get("stream_index"),
             },
         )
         try:
@@ -55,8 +87,31 @@ class DeliveryService:
             await self._publish_failed(event, reason="delivery_transport_error", retryable=True)
             return
 
-        delivered_at = self._utc_now()
+        if stream_state == "delta":
+            return
 
+        delivered_at = self._utc_now()
+        await self._publish_replied(
+            event,
+            channel=channel,
+            chat_id=chat_id,
+            delivery_message_id=delivery_message_id,
+            delivery_mode=payload.delivery_mode or "chat",
+            delivered_at=delivered_at,
+            reply_to_message_id=payload.reply.reply_to_message_id or origin.message_id,
+        )
+
+    async def _publish_replied(
+        self,
+        event: BusEnvelope[ReplyReadyPayload],
+        *,
+        channel: str | None,
+        chat_id: str | None,
+        delivery_message_id: str,
+        delivery_mode: str,
+        delivered_at: str,
+        reply_to_message_id: str | None,
+    ) -> None:
         await self._bus.publish(
             build_envelope(
                 event_type=EventType.OUTPUT_REPLIED,
@@ -68,15 +123,15 @@ class DeliveryService:
                 correlation_id=event.correlation_id,
                 causation_id=event.event_id,
                 payload=RepliedPayload(
-                    reply_id=payload.reply.reply_id,
+                    reply_id=event.payload.reply.reply_id,
                     delivery_message=MessageRef(
                         channel=channel,
                         chat_id=chat_id,
                         message_id=delivery_message_id,
-                        reply_to_message_id=payload.reply.reply_to_message_id or origin.message_id,
+                        reply_to_message_id=reply_to_message_id,
                         timestamp=delivered_at,
                     ),
-                    delivery_mode=payload.delivery_mode or "chat",
+                    delivery_mode=delivery_mode,
                     delivered_at=delivered_at,
                 ),
             )
@@ -116,6 +171,14 @@ class DeliveryService:
     @staticmethod
     def _delivery_message_id(reply_id: str) -> str:
         return f"delivery_{reply_id}"
+
+    @staticmethod
+    def _suppressed_message_id(reply_id: str) -> str:
+        return f"suppressed_{reply_id}"
+
+    @staticmethod
+    def _is_suppressed(reply_metadata: dict[str, object]) -> bool:
+        return bool(reply_metadata.get("suppress_delivery"))
 
     @staticmethod
     def _utc_now() -> str:

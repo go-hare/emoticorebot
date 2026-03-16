@@ -20,7 +20,6 @@ from uuid import uuid4
 from loguru import logger
 
 from emoticorebot.adapters.conversation_gateway import ConversationGateway
-from emoticorebot.adapters.outbound_dispatcher import OutboundDispatcher
 from emoticorebot.agent.tool import ToolManager
 from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersConfig
 from emoticorebot.agent.context import ContextBuilder
@@ -93,9 +92,6 @@ class RuntimeHost:
         self.tool_manager.register_default_tools()
 
         self._mcp_servers = mcp_servers or {}
-        self._turn_locks: dict[str, asyncio.Lock] = {}
-        self._state_locks: dict[str, asyncio.Lock] = {}
-        self.outbound_dispatcher = OutboundDispatcher(self.bus)
         self.kernel = RuntimeKernel(
             workspace=workspace,
             transport=self.bus,
@@ -110,7 +106,6 @@ class RuntimeHost:
         )
         self.conversation_gateway = ConversationGateway(
             bus=self.bus,
-            dispatcher=self.outbound_dispatcher,
             message_processor=self._process_message,
         )
 
@@ -134,18 +129,30 @@ class RuntimeHost:
         on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         key = session_key or msg.session_key
-        async with self._turn_lock_for(key):
-            return await self._process_message_turn(
-                msg=msg,
-                session_key=key,
-                on_progress=on_progress,
-            )
+        message_id = str(msg.metadata.get("message_id", "") or "").strip() or self._new_message_id()
+        msg.metadata["message_id"] = message_id
+        await self.kernel.interrupt_session(
+            session_id=key,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            message_id=message_id,
+            content=msg.content,
+            metadata=msg.metadata,
+        )
+        return await self._process_message_turn(
+            msg=msg,
+            session_key=key,
+            message_id=message_id,
+            on_progress=on_progress,
+        )
 
     async def _process_message_turn(
         self,
         *,
         msg: InboundMessage,
         session_key: str,
+        message_id: str,
         on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """处理消息（核心逻辑）"""
@@ -156,8 +163,6 @@ class RuntimeHost:
 
         key = session_key
         cmd = msg.content.strip().lower()
-        message_id = str(msg.metadata.get("message_id", "") or "").strip() or self._new_message_id()
-        msg.metadata["message_id"] = message_id
 
         if cmd == "/new":
             await self._reset_session(key)
@@ -183,15 +188,14 @@ class RuntimeHost:
             key,
         )
 
-        async with self._state_lock_for(key):
-            dialogue_history, internal_history = self._snapshot_turn_input(key)
-            self._persist_user_message(
-                session_key=key,
-                content=msg.content,
-                media=msg.media,
-                message_id=message_id,
-                timestamp=msg.timestamp.isoformat(),
-            )
+        dialogue_history, internal_history = self._snapshot_turn_input(key)
+        self._persist_user_message(
+            session_key=key,
+            content=msg.content,
+            media=msg.media,
+            message_id=message_id,
+            timestamp=msg.timestamp.isoformat(),
+        )
         content, final_state = await self._run_user_message(
             user_input=msg.content,
             dialogue_history=dialogue_history,
@@ -201,31 +205,34 @@ class RuntimeHost:
             chat_id=msg.chat_id,
             session_id=key,
             media=msg.media,
+            message_metadata=msg.metadata,
             on_progress=on_progress,
         )
+        turn_id = str(final_state.get("turn_id", "") or "").strip()
+        if turn_id and not self.kernel.is_current_turn(session_id=key, turn_id=turn_id):
+            return None
 
         assistant_timestamp = datetime.now().isoformat()
-        async with self._state_lock_for(key):
-            self.thread_store.append_internal_messages(
-                key,
-                self._build_internal_turn_records(
-                    final_state,
-                    assistant_timestamp=assistant_timestamp,
-                    message_id=message_id,
-                    existing_internal_count=len(internal_history),
-                ),
-            )
-
-            thread = self.thread_store.get_or_create(key)
-            assistant_fields = self._build_assistant_session_fields(final_state)
-            thread.add_message(
-                "assistant",
-                [{"type": "text", "text": content}],
+        self.thread_store.append_internal_messages(
+            key,
+            self._build_internal_turn_records(
+                final_state,
+                assistant_timestamp=assistant_timestamp,
                 message_id=message_id,
-                timestamp=assistant_timestamp,
-                **assistant_fields,
-            )
-            self.thread_store.save(thread)
+                existing_internal_count=len(internal_history),
+            ),
+        )
+
+        thread = self.thread_store.get_or_create(key)
+        assistant_fields = self._build_assistant_session_fields(final_state)
+        thread.add_message(
+            "assistant",
+            [{"type": "text", "text": content}],
+            message_id=message_id,
+            timestamp=assistant_timestamp,
+            **assistant_fields,
+        )
+        self.thread_store.save(thread)
         self._save_proactive_target(msg.channel, msg.chat_id)
         return OutboundMessage(
             channel=msg.channel,
@@ -242,10 +249,23 @@ class RuntimeHost:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        deliver: bool = False,
+        message_id: str | None = None,
     ) -> str:
         """直接处理消息（不通过消息总线，供 CLI 使用）"""
         await self.tool_manager.connect_mcp_servers(self._mcp_servers)
-        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
+        metadata: dict[str, Any] = {}
+        if not deliver:
+            metadata["suppress_delivery"] = True
+        if message_id:
+            metadata["message_id"] = message_id
+        msg = InboundMessage(
+            channel=channel,
+            sender_id="user",
+            chat_id=chat_id,
+            content=content,
+            metadata=metadata,
+        )
         response = await self.conversation_gateway.process_direct(
             msg,
             session_key=session_key,
@@ -352,6 +372,7 @@ class RuntimeHost:
         chat_id: str,
         session_id: str,
         media: list[str] | None,
+        message_metadata: dict[str, Any] | None,
         on_progress: Callable[..., Awaitable[None]] | None,
     ) -> tuple[str, dict[str, Any]]:
         pad = self._load_pad_from_workspace(self.workspace)
@@ -381,6 +402,7 @@ class RuntimeHost:
             content=user_input,
             history_context=self._build_history_context(dialogue_history, internal_history),
             attachments=media,
+            metadata=dict(message_metadata or {}),
         )
 
         message = str(turn.content or "").strip()
@@ -396,6 +418,7 @@ class RuntimeHost:
 
         final_state["output"] = message
         final_state["assistant_output"] = message
+        final_state["turn_id"] = turn.turn_id
         final_state["execution_summary"] = execution_summary
         final_state["done"] = True
         final_state["brain"] = {
@@ -403,6 +426,7 @@ class RuntimeHost:
             "final_decision": final_decision,
             "execution_summary": execution_summary,
             "reply_event_type": turn.event_type,
+            "turn_id": turn.turn_id,
         }
         
         # 构建完整的 metadata 结构供 reflection 使用
@@ -454,12 +478,10 @@ class RuntimeHost:
                 "phase": "brain",
                 "event": "brain.decision",
                 "content": {
-                    "intent": brain_info.get("intent", ""),
-                    "working_hypothesis": brain_info.get("working_hypothesis", ""),
                     "task_action": brain_info.get("task_action", "none"),
-                    "task_reason": brain_info.get("task_reason", ""),
                     "final_decision": brain_info.get("final_decision", "answer"),
-                    "task_brief": brain_info.get("task_brief", ""),
+                    "reply_event_type": brain_info.get("reply_event_type", ""),
+                    "turn_id": brain_info.get("turn_id", ""),
                     "execution_summary": execution_summary,
                 },
             }
@@ -654,14 +676,6 @@ class RuntimeHost:
             compact["params"] = compact_params
         return compact
 
-    def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
-        key = str(session_id or "__default__").strip() or "__default__"
-        return self._turn_locks.setdefault(key, asyncio.Lock())
-
-    def _state_lock_for(self, session_id: str) -> asyncio.Lock:
-        key = str(session_id or "__default__").strip() or "__default__"
-        return self._state_locks.setdefault(key, asyncio.Lock())
-
     def _snapshot_turn_input(self, session_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         thread = self.thread_store.get_or_create(session_id)
         dialogue_history = thread.get_history(max_messages=self.memory_window, include_task_context=False)
@@ -719,8 +733,7 @@ class RuntimeHost:
 
     async def _reset_session(self, session_id: str) -> None:
         self.kernel.clear_session(session_id)
-        async with self._state_lock_for(session_id):
-            self._reset_session_thread(session_id)
+        self._reset_session_thread(session_id)
 
     def initialize_subconscious(self, enable_reflection: bool = True, enable_heartbeat: bool = False) -> None:
         """初始化潜意识守护进程和心跳服务"""

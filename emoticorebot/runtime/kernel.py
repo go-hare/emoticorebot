@@ -16,7 +16,7 @@ from emoticorebot.memory.governor import MemoryGovernor
 from emoticorebot.memory.persona import GovernedWriteResult
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload, UserMessagePayload
+from emoticorebot.protocol.events import InterruptPayload, ReplyReadyPayload, UserMessagePayload
 from emoticorebot.protocol.task_models import ContentBlock, MessageRef
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import TransportBus
@@ -68,7 +68,6 @@ class RuntimeKernel:
             tool_registry=tool_registry,
         )
         self._guard = SafetyGuard(bus=self._bus)
-        self._delivery = DeliveryService(bus=self._bus, transport=transport)
         self._memory = MemoryGovernor(
             bus=self._bus,
             workspace=workspace,
@@ -78,12 +77,15 @@ class RuntimeKernel:
             providers_config=providers_config,
         )
         self._pending_turns: dict[tuple[str, str], asyncio.Future[TurnReply]] = {}
+        self._pending_turn_by_session: dict[str, str] = {}
+        self._active_turn_by_session: dict[str, str] = {}
         self._started = False
 
         self._runtime.register()
         self._brain.register()
         self._team.register()
         self._guard.register()
+        self._delivery = DeliveryService(bus=self._bus, transport=transport, should_deliver=self._should_deliver_reply)
         self._delivery.register()
         self._memory.register()
         self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_REPLY_APPROVED, handler=self._capture_reply)
@@ -100,6 +102,7 @@ class RuntimeKernel:
         self._started = True
 
     async def stop(self) -> None:
+        await self._brain.stop()
         await self._team.stop()
         await self._bus.stop()
         self._started = False
@@ -115,6 +118,7 @@ class RuntimeKernel:
         content: str,
         history_context: str = "",
         attachments: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
         timeout_s: float = 30.0,
     ) -> TurnReply:
         if self._brain_llm is None:
@@ -125,12 +129,16 @@ class RuntimeKernel:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[TurnReply] = loop.create_future()
         self._pending_turns[key] = future
+        self._pending_turn_by_session[session_id] = turn_id
+        self._active_turn_by_session[session_id] = turn_id
 
         attachment_blocks = [
             ContentBlock(type="file", path=path, name=path.rsplit("/", 1)[-1])
             for path in list(attachments or [])
             if str(path or "").strip()
         ]
+        payload_metadata = dict(metadata or {})
+        payload_metadata["history_context"] = history_context
         envelope = build_envelope(
             event_type=EventType.INPUT_USER_MESSAGE,
             source="gateway",
@@ -147,7 +155,7 @@ class RuntimeKernel:
                 ),
                 plain_text=content,
                 attachments=attachment_blocks,
-                metadata={"history_context": history_context},
+                metadata=payload_metadata,
             ),
         )
         await self._bus.publish(envelope)
@@ -155,6 +163,8 @@ class RuntimeKernel:
             return await asyncio.wait_for(future, timeout=timeout_s)
         finally:
             self._pending_turns.pop(key, None)
+            if self._pending_turn_by_session.get(session_id) == turn_id:
+                self._pending_turn_by_session.pop(session_id, None)
 
     def latest_task_for_session(self, session_id: str, *, include_terminal: bool = True):
         return self.task_store.latest_for_session(session_id, include_terminal=include_terminal)
@@ -164,6 +174,61 @@ class RuntimeKernel:
 
     def clear_session(self, session_id: str) -> None:
         self.task_store.remove_session(session_id)
+        self._pending_turn_by_session.pop(session_id, None)
+        self._active_turn_by_session.pop(session_id, None)
+
+    def is_current_turn(self, *, session_id: str, turn_id: str | None) -> bool:
+        current_turn_id = self._active_turn_by_session.get(session_id)
+        return bool(turn_id) and current_turn_id == turn_id
+
+    async def interrupt_session(
+        self,
+        *,
+        session_id: str,
+        channel: str,
+        chat_id: str,
+        sender_id: str,
+        message_id: str,
+        content: str,
+        metadata: dict[str, object] | None = None,
+    ) -> bool:
+        current_turn_id = self._active_turn_by_session.get(session_id)
+        if not current_turn_id:
+            return False
+
+        latest_task = self.task_store.latest_for_session(session_id, include_terminal=False)
+        pending_turn_id = self._pending_turn_by_session.get(session_id)
+        has_live_turn = pending_turn_id == current_turn_id
+        has_live_task = latest_task is not None and latest_task.turn_id == current_turn_id
+        if not has_live_turn and not has_live_task:
+            return False
+
+        await self.start()
+        await self._bus.publish(
+            build_envelope(
+                event_type=EventType.INPUT_INTERRUPT,
+                source="gateway",
+                target="broadcast",
+                session_id=session_id,
+                turn_id=current_turn_id,
+                task_id=latest_task.task_id if has_live_task else None,
+                correlation_id=(latest_task.task_id if has_live_task else current_turn_id) or None,
+                payload=InterruptPayload(
+                    message=MessageRef(
+                        channel=channel,
+                        chat_id=chat_id,
+                        sender_id=sender_id,
+                        message_id=message_id,
+                    ),
+                    interrupt_type="new_user_message",
+                    plain_text=content,
+                    target_task_id=latest_task.task_id if has_live_task else None,
+                    urgent=True,
+                    metadata=dict(metadata or {}),
+                ),
+            )
+        )
+        return True
 
     async def run_deep_reflection(self, *, reason: str = "", warm_limit: int = 15):
         await self.start()
@@ -192,6 +257,10 @@ class RuntimeKernel:
         )
 
     async def _capture_reply(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
+        if not self._should_deliver_reply(event):
+            return
+        if str(event.payload.reply.metadata.get("stream_state", "") or "").strip() == "delta":
+            return
         key = (event.session_id or "", event.turn_id or "")
         future = self._pending_turns.get(key)
         if future is None or future.done():
@@ -209,6 +278,16 @@ class RuntimeKernel:
                 event_type=event.event_type,
             )
         )
+
+    def _should_deliver_reply(self, event: BusEnvelope[ReplyReadyPayload]) -> bool:
+        session_id = str(event.session_id or "").strip()
+        turn_id = str(event.turn_id or "").strip()
+        if not session_id or not turn_id:
+            return True
+        current_turn_id = self._active_turn_by_session.get(session_id)
+        if current_turn_id is None:
+            return True
+        return current_turn_id == turn_id
 
 
 __all__ = ["RuntimeKernel", "TurnReply"]

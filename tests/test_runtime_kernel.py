@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
 import pytest
 
@@ -14,11 +15,30 @@ from emoticorebot.runtime.kernel import RuntimeKernel
 class _FakeBrainLLM:
     def __init__(self, response: str) -> None:
         self.response = response
-        self.prompts: list[str] = []
+        self.prompts: list[Any] = []
 
-    async def ainvoke(self, prompt: str):
+    async def ainvoke(self, prompt: Any):
         self.prompts.append(prompt)
         return self.response
+
+
+class _StreamingBrainLLM:
+    def __init__(self, chunks: list[str]) -> None:
+        self.chunks = chunks
+        self.prompts: list[Any] = []
+
+    async def astream(self, prompt: Any):
+        self.prompts.append(prompt)
+        for chunk in self.chunks:
+            yield chunk
+
+
+class _FakeContextBuilder:
+    def build_brain_decision_system_prompt(self, *, query: str = "") -> str:
+        return f"decision system for: {query}"
+
+    def build_brain_system_prompt(self, *, query: str = "") -> str:
+        return f"full system for: {query}"
 
 
 def _brain_packet(
@@ -27,11 +47,7 @@ def _brain_packet(
     final_decision: str = "answer",
     final_message: str,
     task_reason: str = "",
-    intent: str = "",
-    working_hypothesis: str = "",
-    task_brief: str = "",
     task: dict[str, object] | None = None,
-    execution_summary: str = "",
 ) -> str:
     return json.dumps(
         {
@@ -39,11 +55,7 @@ def _brain_packet(
             "task_reason": task_reason,
             "final_decision": final_decision,
             "final_message": final_message,
-            "task_brief": task_brief,
             "task": task or {},
-            "intent": intent,
-            "working_hypothesis": working_hypothesis,
-            "execution_summary": execution_summary,
         },
         ensure_ascii=False,
     )
@@ -88,16 +100,12 @@ async def _exercise_kernel_task_flow() -> None:
             final_decision="continue",
             final_message="已接收，开始处理。",
             task_reason="需要执行代码修改任务",
-            intent="modify_code",
-            working_hypothesis="用户要修改 add.py",
-            task_brief="修改 add.py，让 add(a, b) 返回 a + b",
             task={
                 "title": "修改 add.py",
                 "request": "修改 add.py，让 add(a, b) 返回 a + b",
                 "review_policy": "skip",
                 "preferred_agent": "worker",
             },
-            execution_summary="brain created task",
         )
     )
     with TemporaryDirectory() as tmp_dir:
@@ -128,6 +136,83 @@ async def _exercise_kernel_task_flow() -> None:
 
 def test_runtime_kernel_runs_task_flow() -> None:
     asyncio.run(_exercise_kernel_task_flow())
+
+
+async def _exercise_kernel_minimal_task_flow() -> None:
+    transport = TransportBus()
+    brain_llm = _FakeBrainLLM(
+        """####user####
+好的，我来处理。
+
+####task####
+mode=continue
+action=create_task
+"""
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(workspace=Path(tmp_dir), transport=transport, brain_llm=brain_llm)
+        try:
+            reply = await kernel.handle_user_message(
+                session_id="cli:minimal",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_minimal_task",
+                content="创建一个 add.py 文件 add(a, b) 返回 a + b",
+            )
+            assert "好的" in reply.content
+
+            await _wait_for(lambda: transport.outbound_size >= 2)
+            first = await transport.consume_outbound()
+            second = await transport.consume_outbound()
+
+            assert "好的" in first.content
+            assert "已完成" in second.content
+            latest_task = kernel.latest_task_for_session("cli:minimal", include_terminal=True)
+            assert latest_task is not None
+            assert latest_task.request.request == "创建一个 add.py 文件 add(a, b) 返回 a + b"
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_runs_minimal_brain_packet_task_flow() -> None:
+    asyncio.run(_exercise_kernel_minimal_task_flow())
+
+
+async def _exercise_kernel_falls_back_when_create_task_reply_is_empty() -> None:
+    transport = TransportBus()
+    brain_llm = _FakeBrainLLM(
+        _brain_packet(
+            task_action="create_task",
+            final_decision="continue",
+            final_message="",
+            task_reason="需要执行文件创建任务",
+            task={
+                "title": "创建 add.py",
+                "request": "创建 add.py，让 add(a, b) 返回 a + b",
+                "review_policy": "skip",
+                "preferred_agent": "worker",
+            },
+        )
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(workspace=Path(tmp_dir), transport=transport, brain_llm=brain_llm)
+        try:
+            reply = await kernel.handle_user_message(
+                session_id="cli:fallback-task",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_fallback_task",
+                content="创建一个 add.py 文件 add(a, b) 返回 a + b",
+            )
+            assert reply.content == "收到，我开始处理。"
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_falls_back_when_create_task_reply_is_empty() -> None:
+    asyncio.run(_exercise_kernel_falls_back_when_create_task_reply_is_empty())
 
 
 async def _exercise_kernel_persona_rollback() -> None:
@@ -171,9 +256,6 @@ async def _exercise_kernel_direct_reply_via_llm() -> None:
             final_decision="answer",
             final_message="1 + 1 = 2",
             task_reason="simple_math_answer",
-            intent="math",
-            working_hypothesis="用户在问简单算术",
-            execution_summary="brain answered directly",
         )
     )
     with TemporaryDirectory() as tmp_dir:
@@ -197,3 +279,214 @@ async def _exercise_kernel_direct_reply_via_llm() -> None:
 
 def test_runtime_kernel_uses_brain_llm_for_direct_reply() -> None:
     asyncio.run(_exercise_kernel_direct_reply_via_llm())
+
+
+async def _exercise_kernel_suppresses_direct_reply_delivery() -> None:
+    transport = TransportBus()
+    brain_llm = _FakeBrainLLM(
+        _brain_packet(
+            task_action="none",
+            final_decision="answer",
+            final_message="1 + 1 = 2",
+            task_reason="simple_math_answer",
+        )
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(workspace=Path(tmp_dir), transport=transport, brain_llm=brain_llm)
+        try:
+            reply = await kernel.handle_user_message(
+                session_id="cli:suppressed",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_math_suppressed",
+                content="1 + 1 = ?",
+                metadata={"suppress_delivery": True},
+            )
+            assert reply.content == "1 + 1 = 2"
+            await asyncio.sleep(0.05)
+            assert transport.outbound_size == 0
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_suppresses_direct_reply_delivery() -> None:
+    asyncio.run(_exercise_kernel_suppresses_direct_reply_delivery())
+
+
+async def _exercise_kernel_brain_uses_system_and_user_messages() -> None:
+    transport = TransportBus()
+    brain_llm = _FakeBrainLLM(
+        json.dumps(
+            {
+                "task_action": "none",
+                "final_decision": "answer",
+                "final_message": "收到",
+            },
+            ensure_ascii=False,
+        )
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(
+            workspace=Path(tmp_dir),
+            transport=transport,
+            brain_llm=brain_llm,
+            context_builder=_FakeContextBuilder(),
+        )
+        try:
+            await kernel.handle_user_message(
+                session_id="cli:messages",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_messages",
+                content="你好",
+            )
+            assert len(brain_llm.prompts) == 1
+            messages = brain_llm.prompts[0]
+            assert isinstance(messages, list)
+            assert len(messages) == 2
+            assert getattr(messages[0], "type", "") == "system"
+            assert getattr(messages[1], "type", "") == "human"
+            assert "decision system for: 你好" in str(getattr(messages[0], "content", ""))
+            assert "full system for: 你好" not in str(getattr(messages[0], "content", ""))
+            assert "## 当前轮执行要求" in str(getattr(messages[1], "content", ""))
+            assert "## 用户消息" in str(getattr(messages[1], "content", ""))
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_brain_uses_system_and_user_messages() -> None:
+    asyncio.run(_exercise_kernel_brain_uses_system_and_user_messages())
+
+
+async def _exercise_kernel_streams_cli_reply_before_final_packet() -> None:
+    transport = TransportBus()
+    brain_llm = _StreamingBrainLLM(
+        [
+            "####user####\n你好。",
+            "\n\n####task####\nmode=answer\naction=none\n",
+        ]
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(
+            workspace=Path(tmp_dir),
+            transport=transport,
+            brain_llm=brain_llm,
+        )
+        try:
+            reply = await kernel.handle_user_message(
+                session_id="cli:stream",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_stream",
+                content="你好",
+            )
+            assert reply.content == "你好。"
+
+            await _wait_for(lambda: transport.outbound_size >= 2)
+            first = await transport.consume_outbound()
+            second = await transport.consume_outbound()
+
+            assert first.metadata["_stream"] is True
+            assert first.metadata["_stream_state"] == "delta"
+            assert first.content == "你好。"
+            assert second.metadata["_stream"] is True
+            assert second.metadata["_stream_state"] == "final"
+            assert second.content == "你好。"
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_streams_cli_reply_before_final_packet() -> None:
+    asyncio.run(_exercise_kernel_streams_cli_reply_before_final_packet())
+
+
+async def _exercise_kernel_streams_channel_reply_before_final_packet() -> None:
+    transport = TransportBus()
+    brain_llm = _StreamingBrainLLM(
+        [
+            "####user####\n好的，正在处理。",
+            "\n\n####task####\nmode=continue\naction=create_task\n",
+        ]
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(
+            workspace=Path(tmp_dir),
+            transport=transport,
+            brain_llm=brain_llm,
+        )
+        try:
+            reply = await kernel.handle_user_message(
+                session_id="telegram:stream",
+                channel="telegram",
+                chat_id="123456",
+                sender_id="user",
+                message_id="msg_stream_telegram",
+                content="创建一个 add.py 文件 add(a, b) 返回 a + b",
+            )
+            assert "正在处理" in reply.content
+
+            await _wait_for(lambda: transport.outbound_size >= 3)
+            first = await transport.consume_outbound()
+            second = await transport.consume_outbound()
+            third = await transport.consume_outbound()
+
+            assert first.metadata["_stream"] is True
+            assert first.metadata["_stream_state"] == "delta"
+            assert "正在处理" in first.content
+            assert second.metadata["_stream"] is True
+            assert second.metadata["_stream_state"] == "final"
+            assert "正在处理" in second.content
+            assert "已完成" in third.content
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_streams_channel_reply_before_task_result() -> None:
+    asyncio.run(_exercise_kernel_streams_channel_reply_before_final_packet())
+
+
+async def _exercise_kernel_suppresses_task_flow_delivery() -> None:
+    transport = TransportBus()
+    brain_llm = _FakeBrainLLM(
+        _brain_packet(
+            task_action="create_task",
+            final_decision="continue",
+            final_message="已接收，开始处理。",
+            task_reason="需要执行代码修改任务",
+            task={
+                "title": "修改 add.py",
+                "request": "修改 add.py，让 add(a, b) 返回 a + b",
+                "review_policy": "skip",
+                "preferred_agent": "worker",
+            },
+        )
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(workspace=Path(tmp_dir), transport=transport, brain_llm=brain_llm)
+        try:
+            reply = await kernel.handle_user_message(
+                session_id="cli:suppressed-task",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_task_suppressed",
+                content="修改 add.py，让 add(a, b) 返回 a + b",
+                metadata={"suppress_delivery": True},
+            )
+            assert "开始处理" in reply.content
+
+            def _task_archived() -> bool:
+                task = kernel.latest_task_for_session("cli:suppressed-task", include_terminal=True)
+                return task is not None and task.status.value == "archived"
+
+            await _wait_for(_task_archived)
+            assert transport.outbound_size == 0
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_suppresses_task_flow_delivery() -> None:
+    asyncio.run(_exercise_kernel_suppresses_task_flow_delivery())

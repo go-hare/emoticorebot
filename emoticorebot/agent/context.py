@@ -38,6 +38,39 @@ class ContextBuilder:
     def build_task_memory_bundle(self, *, query: str, limit: int = 6) -> dict[str, list[dict[str, Any]]]:
         return self.memory.build_task_memory_bundle(query=query, limit=limit)
 
+    def build_brain_decision_system_prompt(
+        self,
+        query: str = "",
+        current_emotion: str = "平静",
+        pad_state: tuple[float, float, float] | None = None,
+        internal_task_summaries: list[str] | None = None,
+    ) -> str:
+        parts = [self._get_brain_decision_identity()]
+
+        soul = self._load_decision_soul_anchor()
+        if soul:
+            parts.append(f"## 灵魂锚点（SOUL）\n\n{soul}")
+
+        user = self._load_decision_user_anchor()
+        if user:
+            parts.append(f"## 用户锚点（USER）\n\n{user}")
+
+        long_term_memory = self.memory.build_brain_context(query=query, limit=4)
+        if long_term_memory:
+            parts.append(long_term_memory)
+
+        state = self._load_decision_state()
+        if state:
+            parts.append(f"## 当前状态\n\n{state}")
+
+        task_summaries = [
+            str(item).strip() for item in (internal_task_summaries or []) if str(item).strip()
+        ]
+        if task_summaries:
+            parts.append("## 最近任务摘要\n\n" + "\n".join(f"- {item}" for item in task_summaries[:3]))
+
+        return "\n\n---\n\n".join(parts)
+
     def build_brain_system_prompt(
         self,
         query: str = "",
@@ -126,6 +159,19 @@ class ContextBuilder:
         )
         return "\n\n---\n\n".join(parts)
 
+    def _get_brain_decision_identity(self) -> str:
+        return f"""# Brain
+
+你是这个 AI 系统唯一的主体，负责当前轮的理性判断与最终表达控制。
+
+## 当前时间
+{self._get_datetime_str()}
+
+## 决策边界
+1. 判断当前轮应直接回复、追问，还是进入任务执行。
+2. 长期记忆只由你检索，`worker` 只负责执行。
+3. 回复必须符合人格与安全边界，但不要为了润色做冗长思考。"""
+
     def _get_brain_identity(self) -> str:
         return f"""# Brain
 
@@ -186,6 +232,48 @@ class ContextBuilder:
             return extracted
         return self._default_brain_rules()
 
+    def _load_decision_soul_anchor(self) -> str:
+        content = self._load_file("SOUL.md")
+        if not content:
+            return ""
+        return self._render_named_h2_sections(
+            content,
+            headings=[
+                "## 核心人格",
+                "## 价值观",
+                "## 说话风格",
+                "## 底线（不可被覆盖）",
+            ],
+        )
+
+    def _load_decision_user_anchor(self) -> str:
+        content = self._load_file("USER.md")
+        if not content:
+            return ""
+
+        sections = self._collect_h2_sections(content)
+        parts: list[str] = []
+        for heading in ("## 基础信息", "## 偏好与习惯", "## 工作背景", "## 特殊说明"):
+            body = sections.get(heading, "")
+            rendered = self._render_user_runtime_section(heading, body)
+            if rendered:
+                parts.append(rendered)
+        return "\n\n".join(parts)
+
+    def _load_decision_state(self) -> str:
+        content = self._load_file("current_state.md")
+        if not content:
+            return ""
+
+        lines: list[str] = []
+        for raw in content.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("[当前情绪:") or line.startswith("[守护进程]"):
+                lines.append(f"- {line}")
+        return "\n".join(lines)
+
     @staticmethod
     def _extract_markdown_section(content: str, *, headings: list[str]) -> str:
         if not content:
@@ -200,6 +288,99 @@ class ContextBuilder:
                 section = section.split("\n---", 1)[0]
             return section.strip()
         return ""
+
+    @staticmethod
+    def _collect_h2_sections(content: str) -> dict[str, str]:
+        sections: dict[str, str] = {}
+        current_heading = ""
+        buffer: list[str] = []
+
+        for raw in content.splitlines():
+            line = raw.rstrip()
+            if line.startswith("## "):
+                if current_heading:
+                    body = "\n".join(buffer).strip()
+                    if body:
+                        sections[current_heading] = body
+                current_heading = line.strip()
+                buffer = []
+                continue
+            if current_heading:
+                buffer.append(line)
+
+        if current_heading:
+            body = "\n".join(buffer).strip()
+            if body:
+                sections[current_heading] = body
+
+        return sections
+
+    def _render_named_h2_sections(self, content: str, *, headings: list[str]) -> str:
+        sections = self._collect_h2_sections(content)
+        rendered: list[str] = []
+        for heading in headings:
+            body = sections.get(heading, "")
+            if body:
+                rendered.append(f"{heading}\n{body}")
+        return "\n\n".join(rendered)
+
+    def _render_user_runtime_section(self, heading: str, body: str) -> str:
+        if not body:
+            return ""
+
+        lines: list[str] = []
+        current_subheading = ""
+        for raw in body.splitlines():
+            line = raw.strip()
+            if not line or line.startswith(">") or line == "---":
+                continue
+            if line.startswith("*本文件由"):
+                continue
+            if line.startswith("### "):
+                current_subheading = line[4:].strip()
+                continue
+            if line.startswith("#"):
+                continue
+            if line.startswith("- [ ]"):
+                continue
+            if line.lower().startswith("- [x]"):
+                item = line[6:].strip()
+                if item:
+                    if current_subheading:
+                        lines.append(f"- {current_subheading}：{item}")
+                    else:
+                        lines.append(f"- {item}")
+                continue
+            if line.startswith("- "):
+                item = line[2:].strip()
+                if self._is_placeholder_user_line(item):
+                    continue
+                if current_subheading and "：" not in item and ":" not in item:
+                    lines.append(f"- {current_subheading}：{item}")
+                else:
+                    lines.append(f"- {item}")
+                continue
+            if self._is_placeholder_user_line(line):
+                continue
+            lines.append(line)
+
+        if not lines:
+            return ""
+        return f"{heading}\n" + "\n".join(lines)
+
+    @staticmethod
+    def _is_placeholder_user_line(line: str) -> bool:
+        text = str(line or "").strip()
+        if not text:
+            return True
+        placeholders = (
+            "用户告知后更新",
+            "自动检测或用户告知",
+            "对话中积累",
+            "自动更新",
+            "任何用户主动告知的定制指令",
+        )
+        return any(token in text for token in placeholders)
 
     @staticmethod
     def _default_brain_rules() -> str:

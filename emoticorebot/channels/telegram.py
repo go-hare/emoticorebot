@@ -271,24 +271,115 @@ class TelegramChannel(BaseChannel):
         # Send text content
         if msg.content and msg.content != "[empty message]":
             for chunk in _split_message(msg.content):
-                try:
-                    html = _markdown_to_telegram_html(chunk)
-                    await self._app.bot.send_message(
-                        chat_id=chat_id, 
-                        text=html, 
-                        parse_mode="HTML",
-                        reply_parameters=reply_params
-                    )
-                except Exception as e:
-                    logger.warning("HTML parse failed, falling back to plain text: {}", e)
-                    try:
-                        await self._app.bot.send_message(
-                            chat_id=chat_id, 
-                            text=chunk,
-                            reply_parameters=reply_params
-                        )
-                    except Exception as e2:
-                        logger.error("Error sending Telegram message: {}", e2)
+                await self._send_text_chunk(chat_id=chat_id, text=chunk, reply_params=reply_params)
+
+    async def send_stream_delta(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self._app:
+            logger.warning("Telegram bot not running")
+            return
+
+        self._stop_typing(msg.chat_id)
+        chat_id = self._parse_chat_id(msg.chat_id)
+        if chat_id is None:
+            return
+
+        rendered = f"{state.get('rendered_text', '')}{msg.content or ''}"
+        rendered = str(rendered)
+        if not rendered.strip():
+            return
+        state["rendered_text"] = rendered
+        reply_params = self._build_reply_parameters(msg)
+        message_id = state.get("message_id")
+        if not isinstance(message_id, int):
+            sent = await self._send_text_message(chat_id=chat_id, text=rendered, reply_params=reply_params)
+            if sent is not None:
+                state["message_id"] = sent.message_id
+            return
+        await self._edit_text_message(chat_id=chat_id, message_id=message_id, text=rendered)
+
+    async def send_stream_final(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self._app:
+            logger.warning("Telegram bot not running")
+            return
+
+        chat_id = self._parse_chat_id(msg.chat_id)
+        if chat_id is None:
+            return
+
+        final_text = str(msg.content or "").strip()
+        if not final_text:
+            return
+        message_id = state.get("message_id")
+        if not isinstance(message_id, int):
+            reply_params = self._build_reply_parameters(msg)
+            sent = await self._send_text_message(chat_id=chat_id, text=final_text, reply_params=reply_params)
+            if sent is not None:
+                state["message_id"] = sent.message_id
+            return
+        await self._edit_text_message(chat_id=chat_id, message_id=message_id, text=final_text)
+
+    def _parse_chat_id(self, chat_id: str) -> int | None:
+        try:
+            return int(chat_id)
+        except ValueError:
+            logger.error("Invalid chat_id: {}", chat_id)
+            return None
+
+    def _build_reply_parameters(self, msg: OutboundMessage) -> ReplyParameters | None:
+        if not self.config.reply_to_message:
+            return None
+        reply_to_message_id = msg.metadata.get("message_id")
+        if not reply_to_message_id:
+            return None
+        return ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
+
+    async def _send_text_chunk(self, *, chat_id: int, text: str, reply_params: ReplyParameters | None) -> None:
+        try:
+            await self._send_text_message(chat_id=chat_id, text=text, reply_params=reply_params)
+        except Exception as e:
+            logger.error("Error sending Telegram message: {}", e)
+
+    async def _send_text_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        reply_params: ReplyParameters | None = None,
+    ):
+        try:
+            html = _markdown_to_telegram_html(text)
+            return await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=html,
+                parse_mode="HTML",
+                reply_parameters=reply_params,
+            )
+        except Exception as e:
+            logger.warning("HTML parse failed, falling back to plain text: {}", e)
+            return await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_parameters=reply_params,
+            )
+
+    async def _edit_text_message(self, *, chat_id: int, message_id: int, text: str) -> None:
+        try:
+            html = _markdown_to_telegram_html(text)
+            await self._app.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=html,
+                parse_mode="HTML",
+            )
+        except Exception:
+            try:
+                await self._app.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                )
+            except Exception as exc:
+                logger.error("Error editing Telegram message: {}", exc)
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""

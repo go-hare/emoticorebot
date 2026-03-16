@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
@@ -10,6 +11,11 @@ from loguru import logger
 from emoticorebot.runtime.transport_bus import OutboundMessage, TransportBus
 from emoticorebot.channels.base import BaseChannel
 from emoticorebot.config.schema import Config
+
+
+@dataclass(slots=True)
+class _StreamDispatchState:
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 class ChannelManager:
@@ -27,6 +33,7 @@ class ChannelManager:
         self.bus = bus
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
+        self._stream_states: dict[tuple[str, str, str], _StreamDispatchState] = {}
         
         self._init_channels()
     
@@ -124,6 +131,20 @@ class ChannelManager:
             except ImportError as e:
                 logger.warning("Slack channel not available: {}", e)
 
+        # Matrix channel
+        if self.config.channels.matrix.enabled:
+            try:
+                from emoticorebot.channels.matrix import MatrixChannel
+                self.channels["matrix"] = MatrixChannel(
+                    self.config.channels.matrix,
+                    self.bus,
+                    restrict_to_workspace=self.config.tools.restrict_to_workspace,
+                    workspace=self.config.workspace_path,
+                )
+                logger.info("Matrix channel enabled")
+            except ImportError as e:
+                logger.warning("Matrix channel not available: {}", e)
+
         # QQ channel
         if self.config.channels.qq.enabled:
             try:
@@ -164,6 +185,7 @@ class ChannelManager:
     async def stop_all(self) -> None:
         """Stop all channels and the dispatcher."""
         logger.info("Stopping all channels...")
+        self._stream_states.clear()
         
         # Stop dispatcher
         if self._dispatch_task:
@@ -201,7 +223,11 @@ class ChannelManager:
                 channel = self.channels.get(msg.channel)
                 if channel:
                     try:
-                        await channel.send(msg)
+                        if self._is_stream_message(msg):
+                            await self._dispatch_stream_message(channel, msg)
+                        else:
+                            self._clear_stream_states(msg.channel, msg.chat_id)
+                            await channel.send(msg)
                     except Exception as e:
                         logger.error("Error sending to {}: {}", msg.channel, e)
                 else:
@@ -215,6 +241,36 @@ class ChannelManager:
     def get_channel(self, name: str) -> BaseChannel | None:
         """Get a channel by name."""
         return self.channels.get(name)
+
+    @staticmethod
+    def _is_stream_message(msg: OutboundMessage) -> bool:
+        metadata = msg.metadata or {}
+        return bool(metadata.get("_stream")) and bool(str(metadata.get("_stream_id", "") or "").strip())
+
+    async def _dispatch_stream_message(self, channel: BaseChannel, msg: OutboundMessage) -> None:
+        metadata = msg.metadata or {}
+        stream_id = str(metadata.get("_stream_id", "") or "").strip()
+        if not stream_id:
+            await channel.send(msg)
+            return
+        self._clear_stream_states(msg.channel, msg.chat_id, keep_stream_id=stream_id)
+        key = (msg.channel, msg.chat_id, stream_id)
+        state = self._stream_states.setdefault(key, _StreamDispatchState())
+        stream_state = str(metadata.get("_stream_state", "") or "").strip()
+        if stream_state == "delta":
+            await channel.send_stream_delta(msg, state.data)
+            return
+        await channel.send_stream_final(msg, state.data)
+        self._stream_states.pop(key, None)
+
+    def _clear_stream_states(self, channel: str, chat_id: str, *, keep_stream_id: str | None = None) -> None:
+        for key in list(self._stream_states):
+            key_channel, key_chat_id, key_stream_id = key
+            if key_channel != channel or key_chat_id != chat_id:
+                continue
+            if keep_stream_id is not None and key_stream_id == keep_stream_id:
+                continue
+            self._stream_states.pop(key, None)
     
     def get_status(self) -> dict[str, Any]:
         """Get status of all channels."""

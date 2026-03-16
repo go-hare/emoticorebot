@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import uuid4
 
 from emoticorebot.protocol.commands import BrainReplyPayload
@@ -30,13 +31,16 @@ class ReplyBuilder:
         correlation_id: str | None = None,
         kind: ReplyKind = "answer",
         safe_fallback: bool = False,
+        reply_id: str | None = None,
+        reply_metadata: dict[str, Any] | None = None,
     ) -> BusEnvelope[BrainReplyPayload]:
         reply = ReplyDraft(
-            reply_id=_new_id("reply"),
+            reply_id=reply_id or _new_id("reply"),
             kind=kind,
             plain_text=text,
             safe_fallback=safe_fallback,
             reply_to_message_id=(origin_message.message_id if origin_message is not None else None),
+            metadata=dict(reply_metadata or {}),
         )
         return build_envelope(
             event_type=event_type,

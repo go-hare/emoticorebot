@@ -5,7 +5,6 @@ import os
 import signal
 from contextlib import nullcontext
 from pathlib import Path
-import select
 import sys
 from uuid import uuid4
 
@@ -38,33 +37,6 @@ EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
 
 _PROMPT_SESSION: PromptSession | None = None
 _SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
-
-
-def _flush_pending_tty_input() -> None:
-    """Drop unread keypresses typed while the model was generating output."""
-    try:
-        fd = sys.stdin.fileno()
-        if not os.isatty(fd):
-            return
-    except Exception:
-        return
-
-    try:
-        import termios
-        termios.tcflush(fd, termios.TCIFLUSH)
-        return
-    except Exception:
-        pass
-
-    try:
-        while True:
-            ready, _, _ = select.select([fd], [], [], 0)
-            if not ready:
-                break
-            if not os.read(fd, 4096):
-                break
-    except Exception:
-        return
 
 
 def _restore_terminal() -> None:
@@ -132,9 +104,74 @@ def _print_interactive_line(text: str) -> None:
         _interactive_console().print(text)
 
 
+def _write_stream_chunk(*, content: str, render_markdown: bool, stream_started: bool) -> None:
+    text = content or ""
+    with patch_stdout():
+        interactive_console = _interactive_console()
+        if not stream_started:
+            interactive_console.print()
+            interactive_console.print(f"[cyan]{__logo__} emoticorebot[/cyan]")
+        del render_markdown
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def _finish_stream_output() -> None:
+    with patch_stdout():
+        sys.stdout.write("\n\n")
+        sys.stdout.flush()
+
+
 def _is_exit_command(command: str) -> bool:
     """Return True when input should end interactive chat."""
     return command.lower() in EXIT_COMMANDS
+
+
+def _pick_one_shot_task_id(agent_loop: object, session_id: str, known_task_ids: set[str], fallback_task_id: str | None) -> str | None:
+    if fallback_task_id:
+        return fallback_task_id
+    task_store = getattr(getattr(agent_loop, "kernel", None), "task_store", None)
+    if task_store is None:
+        return None
+    new_tasks = [task for task in task_store.for_session(session_id) if task.task_id not in known_task_ids]
+    if not new_tasks:
+        return None
+    newest = max(new_tasks, key=lambda task: (task.updated_at, task.state_version))
+    return newest.task_id
+
+
+def _is_one_shot_task_settled(agent_loop: object, task_id: str | None) -> bool:
+    if not task_id:
+        return False
+    kernel = getattr(agent_loop, "kernel", None)
+    if kernel is None or not hasattr(kernel, "get_task"):
+        return False
+    task = kernel.get_task(task_id)
+    if task is None:
+        return False
+    from emoticorebot.runtime.state_machine import TERMINAL_STATES, TaskStatus
+
+    return task.status in TERMINAL_STATES or task.status is TaskStatus.WAITING_INPUT
+
+
+async def _await_one_shot_task_id(
+    agent_loop: object,
+    session_id: str,
+    known_task_ids: set[str],
+    fallback_task_id: str | None,
+    *,
+    retries: int = 5,
+    delay_s: float = 0.1,
+) -> str | None:
+    task_id = _pick_one_shot_task_id(agent_loop, session_id, known_task_ids, fallback_task_id)
+    if task_id or fallback_task_id:
+        return task_id
+    for _ in range(retries):
+        await asyncio.sleep(delay_s)
+        task_id = _pick_one_shot_task_id(agent_loop, session_id, known_task_ids, None)
+        if task_id:
+            return task_id
+    return None
 
 
 async def _read_interactive_input_async() -> str:
@@ -311,14 +348,8 @@ def gateway(
             session_key=f"cron:{job.id}",
             channel=job.payload.channel or "cli",
             chat_id=job.payload.to or "direct",
+            deliver=bool(job.payload.deliver and job.payload.channel and job.payload.to),
         )
-        if job.payload.deliver and job.payload.to:
-            from emoticorebot.runtime.transport_bus import OutboundMessage
-            await bus.publish_outbound(OutboundMessage(
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to,
-                content=response or ""
-            ))
         return response
     cron.on_job = on_cron_job
     
@@ -431,13 +462,138 @@ def agent(
         console.print(f"  [dim]↳ {content}[/dim]")
 
     if message:
-        # Single message mode — direct call, no bus needed
         async def run_once():
+            if ":" in session_id:
+                cli_channel, cli_chat_id = session_id.split(":", 1)
+            else:
+                cli_channel, cli_chat_id = "cli", session_id
+            pending_message_id = f"msg_cli_{uuid4().hex[:16]}"
+            known_task_ids = {task.task_id for task in agent_loop.kernel.task_store.for_session(session_id)}
+            completed = asyncio.Event()
+            final_response: list[str] = []
+            streamed: dict[str, bool] = {}
+            awaited_task_id: str | None = None
+            direct_error: list[BaseException] = []
+            consume_error: list[BaseException] = []
+
+            def _matches_pending_turn(msg: object) -> bool:
+                outbound_message_id = str(getattr(msg, "reply_to", "") or "").strip()
+                return outbound_message_id == pending_message_id
+
+            async def _consume_outbound():
+                nonlocal awaited_task_id
+                while True:
+                    try:
+                        msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                        metadata = msg.metadata or {}
+                        if metadata.get("_progress"):
+                            is_tool_hint = metadata.get("_tool_hint", False)
+                            ch = agent_loop.channels_config
+                            if ch and is_tool_hint and not ch.send_tool_hints:
+                                continue
+                            if ch and not is_tool_hint and not ch.send_progress:
+                                continue
+                            console.print(f"  [dim]↳ {msg.content}[/dim]")
+                            continue
+                        if not _matches_pending_turn(msg):
+                            if msg.content:
+                                _print_agent_response(msg.content, render_markdown=markdown)
+                            continue
+                        stream_id = str(metadata.get("_stream_id", "") or "").strip()
+                        stream_state = str(metadata.get("_stream_state", "") or "").strip()
+                        if metadata.get("_stream") and stream_id:
+                            if stream_state == "delta":
+                                _write_stream_chunk(
+                                    content=msg.content,
+                                    render_markdown=markdown,
+                                    stream_started=streamed.get(stream_id, False),
+                                )
+                                streamed[stream_id] = True
+                                continue
+                            if streamed.get(stream_id):
+                                matched_task_id = str(metadata.get("task_id", "") or "").strip() or None
+                                reply_kind = str(metadata.get("reply_kind", "") or "").strip()
+                                if awaited_task_id is None:
+                                    awaited_task_id = await _await_one_shot_task_id(
+                                        agent_loop,
+                                        session_id,
+                                        known_task_ids,
+                                        matched_task_id,
+                                        retries=30 if reply_kind == "status" and not matched_task_id else 5,
+                                        delay_s=0.2,
+                                    )
+                                final_response[:] = [msg.content]
+                                if matched_task_id == awaited_task_id and reply_kind in {"answer", "ask_user"}:
+                                    completed.set()
+                                    continue
+                                if awaited_task_id and not _is_one_shot_task_settled(agent_loop, awaited_task_id):
+                                    continue
+                                completed.set()
+                                continue
+                        matched_task_id = str(metadata.get("task_id", "") or "").strip() or None
+                        reply_kind = str(metadata.get("reply_kind", "") or "").strip()
+                        if awaited_task_id is None:
+                            awaited_task_id = await _await_one_shot_task_id(
+                                agent_loop,
+                                session_id,
+                                known_task_ids,
+                                matched_task_id,
+                                retries=30 if reply_kind == "status" and not matched_task_id else 5,
+                                delay_s=0.2,
+                            )
+                        final_response[:] = [msg.content]
+                        if matched_task_id == awaited_task_id and reply_kind in {"answer", "ask_user"}:
+                            completed.set()
+                            continue
+                        if awaited_task_id and not _is_one_shot_task_settled(agent_loop, awaited_task_id):
+                            continue
+                        completed.set()
+                    except asyncio.TimeoutError:
+                        continue
+                    except asyncio.CancelledError:
+                        break
+                    except Exception as exc:
+                        consume_error.append(exc)
+                        completed.set()
+                        raise
+
+            async def _run_direct() -> None:
+                try:
+                    await agent_loop.process_direct(
+                        message,
+                        session_key=session_id,
+                        channel=cli_channel,
+                        chat_id=cli_chat_id,
+                        deliver=True,
+                        message_id=pending_message_id,
+                    )
+                except Exception as exc:
+                    direct_error.append(exc)
+                    completed.set()
+                    raise
+
             try:
+                outbound_task = asyncio.create_task(_consume_outbound())
+                direct_task = asyncio.create_task(_run_direct())
                 with _thinking_ctx():
-                    response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
-                _print_agent_response(response, render_markdown=markdown)
+                    await completed.wait()
+                if direct_error:
+                    raise direct_error[0]
+                if consume_error:
+                    raise consume_error[0]
+                await direct_task
+                if streamed:
+                    _finish_stream_output()
+                    if final_response and awaited_task_id:
+                        _print_agent_response(final_response[0], render_markdown=markdown)
+                elif final_response:
+                    _print_agent_response(final_response[0], render_markdown=markdown)
             finally:
+                agent_loop.stop()
+                if "outbound_task" in locals():
+                    outbound_task.cancel()
+                if "direct_task" in locals():
+                    await asyncio.gather(direct_task, outbound_task, return_exceptions=True)
                 await agent_loop.close_mcp()
 
         asyncio.run(run_once())
@@ -461,21 +617,9 @@ def agent(
 
         async def run_interactive():
             bus_task = asyncio.create_task(agent_loop.run())
-            turn_done = asyncio.Event()
-            turn_done.set()
-            turn_response: list[str] = []
-            pending_turn_message_id: str | None = None
-
-            def _matches_pending_turn(msg: InboundMessage | object) -> bool:
-                if not pending_turn_message_id:
-                    return False
-                outbound_message_id = str(getattr(msg, "reply_to", "") or "").strip()
-                metadata = getattr(msg, "metadata", {}) or {}
-                origin_message_id = str(metadata.get("message_id", "") or "").strip()
-                return pending_turn_message_id in {outbound_message_id, origin_message_id}
+            streamed: dict[str, bool] = {}
 
             async def _consume_outbound():
-                nonlocal pending_turn_message_id
                 while True:
                     try:
                         msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
@@ -488,12 +632,20 @@ def agent(
                                 pass
                             else:
                                 _print_interactive_line(f"  [dim]↳ {msg.content}[/dim]")
-                        elif not turn_done.is_set():
-                            if _matches_pending_turn(msg):
-                                if msg.content:
-                                    turn_response.append(msg.content)
-                                pending_turn_message_id = None
-                                turn_done.set()
+                        elif msg.metadata.get("_stream"):
+                            stream_id = str(msg.metadata.get("_stream_id", "") or "").strip()
+                            if not stream_id:
+                                continue
+                            stream_state = str(msg.metadata.get("_stream_state", "") or "").strip()
+                            if stream_state == "delta":
+                                _write_stream_chunk(
+                                    content=msg.content,
+                                    render_markdown=markdown,
+                                    stream_started=streamed.get(stream_id, False),
+                                )
+                                streamed[stream_id] = True
+                            elif streamed.pop(stream_id, False):
+                                _finish_stream_output()
                             elif msg.content:
                                 _print_agent_response_interactive(msg.content, render_markdown=markdown)
                         elif msg.content:
@@ -508,7 +660,6 @@ def agent(
             try:
                 while True:
                     try:
-                        _flush_pending_tty_input()
                         user_input = await _read_interactive_input_async()
                         command = user_input.strip()
                         if not command:
@@ -519,31 +670,20 @@ def agent(
                             console.print("\nGoodbye!")
                             break
 
-                        turn_done.clear()
-                        turn_response.clear()
-                        pending_turn_message_id = f"msg_cli_{uuid4().hex[:16]}"
+                        message_id = f"msg_cli_{uuid4().hex[:16]}"
 
                         await bus.publish_inbound(InboundMessage(
                             channel=cli_channel,
                             sender_id="user",
                             chat_id=cli_chat_id,
                             content=user_input,
-                            metadata={"message_id": pending_turn_message_id},
+                            metadata={"message_id": message_id},
                         ))
-
-                        with _thinking_ctx(interactive=True):
-                            await turn_done.wait()
-
-                        if turn_response:
-                            _print_agent_response_interactive(turn_response[0], render_markdown=markdown)
-                        pending_turn_message_id = None
                     except KeyboardInterrupt:
-                        pending_turn_message_id = None
                         _restore_terminal()
                         console.print("\nGoodbye!")
                         break
                     except EOFError:
-                        pending_turn_message_id = None
                         _restore_terminal()
                         console.print("\nGoodbye!")
                         break
@@ -927,14 +1067,86 @@ def cron_run(
     result_holder = []
 
     async def on_job(job: CronJob) -> str | None:
-        response = await agent_loop.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
-        result_holder.append(response)
-        return response
+        session_key = f"cron:{job.id}"
+        channel = job.payload.channel or "cli"
+        chat_id = job.payload.to or "direct"
+        pending_message_id = f"msg_cron_{uuid4().hex[:16]}"
+        known_task_ids = {task.task_id for task in agent_loop.kernel.task_store.for_session(session_key)}
+        completed = asyncio.Event()
+        final_response: list[str] = []
+        awaited_task_id: str | None = None
+        direct_error: list[BaseException] = []
+        consume_error: list[BaseException] = []
+
+        async def _consume_outbound() -> None:
+            nonlocal awaited_task_id
+            while True:
+                try:
+                    msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                    if str(msg.reply_to or "").strip() != pending_message_id:
+                        continue
+                    metadata = msg.metadata or {}
+                    stream_id = str(metadata.get("_stream_id", "") or "").strip()
+                    stream_state = str(metadata.get("_stream_state", "") or "").strip()
+                    if metadata.get("_stream") and stream_id and stream_state == "delta":
+                        continue
+                    task_id = str(metadata.get("task_id", "") or "").strip() or None
+                    reply_kind = str(metadata.get("reply_kind", "") or "").strip()
+                    if awaited_task_id is None:
+                        awaited_task_id = await _await_one_shot_task_id(
+                            agent_loop,
+                            session_key,
+                            known_task_ids,
+                            task_id,
+                            retries=30 if reply_kind == "status" and not task_id else 5,
+                            delay_s=0.2,
+                        )
+                    final_response[:] = [msg.content]
+                    if task_id == awaited_task_id and reply_kind in {"answer", "ask_user"}:
+                        completed.set()
+                        continue
+                    if awaited_task_id and not _is_one_shot_task_settled(agent_loop, awaited_task_id):
+                        continue
+                    completed.set()
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    consume_error.append(exc)
+                    completed.set()
+                    raise
+
+        async def _run_direct() -> None:
+            try:
+                await agent_loop.process_direct(
+                    job.payload.message,
+                    session_key=session_key,
+                    channel=channel,
+                    chat_id=chat_id,
+                    deliver=True,
+                    message_id=pending_message_id,
+                )
+            except Exception as exc:
+                direct_error.append(exc)
+                completed.set()
+                raise
+
+        outbound_task = asyncio.create_task(_consume_outbound())
+        direct_task = asyncio.create_task(_run_direct())
+        try:
+            await completed.wait()
+            if direct_error:
+                raise direct_error[0]
+            if consume_error:
+                raise consume_error[0]
+            await direct_task
+            response = final_response[0] if final_response else ""
+            result_holder.append(response)
+            return response
+        finally:
+            outbound_task.cancel()
+            await asyncio.gather(direct_task, outbound_task, return_exceptions=True)
 
     service.on_job = on_job
 

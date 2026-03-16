@@ -47,17 +47,20 @@ def test_command_shortcuts_preserve_message_correlation() -> None:
     assert "metadata=msg.metadata or {}" in source
 
 
-def test_runtime_host_uses_split_turn_and_state_locks() -> None:
+def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     bootstrap = _read("emoticorebot/bootstrap.py")
     kernel = _read("emoticorebot/runtime/kernel.py")
 
-    assert "self._turn_locks: dict[str, asyncio.Lock] = {}" in bootstrap
-    assert "self._state_locks: dict[str, asyncio.Lock] = {}" in bootstrap
-    assert "async with self._turn_lock_for(key):" in bootstrap
-    assert "async with self._state_lock_for(key):" in bootstrap
+    assert "_turn_locks" not in bootstrap
+    assert "_state_locks" not in bootstrap
+    assert "await self.kernel.interrupt_session(" in bootstrap
+    assert "if turn_id and not self.kernel.is_current_turn(" in bootstrap
     assert "self.kernel = RuntimeKernel(" in bootstrap
     assert "session_lock_for" not in kernel
     assert "self._pending_turns" in kernel
+    assert "self._pending_turn_by_session" in kernel
+    assert "self._active_turn_by_session" in kernel
+    assert "EventType.INPUT_INTERRUPT" in kernel
     assert "EventType.OUTPUT_REPLY_APPROVED" in kernel
 
 

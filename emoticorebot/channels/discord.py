@@ -121,6 +121,41 @@ class DiscordChannel(BaseChannel):
         finally:
             await self._stop_typing(msg.chat_id)
 
+    async def send_stream_delta(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self._http:
+            logger.warning("Discord HTTP client not initialized")
+            return
+        rendered = f"{state.get('rendered_text', '')}{msg.content or ''}"
+        rendered = str(rendered)
+        if not rendered:
+            return
+        state["rendered_text"] = rendered
+
+        headers = {"Authorization": f"Bot {self.config.token}"}
+        message_id = str(state.get("message_id", "") or "").strip()
+        if not message_id:
+            created = await self._create_stream_message(msg=msg, headers=headers, content=rendered)
+            if created:
+                state["message_id"] = created
+            return
+        await self._edit_stream_message(chat_id=msg.chat_id, message_id=message_id, headers=headers, content=rendered)
+
+    async def send_stream_final(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self._http:
+            logger.warning("Discord HTTP client not initialized")
+            return
+        final_text = str(msg.content or "")
+        if not final_text:
+            return
+        headers = {"Authorization": f"Bot {self.config.token}"}
+        message_id = str(state.get("message_id", "") or "").strip()
+        if not message_id:
+            created = await self._create_stream_message(msg=msg, headers=headers, content=final_text)
+            if created:
+                state["message_id"] = created
+            return
+        await self._edit_stream_message(chat_id=msg.chat_id, message_id=message_id, headers=headers, content=final_text)
+
     async def _send_payload(
         self, url: str, headers: dict[str, str], payload: dict[str, Any]
     ) -> bool:
@@ -142,6 +177,42 @@ class DiscordChannel(BaseChannel):
                 else:
                     await asyncio.sleep(1)
         return False
+
+    async def _create_stream_message(
+        self,
+        *,
+        msg: OutboundMessage,
+        headers: dict[str, str],
+        content: str,
+    ) -> str | None:
+        url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
+        payload: dict[str, Any] = {"content": content[:MAX_MESSAGE_LEN]}
+        if msg.reply_to:
+            payload["message_reference"] = {"message_id": msg.reply_to}
+            payload["allowed_mentions"] = {"replied_user": False}
+        try:
+            response = await self._http.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return str(data.get("id", "") or "").strip() or None
+        except Exception as e:
+            logger.error("Error creating Discord stream message: {}", e)
+            return None
+
+    async def _edit_stream_message(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        headers: dict[str, str],
+        content: str,
+    ) -> None:
+        url = f"{DISCORD_API_BASE}/channels/{chat_id}/messages/{message_id}"
+        try:
+            response = await self._http.patch(url, headers=headers, json={"content": content[:MAX_MESSAGE_LEN]})
+            response.raise_for_status()
+        except Exception as e:
+            logger.error("Error editing Discord stream message: {}", e)
 
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""

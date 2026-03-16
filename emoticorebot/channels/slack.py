@@ -104,6 +104,69 @@ class SlackChannel(BaseChannel):
         except Exception as e:
             logger.error("Error sending Slack message: {}", e)
 
+    async def send_stream_delta(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self._web_client:
+            logger.warning("Slack client not running")
+            return
+        rendered = f"{state.get('rendered_text', '')}{msg.content or ''}"
+        rendered = str(rendered)
+        if not rendered:
+            return
+        state["rendered_text"] = rendered
+
+        message_ts = str(state.get("message_ts", "") or "").strip()
+        if not message_ts:
+            try:
+                response = await self._web_client.chat_postMessage(
+                    channel=msg.chat_id,
+                    text=self._to_mrkdwn(rendered),
+                )
+            except Exception as e:
+                logger.error("Error creating Slack stream message: {}", e)
+                return
+            ts = str(response.get("ts", "") or "").strip()
+            if ts:
+                state["message_ts"] = ts
+            return
+        try:
+            await self._web_client.chat_update(
+                channel=msg.chat_id,
+                ts=message_ts,
+                text=self._to_mrkdwn(rendered),
+            )
+        except Exception as e:
+            logger.error("Error editing Slack stream message: {}", e)
+
+    async def send_stream_final(self, msg: OutboundMessage, state: dict[str, object]) -> None:
+        if not self._web_client:
+            logger.warning("Slack client not running")
+            return
+        final_text = str(msg.content or "")
+        if not final_text:
+            return
+        message_ts = str(state.get("message_ts", "") or "").strip()
+        if not message_ts:
+            try:
+                response = await self._web_client.chat_postMessage(
+                    channel=msg.chat_id,
+                    text=self._to_mrkdwn(final_text),
+                )
+            except Exception as e:
+                logger.error("Error creating Slack final stream message: {}", e)
+                return
+            ts = str(response.get("ts", "") or "").strip()
+            if ts:
+                state["message_ts"] = ts
+            return
+        try:
+            await self._web_client.chat_update(
+                channel=msg.chat_id,
+                ts=message_ts,
+                text=self._to_mrkdwn(final_text),
+            )
+        except Exception as e:
+            logger.error("Error editing Slack final stream message: {}", e)
+
     async def _on_socket_request(
         self,
         client: SocketModeClient,
