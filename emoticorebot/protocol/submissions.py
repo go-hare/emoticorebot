@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-from .task_models import TaskSpec
+from .task_models import TaskRequestSpec
 
 RuntimeSubmissionType = Literal[
     "user_turn",
@@ -36,7 +36,7 @@ class UserTurnSubmission(RuntimeSubmissionBase, total=False):
 
 class StartTaskSubmission(RuntimeSubmissionBase, total=False):
     submission_type: Literal["start_task"]
-    task: TaskSpec
+    task: TaskRequestSpec
 
 
 class ProvideTaskInputSubmission(RuntimeSubmissionBase, total=False):

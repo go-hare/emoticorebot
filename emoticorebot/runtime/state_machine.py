@@ -9,110 +9,81 @@ class IllegalTransitionError(ValueError):
     """Raised when a task transition violates the runtime state machine."""
 
 
-class TaskStatus(StrEnum):
-    CREATED = "created"
-    ASSIGNED = "assigned"
+class TaskState(StrEnum):
     RUNNING = "running"
-    PLANNED = "planned"
-    WAITING_INPUT = "waiting_input"
-    REVIEWING = "reviewing"
+    WAITING = "waiting"
     DONE = "done"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    ARCHIVED = "archived"
 
 
-TERMINAL_STATES = frozenset({TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.ARCHIVED})
+TERMINAL_STATES = frozenset({TaskState.DONE})
 
 
 class TaskStateMachine:
-    """Pure transition helpers for the runtime-owned task lifecycle."""
+    """Pure transition helpers for the compact runtime-owned task lifecycle."""
 
     @staticmethod
-    def assign_agent(state: TaskStatus) -> TaskStatus:
-        return _transition(
-            state,
-            {
-                TaskStatus.CREATED: TaskStatus.ASSIGNED,
-                TaskStatus.PLANNED: TaskStatus.ASSIGNED,
-            },
-            "runtime.command.assign_agent",
-        )
+    def report_started(state: TaskState) -> TaskState:
+        return _transition(state, {TaskState.RUNNING: TaskState.RUNNING}, "task.report.started")
 
     @staticmethod
-    def report_started(state: TaskStatus) -> TaskStatus:
-        return _transition(state, {TaskStatus.ASSIGNED: TaskStatus.RUNNING}, "task.report.started")
+    def report_progress(state: TaskState) -> TaskState:
+        return _transition(state, {TaskState.RUNNING: TaskState.RUNNING}, "task.report.progress")
 
     @staticmethod
-    def report_progress(state: TaskStatus) -> TaskStatus:
-        return _transition(state, {TaskStatus.RUNNING: TaskStatus.RUNNING}, "task.report.progress")
+    def report_plan_ready(state: TaskState) -> TaskState:
+        return _transition(state, {TaskState.RUNNING: TaskState.RUNNING}, "task.report.plan_ready")
 
     @staticmethod
-    def report_plan_ready(state: TaskStatus) -> TaskStatus:
-        return _transition(state, {TaskStatus.RUNNING: TaskStatus.PLANNED}, "task.report.plan_ready")
+    def report_need_input(state: TaskState) -> TaskState:
+        return _transition(state, {TaskState.RUNNING: TaskState.WAITING}, "task.report.need_input")
 
     @staticmethod
-    def report_need_input(state: TaskStatus) -> TaskStatus:
-        return _transition(state, {TaskStatus.RUNNING: TaskStatus.WAITING_INPUT}, "task.report.need_input")
+    def report_result(state: TaskState, *, review_required: bool) -> TaskState:
+        target = TaskState.RUNNING if review_required else TaskState.DONE
+        return _transition(state, {TaskState.RUNNING: target}, "task.report.result")
 
     @staticmethod
-    def report_result(state: TaskStatus, *, review_required: bool) -> TaskStatus:
-        if review_required:
-            return _transition(state, {TaskStatus.RUNNING: TaskStatus.REVIEWING}, "task.report.result")
-        return _transition(state, {TaskStatus.RUNNING: TaskStatus.DONE}, "task.report.result")
-
-    @staticmethod
-    def report_failed(state: TaskStatus) -> TaskStatus:
+    def report_failed(state: TaskState) -> TaskState:
         allowed = {
-            TaskStatus.RUNNING: TaskStatus.FAILED,
-            TaskStatus.REVIEWING: TaskStatus.FAILED,
-            TaskStatus.WAITING_INPUT: TaskStatus.FAILED,
+            TaskState.RUNNING: TaskState.DONE,
+            TaskState.WAITING: TaskState.DONE,
         }
         return _transition(state, allowed, "task.report.failed")
 
     @staticmethod
-    def resume_task(state: TaskStatus) -> TaskStatus:
-        return _transition(state, {TaskStatus.WAITING_INPUT: TaskStatus.ASSIGNED}, "brain.command.resume_task")
+    def resume_task(state: TaskState) -> TaskState:
+        return _transition(state, {TaskState.WAITING: TaskState.RUNNING}, "brain.command.resume_task")
 
     @staticmethod
-    def timeout_waiting_input(state: TaskStatus) -> TaskStatus:
-        return _transition(state, {TaskStatus.WAITING_INPUT: TaskStatus.FAILED}, "system.signal.timeout")
+    def timeout_waiting_input(state: TaskState) -> TaskState:
+        return _transition(state, {TaskState.WAITING: TaskState.DONE}, "system.signal.timeout")
 
     @staticmethod
-    def report_approved(state: TaskStatus) -> TaskStatus:
-        return _transition(state, {TaskStatus.REVIEWING: TaskStatus.DONE}, "task.report.approved")
+    def report_approved(state: TaskState) -> TaskState:
+        return _transition(state, {TaskState.RUNNING: TaskState.DONE}, "task.report.approved")
 
     @staticmethod
-    def report_rejected(state: TaskStatus) -> TaskStatus:
-        return _transition(state, {TaskStatus.REVIEWING: TaskStatus.ASSIGNED}, "task.report.rejected")
+    def report_rejected(state: TaskState) -> TaskState:
+        return _transition(state, {TaskState.RUNNING: TaskState.RUNNING}, "task.report.rejected")
 
     @staticmethod
-    def cancel_task(state: TaskStatus) -> TaskStatus:
+    def cancel_task(state: TaskState) -> TaskState:
         allowed = {
-            TaskStatus.CREATED: TaskStatus.CANCELLED,
-            TaskStatus.ASSIGNED: TaskStatus.CANCELLED,
-            TaskStatus.RUNNING: TaskStatus.CANCELLED,
-            TaskStatus.PLANNED: TaskStatus.CANCELLED,
-            TaskStatus.WAITING_INPUT: TaskStatus.CANCELLED,
-            TaskStatus.REVIEWING: TaskStatus.CANCELLED,
+            TaskState.RUNNING: TaskState.DONE,
+            TaskState.WAITING: TaskState.DONE,
         }
         return _transition(state, allowed, "brain.command.cancel_task")
 
     @staticmethod
-    def archive_task(state: TaskStatus) -> TaskStatus:
-        allowed = {
-            TaskStatus.DONE: TaskStatus.ARCHIVED,
-            TaskStatus.FAILED: TaskStatus.ARCHIVED,
-            TaskStatus.CANCELLED: TaskStatus.ARCHIVED,
-        }
-        return _transition(state, allowed, "runtime.command.archive_task")
+    def archive_task(state: TaskState) -> TaskState:
+        return _transition(state, {TaskState.DONE: TaskState.DONE}, "runtime.command.archive_task")
 
 
-def _transition(state: TaskStatus, allowed: dict[TaskStatus, TaskStatus], trigger: str) -> TaskStatus:
+def _transition(state: TaskState, allowed: dict[TaskState, TaskState], trigger: str) -> TaskState:
     try:
         return allowed[state]
     except KeyError as exc:
         raise IllegalTransitionError(f"{trigger} cannot transition task from {state.value}") from exc
 
 
-__all__ = ["IllegalTransitionError", "TERMINAL_STATES", "TaskStateMachine", "TaskStatus"]
+__all__ = ["IllegalTransitionError", "TERMINAL_STATES", "TaskState", "TaskStateMachine"]

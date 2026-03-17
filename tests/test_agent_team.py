@@ -9,7 +9,7 @@ from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.events import TaskCancelledReportPayload, TaskResultReportPayload
 from emoticorebot.protocol.task_models import MessageRef, TaskRequestSpec
 from emoticorebot.protocol.topics import EventType
-from emoticorebot.runtime.state_machine import TaskStatus
+from emoticorebot.runtime.state_machine import TaskState
 from emoticorebot.runtime.task_store import RuntimeTaskRecord, TaskStore
 
 
@@ -34,7 +34,7 @@ async def _exercise_worker_cancel_command_stops_active_run() -> None:
             request=TaskRequestSpec(request="创建 add.py", title="创建 add.py"),
             origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
             title="创建 add.py",
-            status=TaskStatus.ASSIGNED,
+            state=TaskState.RUNNING,
             assignee="worker",
             current_assignment_id="assign_1",
         )

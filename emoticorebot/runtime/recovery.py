@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from emoticorebot.protocol.envelope import BusEnvelope
 from emoticorebot.protocol.task_models import ProtocolModel
-from emoticorebot.runtime.state_machine import TERMINAL_STATES, TaskStatus
+from emoticorebot.runtime.state_machine import TERMINAL_STATES, TaskState
 
 from .assignment import AssignmentFactory
 from .task_store import RuntimeTaskRecord
@@ -17,7 +17,7 @@ class RecoveryPlanner:
         self._assignments = assignment_factory or AssignmentFactory()
 
     def plan_archive(self, task: RuntimeTaskRecord, *, reason: str | None = None) -> list[BusEnvelope[ProtocolModel]]:
-        if task.status not in TERMINAL_STATES or task.status is TaskStatus.ARCHIVED:
+        if task.state not in TERMINAL_STATES:
             return []
         return [self._assignments.build_archive_task(task=task, reason=reason)]
 

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from emoticorebot.protocol.commands import BrainReplyPayload, TaskCancelPayload, TaskCreatePayload, TaskResumePayload
+from emoticorebot.protocol.commands import TaskCancelPayload, TaskCreatePayload, TaskResumePayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.events import (
     DeliveryFailedPayload,
     RepliedPayload,
-    ReplyReadyPayload,
     SystemSignalPayload,
     TaskApprovedReportPayload,
     TaskAskPayload,
@@ -27,11 +26,10 @@ from emoticorebot.protocol.events import (
 )
 from emoticorebot.protocol.task_models import MessageRef, ProvidedInputBundle, ProvidedInputItem, ReviewerContext, TaskRequestSpec
 from emoticorebot.protocol.topics import EventType
-from emoticorebot.runtime.state_machine import TaskStateMachine, TaskStatus
-
-from .assignment import AssignmentFactory
-from .recovery import RecoveryPlanner
-from .task_store import RuntimeTaskRecord, TaskStore
+from emoticorebot.runtime.assignment import AssignmentFactory
+from emoticorebot.runtime.recovery import RecoveryPlanner
+from emoticorebot.runtime.state_machine import TaskState, TaskStateMachine
+from emoticorebot.runtime.task_store import RuntimeTaskRecord, TaskStore
 
 
 class RuntimeScheduler:
@@ -53,8 +51,6 @@ class RuntimeScheduler:
             EventType.TASK_CREATE: self._on_create_task,
             EventType.TASK_RESUME: self._on_resume_task,
             EventType.TASK_CANCEL: self._on_cancel_task,
-            EventType.BRAIN_REPLY: self._on_reply_command,
-            EventType.BRAIN_ASK_USER: self._on_reply_command,
             EventType.TASK_REPORT_STARTED: self._on_report_started,
             EventType.TASK_REPORT_PROGRESS: self._on_report_progress,
             EventType.TASK_REPORT_NEED_INPUT: self._on_report_need_input,
@@ -100,7 +96,7 @@ class RuntimeScheduler:
         )
         self._tasks.add(task)
 
-        task.status = TaskStateMachine.assign_agent(task.status)
+        self._mark_running(task)
         task.assignee = self._assignments.select_initial_role(task)
         task.current_assignment_id = self._assignments.new_assignment_id()
         task.summary = str(payload.message or f"开始处理 {task.title}。").strip()
@@ -125,7 +121,8 @@ class RuntimeScheduler:
 
     def _on_resume_task(self, event: BusEnvelope[TaskResumePayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.resume_task(task.status)
+        self._merge_resume_context(task, event.payload.context)
+        self._mark_running(task, state=TaskStateMachine.resume_task(task.state))
         task.input_request = None
         task.summary = str(event.payload.message or task.summary or "收到补充信息，继续处理。").strip()
         task.touch()
@@ -154,12 +151,32 @@ class RuntimeScheduler:
             ),
         ]
 
+    @staticmethod
+    def _merge_resume_context(task: RuntimeTaskRecord, context: dict[str, Any] | None) -> None:
+        payload = dict(context or {})
+        if not payload:
+            return
+        merged_memory_refs = RuntimeScheduler._merge_string_lists(task.request.memory_refs, payload.get("memory_refs"))
+        merged_skill_hints = RuntimeScheduler._merge_string_lists(task.request.skill_hints, payload.get("skill_hints"))
+        if (
+            merged_memory_refs == list(task.request.memory_refs)
+            and merged_skill_hints == list(task.request.skill_hints)
+        ):
+            return
+        task.request = task.request.model_copy(
+            update={
+                "memory_refs": merged_memory_refs,
+                "skill_hints": merged_skill_hints,
+            }
+        )
+
     def _on_cancel_task(self, event: BusEnvelope[TaskCancelPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.cancel_task(task.status)
+        self._mark_done(task, state=TaskStateMachine.cancel_task(task.state), result="cancelled")
         task.error = str(event.payload.reason or "").strip()
         task.summary = task.summary or "任务已取消。"
         task.touch()
+        task.ended_at = task.updated_at
 
         outputs: list[BusEnvelope[Any]] = [
             self._build_task_end(
@@ -183,30 +200,9 @@ class RuntimeScheduler:
             outputs.append(cancel_command)
         return outputs
 
-    def _on_reply_command(self, event: BusEnvelope[BrainReplyPayload]) -> list[BusEnvelope[Any]]:
-        payload = ReplyReadyPayload(
-            reply=event.payload.reply,
-            origin_message=event.payload.origin_message,
-            related_task_id=event.payload.related_task_id,
-            related_event_id=event.causation_id,
-        )
-        return [
-            build_envelope(
-                event_type=EventType.OUTPUT_REPLY_READY,
-                source="runtime",
-                target="broadcast",
-                session_id=event.session_id,
-                turn_id=event.turn_id,
-                task_id=event.payload.related_task_id,
-                correlation_id=event.correlation_id or event.task_id,
-                causation_id=event.event_id,
-                payload=payload,
-            )
-        ]
-
     def _on_report_started(self, event: BusEnvelope[TaskStartedReportPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.report_started(task.status)
+        self._mark_running(task, state=TaskStateMachine.report_started(task.state))
         task.assignee = event.payload.agent_role
         task.summary = str(event.payload.summary or task.summary or "任务开始执行。").strip()
         task.touch()
@@ -235,7 +231,7 @@ class RuntimeScheduler:
 
     def _on_report_progress(self, event: BusEnvelope[TaskProgressReportPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.report_progress(task.status)
+        self._mark_running(task, state=TaskStateMachine.report_progress(task.state))
         task.summary = str(event.payload.summary or task.summary).strip()
         task.last_progress = str(event.payload.summary or event.payload.detail or "").strip()
         task.touch()
@@ -267,7 +263,7 @@ class RuntimeScheduler:
 
     def _on_report_need_input(self, event: BusEnvelope[TaskNeedInputReportPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.report_need_input(task.status)
+        self._mark_waiting(task, state=TaskStateMachine.report_need_input(task.state))
         task.input_request = event.payload.input_request
         task.summary = str(event.payload.summary or task.summary).strip()
         task.touch()
@@ -298,7 +294,7 @@ class RuntimeScheduler:
 
     def _on_report_plan_ready(self, event: BusEnvelope[TaskPlanReadyReportPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.report_plan_ready(task.status)
+        self._mark_running(task, state=TaskStateMachine.report_plan_ready(task.state))
         task.plan_id = event.payload.plan_id
         task.plan_steps = list(event.payload.steps)
         task.summary = str(event.payload.summary or task.summary or "任务规划已完成。").strip()
@@ -327,7 +323,7 @@ class RuntimeScheduler:
                 causation_id=event.event_id,
             )
         ]
-        task.status = TaskStateMachine.assign_agent(task.status)
+        self._mark_running(task)
         task.assignee = "worker"
         task.current_assignment_id = self._assignments.new_assignment_id()
         task.touch()
@@ -341,10 +337,15 @@ class RuntimeScheduler:
 
         review_required = bool(event.payload.reviewer_required or task.review_policy == "required")
         task.review_required = review_required
-        task.status = TaskStateMachine.report_result(task.status, review_required=review_required)
+        next_state = TaskStateMachine.report_result(task.state, review_required=review_required)
+        if review_required:
+            self._mark_running(task, state=next_state)
+        else:
+            self._mark_done(task, state=next_state, result="success")
         task.touch()
 
-        if task.status is TaskStatus.DONE:
+        if task.state is TaskState.DONE:
+            task.ended_at = task.updated_at
             return [
                 self._build_task_end(
                     task=task,
@@ -415,9 +416,13 @@ class RuntimeScheduler:
 
     def _on_report_approved(self, event: BusEnvelope[TaskApprovedReportPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.report_approved(task.status)
+        if task.current_review_id != event.payload.review_id:
+            raise RuntimeError("review approved without a matching active review")
+        self._mark_done(task, state=TaskStateMachine.report_approved(task.state), result="success")
         task.summary = str(event.payload.summary or task.summary).strip()
+        task.current_review_id = None
         task.touch()
+        task.ended_at = task.updated_at
         if task.latest_result is None:
             raise RuntimeError("review approved without a stored task result")
         return [
@@ -446,10 +451,13 @@ class RuntimeScheduler:
 
     def _on_report_rejected(self, event: BusEnvelope[TaskRejectedReportPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.report_rejected(task.status)
+        if task.current_review_id != event.payload.review_id:
+            raise RuntimeError("review rejected without a matching active review")
+        self._mark_running(task, state=TaskStateMachine.report_rejected(task.state))
         task.summary = str(event.payload.summary or task.summary).strip()
         task.latest_rejection_reason = event.payload.rejection_reason
         task.latest_findings = list(event.payload.findings)
+        task.current_review_id = None
         task.touch()
 
         task.current_assignment_id = self._assignments.new_assignment_id()
@@ -491,10 +499,11 @@ class RuntimeScheduler:
 
     def _on_report_failed(self, event: BusEnvelope[TaskFailedReportPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.report_failed(task.status)
+        self._mark_done(task, state=TaskStateMachine.report_failed(task.state), result="failed")
         task.error = str(event.payload.reason or "").strip()
         task.summary = str(event.payload.summary or task.summary or task.error or "任务执行失败。").strip()
         task.touch()
+        task.ended_at = task.updated_at
         return [
             self._build_task_end(
                 task=task,
@@ -515,12 +524,13 @@ class RuntimeScheduler:
 
     def _on_report_cancelled(self, event: BusEnvelope[TaskCancelledReportPayload]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        if task.status is TaskStatus.CANCELLED:
+        if task.state is TaskState.DONE and task.result == "cancelled":
             return []
-        task.status = TaskStatus.CANCELLED
+        self._mark_done(task, result="cancelled")
         task.error = str(event.payload.reason or task.error).strip()
         task.summary = task.summary or "任务已取消。"
         task.touch()
+        task.ended_at = task.updated_at
         return [
             self._build_task_end(
                 task=task,
@@ -541,7 +551,7 @@ class RuntimeScheduler:
 
     def _on_archive_task(self, event: BusEnvelope[Any]) -> list[BusEnvelope[Any]]:
         task = self._tasks.require(event.payload.task_id)
-        task.status = TaskStateMachine.archive_task(task.status)
+        self._mark_done(task, state=TaskStateMachine.archive_task(task.state), result=task.result)
         task.touch()
         return []
 
@@ -550,10 +560,11 @@ class RuntimeScheduler:
         if not task_id:
             return []
         task = self._tasks.require(task_id)
-        task.status = TaskStateMachine.timeout_waiting_input(task.status)
+        self._mark_done(task, state=TaskStateMachine.timeout_waiting_input(task.state), result="failed")
         task.error = event.payload.reason or "waiting_input_timeout"
         task.summary = task.summary or "任务等待输入超时。"
         task.touch()
+        task.ended_at = task.updated_at
         return [
             self._build_task_end(
                 task=task,
@@ -788,6 +799,42 @@ class RuntimeScheduler:
     @staticmethod
     def _compact_dict(payload: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in payload.items() if value not in ("", None, [], {})}
+
+    @staticmethod
+    def _merge_string_lists(*parts: object) -> list[str]:
+        merged: list[str] = []
+        for part in parts:
+            if not isinstance(part, list):
+                continue
+            for item in part:
+                text = str(item or "").strip()
+                if text and text not in merged:
+                    merged.append(text)
+        return merged
+
+    @staticmethod
+    def _mark_running(task: RuntimeTaskRecord, *, state: TaskState = TaskState.RUNNING) -> None:
+        task.state = state
+        task.result = "none"
+        task.ended_at = None
+
+    @staticmethod
+    def _mark_waiting(task: RuntimeTaskRecord, *, state: TaskState = TaskState.WAITING) -> None:
+        task.state = state
+        task.result = "none"
+        task.ended_at = None
+
+    @staticmethod
+    def _mark_done(
+        task: RuntimeTaskRecord,
+        *,
+        state: TaskState = TaskState.DONE,
+        result: str,
+    ) -> None:
+        task.state = state
+        task.result = result
+        task.input_request = None
+        task.current_review_id = None
 
     @staticmethod
     def _string_list(value: object) -> list[str]:

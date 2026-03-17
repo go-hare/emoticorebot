@@ -7,22 +7,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from emoticorebot.brain.executive import ExecutiveBrain
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
-from emoticorebot.delivery.service import DeliveryService
-from emoticorebot.execution.team import AgentTeam
-from emoticorebot.memory.governor import MemoryGovernor
+from emoticorebot.delivery.runtime import DeliveryRuntime
+from emoticorebot.front.controller import FrontRuntime
+from emoticorebot.io.normalizer import InputNormalizer
 from emoticorebot.memory.persona import GovernedWriteResult
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import InterruptPayload, ReplyReadyPayload, UserMessagePayload
-from emoticorebot.protocol.task_models import ContentBlock, MessageRef
+from emoticorebot.protocol.events import ReplyReadyPayload
+from emoticorebot.protocol.task_models import MessageRef
 from emoticorebot.protocol.topics import EventType
+from emoticorebot.reflection.runtime import ReflectionRuntime
 from emoticorebot.runtime.transport_bus import TransportBus
-from emoticorebot.runtime.service import RuntimeService
-from emoticorebot.safety.guard import SafetyGuard
 from emoticorebot.session.runtime import SessionRuntime
+from emoticorebot.task.runtime import TaskRuntime
 
 
 @dataclass(slots=True)
@@ -55,24 +54,22 @@ class RuntimeKernel:
         self._brain_llm = brain_llm
         self._context_builder = context_builder
         self._bus = PriorityPubSubBus()
-        self._runtime = RuntimeService(bus=self._bus)
-        self._session = SessionRuntime(bus=self._bus, task_store=self._runtime.scheduler.task_store)
-        self._brain = ExecutiveBrain(
+        self._input_normalizer = InputNormalizer()
+        self._task_runtime = TaskRuntime(
             bus=self._bus,
-            task_store=self._runtime.scheduler.task_store,
-            brain_llm=brain_llm,
-            context_builder=context_builder,
-            session_runtime=self._session,
-        )
-        self._team = AgentTeam(
-            bus=self._bus,
-            task_store=self._runtime.scheduler.task_store,
             worker_llm=worker_llm,
             context_builder=context_builder,
             tool_registry=tool_registry,
         )
-        self._guard = SafetyGuard(bus=self._bus)
-        self._memory = MemoryGovernor(
+        self._session = SessionRuntime(bus=self._bus, task_store=self._task_runtime.task_store)
+        self._front = FrontRuntime(
+            bus=self._bus,
+            task_store=self._task_runtime.task_store,
+            brain_llm=brain_llm,
+            context_builder=context_builder,
+            session_runtime=self._session,
+        )
+        self._reflection = ReflectionRuntime(
             bus=self._bus,
             workspace=workspace,
             emotion_manager=emotion_manager,
@@ -86,35 +83,54 @@ class RuntimeKernel:
         self._started = False
 
         self._session.register()
-        self._runtime.register()
-        self._brain.register()
-        self._team.register()
-        self._guard.register()
-        self._delivery = DeliveryService(bus=self._bus, transport=transport, should_deliver=self._should_deliver_reply)
-        self._delivery.register()
-        self._memory.register()
+        self._task_runtime.register()
+        self._front.register()
+        self._delivery_runtime = DeliveryRuntime(bus=self._bus, transport=transport, should_deliver=self._should_deliver_reply)
+        self._delivery_runtime.register()
+        self._reflection.register()
         self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_REPLY_APPROVED, handler=self._capture_reply)
         self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_REPLY_REDACTED, handler=self._capture_reply)
 
     @property
     def task_store(self):
-        return self._runtime.scheduler.task_store
+        return self._task_runtime.task_store
+
+    @property
+    def event_bus(self) -> PriorityPubSubBus:
+        return self._bus
 
     @property
     def session_runtime(self) -> SessionRuntime:
         return self._session
 
+    @property
+    def task_runtime(self) -> TaskRuntime:
+        return self._task_runtime
+
+    @property
+    def front_runtime(self) -> FrontRuntime:
+        return self._front
+
+    @property
+    def reflection_runtime(self) -> ReflectionRuntime:
+        return self._reflection
+
+    @property
+    def delivery_runtime(self) -> DeliveryRuntime:
+        return self._delivery_runtime
+
     async def start(self) -> None:
         if self._started:
             return
         await self._bus.start()
+        await self._reflection.start()
         self._started = True
 
     async def stop(self) -> None:
-        await self._brain.stop()
-        await self._team.stop()
+        await self._front.stop()
+        await self._task_runtime.stop()
+        await self._reflection.stop()
         await self._bus.stop()
-        self._memory.close()
         self._close_context_builder()
         self._started = False
 
@@ -142,32 +158,21 @@ class RuntimeKernel:
         self._pending_turns[key] = future
         self._pending_turn_by_session[session_id] = turn_id
         self._active_turn_by_session[session_id] = turn_id
+        barge_in = bool(self._session.snapshot(session_id).active_reply_stream_id)
 
-        attachment_blocks = [
-            ContentBlock(type="file", path=path, name=path.rsplit("/", 1)[-1])
-            for path in list(attachments or [])
-            if str(path or "").strip()
-        ]
         payload_metadata = dict(metadata or {})
         payload_metadata["history_context"] = history_context
-        envelope = build_envelope(
-            event_type=EventType.INPUT_USER_MESSAGE,
-            source="gateway",
-            target="broadcast",
+        envelope = self._input_normalizer.normalize_text_message(
             session_id=session_id,
             turn_id=turn_id,
-            correlation_id=turn_id,
-            payload=UserMessagePayload(
-                message=MessageRef(
-                    channel=channel,
-                    chat_id=chat_id,
-                    sender_id=sender_id,
-                    message_id=message_id,
-                ),
-                plain_text=content,
-                attachments=attachment_blocks,
-                metadata=payload_metadata,
-            ),
+            channel=channel,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            message_id=message_id,
+            content=content,
+            attachments=attachments,
+            metadata=payload_metadata,
+            barge_in=barge_in,
         )
         await self._bus.publish(envelope)
         try:
@@ -193,58 +198,9 @@ class RuntimeKernel:
         current_turn_id = self._active_turn_by_session.get(session_id)
         return bool(turn_id) and current_turn_id == turn_id
 
-    async def interrupt_session(
-        self,
-        *,
-        session_id: str,
-        channel: str,
-        chat_id: str,
-        sender_id: str,
-        message_id: str,
-        content: str,
-        metadata: dict[str, object] | None = None,
-    ) -> bool:
-        current_turn_id = self._active_turn_by_session.get(session_id)
-        if not current_turn_id:
-            return False
-
-        latest_task = self.task_store.latest_for_session(session_id, include_terminal=False)
-        pending_turn_id = self._pending_turn_by_session.get(session_id)
-        has_live_turn = pending_turn_id == current_turn_id
-        has_live_task = latest_task is not None and latest_task.turn_id == current_turn_id
-        if not has_live_turn and not has_live_task:
-            return False
-
-        await self.start()
-        await self._bus.publish(
-            build_envelope(
-                event_type=EventType.INPUT_INTERRUPT,
-                source="gateway",
-                target="broadcast",
-                session_id=session_id,
-                turn_id=current_turn_id,
-                task_id=latest_task.task_id if has_live_task else None,
-                correlation_id=(latest_task.task_id if has_live_task else current_turn_id) or None,
-                payload=InterruptPayload(
-                    message=MessageRef(
-                        channel=channel,
-                        chat_id=chat_id,
-                        sender_id=sender_id,
-                        message_id=message_id,
-                    ),
-                    interrupt_type="new_user_message",
-                    plain_text=content,
-                    target_task_id=latest_task.task_id if has_live_task else None,
-                    urgent=True,
-                    metadata=dict(metadata or {}),
-                ),
-            )
-        )
-        return True
-
     async def run_deep_reflection(self, *, reason: str = "", warm_limit: int = 15):
         await self.start()
-        return await self._memory.run_deep_reflection(reason=reason, warm_limit=warm_limit)
+        return await self._reflection.run_deep_reflection(reason=reason, warm_limit=warm_limit)
 
     async def rollback_persona(
         self,
@@ -258,7 +214,7 @@ class RuntimeKernel:
         reason: str = "manual_rollback",
     ) -> GovernedWriteResult:
         await self.start()
-        return await self._memory.rollback_anchor(
+        return await self._reflection.rollback_anchor(
             target=target,
             scope=scope,
             version=version,
@@ -271,7 +227,8 @@ class RuntimeKernel:
     async def _capture_reply(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
         if not self._should_deliver_reply(event):
             return
-        if str(event.payload.reply.metadata.get("stream_state", "") or "").strip() == "delta":
+        stream_state = str(event.payload.reply.metadata.get("stream_state", "") or "").strip()
+        if stream_state in {"open", "delta", "superseded"}:
             return
         key = (event.session_id or "", event.turn_id or "")
         future = self._pending_turns.get(key)

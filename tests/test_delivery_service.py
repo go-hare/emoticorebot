@@ -208,7 +208,7 @@ async def _exercise_delivery_stream_delta_skips_replied_event() -> None:
                     reply_id="reply_stream_1",
                     kind="answer",
                     plain_text="你",
-                    metadata={"stream_id": "stream_turn_1", "stream_state": "delta", "stream_index": 1},
+                    metadata={"stream_id": "stream_turn_1", "stream_state": "open", "stream_index": 1},
                 ),
                 origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
             ),
@@ -220,9 +220,45 @@ async def _exercise_delivery_stream_delta_skips_replied_event() -> None:
     assert outbound.content == "你"
     assert outbound.metadata["reply_kind"] == "answer"
     assert outbound.metadata["_stream"] is True
-    assert outbound.metadata["_stream_state"] == "delta"
+    assert outbound.metadata["_stream_state"] == "open"
     assert replied == []
 
 
 def test_delivery_service_stream_delta_skips_replied_event() -> None:
     asyncio.run(_exercise_delivery_stream_delta_skips_replied_event())
+
+
+async def _exercise_delivery_stream_stale_reply_emits_superseded() -> None:
+    bus = PriorityPubSubBus()
+    transport = TransportBus()
+    service = DeliveryService(bus=bus, transport=transport, should_deliver=lambda _event: False)
+
+    service.register()
+
+    await bus.publish(
+        build_envelope(
+            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            source="safety",
+            target="broadcast",
+            session_id="sess_1",
+            turn_id="turn_1",
+            payload=ReplyReadyPayload(
+                reply=ReplyDraft(
+                    reply_id="reply_stream_stale",
+                    kind="answer",
+                    plain_text="旧内容",
+                    metadata={"stream_id": "stream_turn_1", "stream_state": "delta", "stream_index": 2},
+                ),
+                origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
+            ),
+        )
+    )
+    await bus.drain()
+
+    outbound = await transport.consume_outbound()
+    assert outbound.metadata["_stream"] is True
+    assert outbound.metadata["_stream_state"] == "superseded"
+
+
+def test_delivery_service_stream_stale_reply_emits_superseded() -> None:
+    asyncio.run(_exercise_delivery_stream_stale_reply_emits_superseded())

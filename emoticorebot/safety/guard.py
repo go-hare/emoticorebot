@@ -1,18 +1,22 @@
-"""Safety interceptor layer for replies and task outputs."""
+"""Synchronous reply/task output safety filtering for the front/task pipeline."""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
-from uuid import uuid4
 
-from emoticorebot.bus.interceptor import InterceptorOutcome, allow, block, redact
-from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import ReplyBlockedPayload, SystemSignalPayload, TaskEndPayload
-from emoticorebot.protocol.safety_models import SafetyAuditPayload
-from emoticorebot.protocol.task_models import ContentBlock, ProtocolModel, ReplyDraft
-from emoticorebot.protocol.topics import EventType, Topic
+from emoticorebot.protocol.events import ReplyBlockedPayload, ReplyReadyPayload, TaskEndPayload
+from emoticorebot.protocol.task_models import ContentBlock, ReplyDraft
+from emoticorebot.protocol.topics import EventType
+
+
+@dataclass(slots=True)
+class ReplyGuardResult:
+    decision: str
+    event: BusEnvelope[ReplyReadyPayload] | None = None
+    blocked: ReplyBlockedPayload | None = None
 
 
 class SafetyGuard:
@@ -28,122 +32,78 @@ class SafetyGuard:
         re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     ]
 
-    def __init__(self, *, bus: PriorityPubSubBus) -> None:
-        self._bus = bus
-
-    def register(self) -> None:
-        self._bus.register_interceptor(topic=Topic.OUTPUT_EVENT, handler=self._intercept_output)
-        self._bus.register_interceptor(topic=Topic.TASK_EVENT, handler=self._intercept_task_event)
-        self._bus.subscribe(consumer="safety", topic=Topic.CONTROL_COMMAND, handler=self._observe_control)
-
-    async def _intercept_output(self, outcome: InterceptorOutcome) -> InterceptorOutcome:
-        event = outcome.event
+    def guard_reply_event(self, event: BusEnvelope[ReplyReadyPayload]) -> ReplyGuardResult:
         if event.event_type != EventType.OUTPUT_REPLY_READY:
-            return outcome
+            return ReplyGuardResult(decision="allow", event=event)
 
         reply = event.payload.reply
         text = self._reply_surface_text(reply)
         if event.payload.reply.safe_fallback:
             if self._contains_secret(text):
-                return block(event, self._warning_event(event, reason="safe_fallback_rejected"))
-            return allow(self._rewrite_reply_event(event, EventType.OUTPUT_REPLY_APPROVED), self._audit(event, "allowed"))
+                return ReplyGuardResult(
+                    decision="block",
+                    blocked=ReplyBlockedPayload(
+                        reply=reply,
+                        block_reason="safe_fallback_rejected",
+                        policy_name="secret_filter",
+                        redaction_hint="请移除密钥、密码或私钥后再试。",
+                    ),
+                )
+            return ReplyGuardResult(
+                decision="allow",
+                event=self._rewrite_reply_event(event, EventType.OUTPUT_REPLY_APPROVED),
+            )
 
         if self._matches_block(text):
-            blocked = self._rewrite_reply_event(
-                event,
-                EventType.OUTPUT_REPLY_BLOCKED,
-                payload=ReplyBlockedPayload(
+            return ReplyGuardResult(
+                decision="block",
+                blocked=ReplyBlockedPayload(
                     reply=event.payload.reply,
                     block_reason="sensitive_material",
                     policy_name="secret_filter",
                     redaction_hint="请移除密钥、密码或私钥后再试。",
                 ),
             )
-            return allow(blocked, self._audit(event, "blocked"))
 
         if self._contains_secret(text):
             reply = self._redact_reply(reply)
-            redacted_event = self._rewrite_reply_event(
-                event,
-                EventType.OUTPUT_REPLY_REDACTED,
-                payload=event.payload.model_copy(update={"reply": reply}),
+            return ReplyGuardResult(
+                decision="redact",
+                event=self._rewrite_reply_event(
+                    event,
+                    EventType.OUTPUT_REPLY_REDACTED,
+                    payload=event.payload.model_copy(update={"reply": reply}),
+                ),
             )
-            return redact(redacted_event, self._audit(event, "redacted"))
 
-        approved = self._rewrite_reply_event(event, EventType.OUTPUT_REPLY_APPROVED)
-        return allow(approved, self._audit(event, "allowed"))
+        return ReplyGuardResult(
+            decision="allow",
+            event=self._rewrite_reply_event(event, EventType.OUTPUT_REPLY_APPROVED),
+        )
 
-    async def _intercept_task_event(self, outcome: InterceptorOutcome) -> InterceptorOutcome:
-        event = outcome.event
+    def guard_task_event(self, event: BusEnvelope[TaskEndPayload]) -> BusEnvelope[TaskEndPayload]:
         if event.event_type != EventType.TASK_END:
-            return outcome
+            return event
 
         payload = event.payload
         text = self._task_surface_text(payload)
 
         if not self._contains_secret(text):
-            return allow(event, self._audit(event, "allowed"))
+            return event
 
         updated_payload = self._redact_task_payload(payload)
-        return redact(event.model_copy(update={"payload": updated_payload}), self._audit(event, "redacted"))
-
-    @staticmethod
-    async def _observe_control(_event: BusEnvelope[ProtocolModel]) -> None:
-        return None
-
-    def _audit(self, event: BusEnvelope[ProtocolModel], decision: str) -> BusEnvelope[SafetyAuditPayload]:
-        event_type = {
-            "allowed": EventType.SAFETY_ALLOWED,
-            "redacted": EventType.SAFETY_REDACTED,
-            "blocked": EventType.SAFETY_BLOCKED,
-        }[decision]
-        return build_envelope(
-            event_type=event_type,
-            source="safety",
-            target="broadcast",
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            task_id=event.task_id,
-            correlation_id=event.correlation_id,
-            causation_id=event.event_id,
-            payload=SafetyAuditPayload(
-                decision_id=f"safety_{uuid4().hex[:12]}",
-                decision=decision,
-                intercepted_event_type=event.event_type,
-                policy_name="secret_filter",
-            ),
-        )
-
-    def _warning_event(self, event: BusEnvelope[ProtocolModel], *, reason: str) -> BusEnvelope[SystemSignalPayload]:
-        return build_envelope(
-            event_type=EventType.SYSTEM_WARNING,
-            source="safety",
-            target="broadcast",
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            task_id=event.task_id,
-            correlation_id=event.correlation_id,
-            causation_id=event.event_id,
-            payload=SystemSignalPayload(
-                signal_id=f"signal_{uuid4().hex[:12]}",
-                signal_type="warning",
-                reason=reason,
-                related_event_id=event.event_id,
-                related_task_id=event.task_id,
-                severity="warning",
-            ),
-        )
+        return event.model_copy(update={"payload": updated_payload})
 
     @staticmethod
     def _rewrite_reply_event(
-        event: BusEnvelope[ProtocolModel],
+        event: BusEnvelope[ReplyReadyPayload],
         event_type: str,
         *,
-        payload: ProtocolModel | None = None,
-    ) -> BusEnvelope[ProtocolModel]:
+        payload: ReplyReadyPayload | None = None,
+    ) -> BusEnvelope[ReplyReadyPayload]:
         return build_envelope(
             event_type=event_type,
-            source="safety",
+            source=event.source,
             target="broadcast",
             session_id=event.session_id,
             turn_id=event.turn_id,
@@ -243,5 +203,4 @@ class SafetyGuard:
             return [self._redact_value(item) for item in value]
         return value
 
-
-__all__ = ["SafetyGuard"]
+__all__ = ["ReplyGuardResult", "SafetyGuard"]

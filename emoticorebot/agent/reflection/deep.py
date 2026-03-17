@@ -243,10 +243,10 @@ class DeepReflectionService:
             turn_reflection = event.get("turn_reflection") if isinstance(event.get("turn_reflection"), dict) else {}
             brain_state = event.get("brain_state") if isinstance(event.get("brain_state"), dict) else {}
             task = event.get("task") if isinstance(event.get("task"), dict) else {}
-            lifecycle_status = str(task.get("status", "none") or "none").strip()
-            result_status = str(task.get("result_status", "") or "").strip()
+            lifecycle_status = str(task.get("state", "none") or "none").strip()
+            result_status = str(task.get("result", "") or "").strip()
             execution_status = lifecycle_status
-            if result_status:
+            if result_status and result_status != "none":
                 execution_status = f"{lifecycle_status}/{result_status}"
             problems = DeepReflectionService._normalize_str_list(turn_reflection.get("problems"))
             user_updates = DeepReflectionService._normalize_str_list(turn_reflection.get("user_updates"))
@@ -313,7 +313,15 @@ class DeepReflectionService:
             trigger = str(item.get("trigger", "") or "").strip()
             if not any((summary, content, hint, trigger)):
                 continue
-            skill_name = str(item.get("skill_name", "") or "").strip() or "unnamed-skill"
+            skill_name = DeepReflectionService._derive_skill_name(
+                str(item.get("skill_name", "") or "").strip(),
+                summary=summary,
+                content=content,
+                hint=hint,
+                trigger=trigger,
+            )
+            if not skill_name:
+                continue
             records.append(
                 {
                     "audience": "task",
@@ -335,6 +343,25 @@ class DeepReflectionService:
                 }
             )
         return records[:4]
+
+    @staticmethod
+    def _derive_skill_name(
+        raw_name: str,
+        *,
+        summary: str,
+        content: str,
+        hint: str,
+        trigger: str,
+    ) -> str:
+        provided = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", str(raw_name or "").strip().lower()).strip("-")
+        if provided:
+            return provided[:64]
+
+        seed = summary or hint or trigger or content
+        compact = re.sub(r"\s+", "-", str(seed or "").strip().lower())
+        derived = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", compact).strip("-")
+        derived = re.sub(r"-+", "-", derived)
+        return derived[:64]
 
     @staticmethod
     def _normalize_str_list(value: Any) -> list[str]:

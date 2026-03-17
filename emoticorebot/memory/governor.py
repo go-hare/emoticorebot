@@ -92,12 +92,12 @@ class MemoryGovernor:
     def register(self) -> None:
         self._bus.subscribe(
             consumer="memory_governor",
-            event_type=EventType.MEMORY_REFLECT_TURN,
+            event_type=EventType.REFLECT_LIGHT,
             handler=self._weak_handler("_on_reflect_signal"),
         )
         self._bus.subscribe(
             consumer="memory_governor",
-            event_type=EventType.MEMORY_REFLECT_DEEP,
+            event_type=EventType.REFLECT_DEEP,
             handler=self._weak_handler("_on_reflect_signal"),
         )
         self._bus.subscribe(
@@ -118,6 +118,10 @@ class MemoryGovernor:
 
     def close(self) -> None:
         self._memory_store.close()
+
+    @property
+    def persona(self) -> PersonaManager:
+        return self._persona
 
     def __del__(self) -> None:
         try:
@@ -211,18 +215,24 @@ class MemoryGovernor:
 
     async def _flush_pending(self, key: tuple[str, str]) -> None:
         pending = self._pending.get(key)
-        if pending is None or pending.delivery is None or not pending.signals:
+        if pending is None or not pending.signals:
             return
 
+        remaining: list[BusEnvelope[ReflectSignalPayload]] = []
         while pending.signals:
             signal = pending.signals.pop(0)
             if self._is_processed_trigger(signal.payload.trigger_id):
                 continue
-            self._remember_trigger(signal.payload.trigger_id)
 
-            if signal.event_type == EventType.MEMORY_REFLECT_TURN:
+            if signal.event_type == EventType.REFLECT_LIGHT:
+                if pending.delivery is None:
+                    remaining.append(signal)
+                    continue
+                self._remember_trigger(signal.payload.trigger_id)
                 await self._apply_turn_reflection(signal, pending.delivery)
-            elif signal.event_type == EventType.MEMORY_REFLECT_DEEP:
+            elif signal.event_type == EventType.REFLECT_DEEP:
+                self._remember_trigger(signal.payload.trigger_id)
+                warm_limit = self._deep_warm_limit(signal)
                 await self._apply_deep_reflection(
                     reason=str(signal.payload.reason or "deep_reflection"),
                     session_id=signal.session_id or self._SYSTEM_SESSION_ID,
@@ -232,8 +242,10 @@ class MemoryGovernor:
                     task_id=signal.task_id,
                     recent_context_ids=self._context_ids_for(signal),
                     metadata=dict(signal.payload.metadata or {}),
+                    events=self._reflection.recent_cognitive_events(limit=max(6, warm_limit)),
                 )
 
+        pending.signals = remaining
         if not pending.signals:
             self._pending.pop(key, None)
 
@@ -585,6 +597,14 @@ class MemoryGovernor:
             self._recent_context_ids.popitem(last=False)
 
     @staticmethod
+    def _deep_warm_limit(signal: BusEnvelope[ReflectSignalPayload]) -> int:
+        metadata = dict(signal.payload.metadata or {})
+        try:
+            return max(int(metadata.get("warm_limit", 15) or 15), 1)
+        except (TypeError, ValueError):
+            return 15
+
+    @staticmethod
     def _governance_metadata(result: GovernedWriteResult, *, scope: str, action: str) -> dict[str, Any]:
         if not result.applied:
             return {}
@@ -626,7 +646,7 @@ class MemoryGovernor:
         metadata: dict[str, Any],
     ) -> BusEnvelope[ReflectSignalPayload]:
         return build_envelope(
-            event_type=EventType.MEMORY_REFLECT_DEEP,
+            event_type=EventType.REFLECT_DEEP,
             source="memory_governor",
             target="memory_governor",
             session_id=session_id,

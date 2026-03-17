@@ -30,7 +30,7 @@ TaskEventType = Literal["update", "summary", "ask", "end"]
 TaskEvent = dict[str, Any]
 
 
-class UserMessagePayload(ProtocolModel):
+class StableInputPayload(ProtocolModel):
     message: MessageRef
     plain_text: str | None = None
     content_blocks: list[ContentBlock] = Field(default_factory=list)
@@ -39,42 +39,18 @@ class UserMessagePayload(ProtocolModel):
     is_follow_up: bool | None = None
     detected_language: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    input_id: str | None = None
+    input_kind: Literal["text", "voice", "video", "multimodal"] = "text"
+    channel_kind: Literal["chat", "voice", "video"] = "chat"
+    barge_in: bool | None = None
 
     @model_validator(mode="after")
-    def validate_content(self) -> "UserMessagePayload":
+    def validate_content(self) -> "StableInputPayload":
         if not self.plain_text and not self.content_blocks:
-            raise ValueError("user messages require plain_text or content_blocks")
+            raise ValueError("stable inputs require plain_text or content_blocks")
         if not self.message.channel or not self.message.chat_id or not self.message.message_id:
-            raise ValueError("user messages require channel, chat_id, and message_id")
+            raise ValueError("stable inputs require channel, chat_id, and message_id")
         return self
-
-
-class InterruptPayload(ProtocolModel):
-    message: MessageRef
-    interrupt_type: str
-    plain_text: str | None = None
-    target_task_id: str | None = None
-    urgent: bool | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class VoiceChunkPayload(ProtocolModel):
-    message: MessageRef
-    stream_id: str
-    chunk_index: int
-    audio: ContentBlock
-    is_final_chunk: bool | None = None
-    vad_state: str | None = None
-    partial_transcript: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class ChannelAttachmentPayload(ProtocolModel):
-    message: MessageRef
-    attachments: list[ContentBlock] = Field(default_factory=list)
-    attachment_count: int | None = None
-    extracted_text: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskStartedReportPayload(ProtocolModel):
@@ -260,15 +236,14 @@ class SystemSignalPayload(ProtocolModel):
 
 
 __all__ = [
-    "ChannelAttachmentPayload",
     "DeliveryFailedPayload",
-    "InterruptPayload",
     "PerceptionEventPayload",
     "PerceptionType",
     "ReplyBlockedPayload",
     "ReplyReadyPayload",
     "RepliedPayload",
     "SignalType",
+    "StableInputPayload",
     "SystemSignalPayload",
     "TaskApprovedReportPayload",
     "TaskAskPayload",
@@ -287,6 +262,4 @@ __all__ = [
     "TaskStartedReportPayload",
     "TaskSummaryPayload",
     "TaskUpdatePayload",
-    "UserMessagePayload",
-    "VoiceChunkPayload",
 ]

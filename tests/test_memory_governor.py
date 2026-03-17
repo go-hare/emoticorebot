@@ -55,7 +55,7 @@ async def _exercise_turn_reflection_persistence(workspace: Path) -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.MEMORY_REFLECT_TURN,
+            event_type=EventType.REFLECT_LIGHT,
             source="brain",
             target="memory_governor",
             session_id="sess_1",
@@ -76,7 +76,7 @@ async def _exercise_turn_reflection_persistence(workspace: Path) -> None:
                         "output": "我先帮你拆一下结构。",
                         "channel": "cli",
                         "chat_id": "direct",
-                        "task": {"status": "done", "summary": "结构已经拆解"},
+                        "task": {"state": "done", "summary": "结构已经拆解"},
                         "execution": {
                             "invoked": True,
                             "status": "done",
@@ -141,7 +141,7 @@ async def _exercise_periodic_deep_reflection(workspace: Path) -> None:
         turn_id = f"turn_{index}"
         await bus.publish(
             build_envelope(
-                event_type=EventType.MEMORY_REFLECT_TURN,
+                event_type=EventType.REFLECT_LIGHT,
                 source="brain",
                 target="memory_governor",
                 session_id="sess_1",
@@ -163,7 +163,7 @@ async def _exercise_periodic_deep_reflection(workspace: Path) -> None:
                             "output": "任务已完成，我给你最终结果。",
                             "channel": "cli",
                             "chat_id": "direct",
-                            "task": {"task_id": f"task_{index}", "status": "done", "summary": "复杂任务已收敛"},
+                            "task": {"task_id": f"task_{index}", "state": "done", "summary": "复杂任务已收敛"},
                             "execution": {
                                 "invoked": True,
                                 "status": "done",
@@ -197,6 +197,86 @@ async def _exercise_periodic_deep_reflection(workspace: Path) -> None:
 def test_memory_governor_runs_periodic_deep_reflection() -> None:
     with TemporaryDirectory() as tmp_dir:
         asyncio.run(_exercise_periodic_deep_reflection(Path(tmp_dir)))
+
+
+async def _exercise_deep_signal_runs_without_delivery_gate(workspace: Path) -> None:
+    bus = PriorityPubSubBus()
+    governor = MemoryGovernor(bus=bus, workspace=workspace)
+    governor.register()
+
+    committed = _collect(bus, EventType.MEMORY_WRITE_COMMITTED)
+
+    async def _turn(index: int) -> None:
+        turn_id = f"turn_seed_{index}"
+        await bus.publish(
+            build_envelope(
+                event_type=EventType.REFLECT_LIGHT,
+                source="brain",
+                target="memory_governor",
+                session_id="sess_seed",
+                turn_id=turn_id,
+                correlation_id=turn_id,
+                payload=ReflectSignalPayload(
+                    trigger_id=f"reflect_seed_{index}",
+                    reason="task_result",
+                    source_event_id=f"evt_seed_{index}",
+                    task_id=f"task_seed_{index}",
+                    metadata={
+                        "reflection_input": {
+                            "session_id": "sess_seed",
+                            "turn_id": turn_id,
+                            "message_id": f"msg_seed_{index}",
+                            "source_type": "task_event",
+                            "user_input": "完成一个复杂任务",
+                            "assistant_output": "任务已完成，我给你最终结果。",
+                            "output": "任务已完成，我给你最终结果。",
+                            "channel": "cli",
+                            "chat_id": "direct",
+                            "task": {"task_id": f"task_seed_{index}", "state": "done", "summary": "复杂任务已收敛"},
+                            "execution": {
+                                "invoked": True,
+                                "status": "done",
+                                "summary": "多步执行后收敛为最终结果",
+                                "confidence": 0.88,
+                                "attempt_count": 2,
+                                "missing": [],
+                                "failure_reason": "",
+                                "recommended_action": "",
+                            },
+                        }
+                    },
+                ),
+            )
+        )
+        await _publish_delivery_gate(bus, session_id="sess_seed", turn_id=turn_id, correlation_id=turn_id)
+        await bus.drain()
+
+    await _turn(1)
+    await _turn(2)
+
+    await bus.publish(
+        build_envelope(
+            event_type=EventType.REFLECT_DEEP,
+            source="reflection",
+            target="memory_governor",
+            session_id="system:memory",
+            turn_id="turn_background_reflection",
+            correlation_id="background_reflection",
+            payload=ReflectSignalPayload(
+                trigger_id="reflect_deep_timer",
+                reason="periodic_signal",
+                metadata={"trigger": "timer", "warm_limit": 12},
+            ),
+        )
+    )
+    await bus.drain()
+
+    assert any(event.payload.metadata.get("reflection_type") == "deep" for event in committed)
+
+
+def test_memory_governor_runs_deep_signal_without_delivery_gate() -> None:
+    with TemporaryDirectory() as tmp_dir:
+        asyncio.run(_exercise_deep_signal_runs_without_delivery_gate(Path(tmp_dir)))
 
 
 async def _exercise_write_request_updates_persona(workspace: Path) -> None:
@@ -252,7 +332,7 @@ def test_memory_governor_context_prefers_task_scope() -> None:
         governor._remember("evt_task_2", session_id="sess_1", task_id="task_2")
 
         event = build_envelope(
-            event_type=EventType.MEMORY_REFLECT_DEEP,
+            event_type=EventType.REFLECT_DEEP,
             source="brain",
             target="memory_governor",
             session_id="sess_1",

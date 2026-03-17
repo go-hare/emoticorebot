@@ -149,9 +149,9 @@ def _is_one_shot_task_settled(agent_loop: object, task_id: str | None) -> bool:
     task = kernel.get_task(task_id)
     if task is None:
         return False
-    from emoticorebot.runtime.state_machine import TERMINAL_STATES, TaskStatus
+    from emoticorebot.runtime.state_machine import TERMINAL_STATES, TaskState
 
-    return task.status in TERMINAL_STATES or task.status is TaskStatus.WAITING_INPUT
+    return task.state in TERMINAL_STATES or task.state is TaskState.WAITING
 
 
 async def _await_one_shot_task_id(
@@ -502,13 +502,17 @@ def agent(
                         stream_id = str(metadata.get("_stream_id", "") or "").strip()
                         stream_state = str(metadata.get("_stream_state", "") or "").strip()
                         if metadata.get("_stream") and stream_id:
-                            if stream_state == "delta":
+                            if stream_state in {"open", "delta"}:
                                 _write_stream_chunk(
                                     content=msg.content,
                                     render_markdown=markdown,
                                     stream_started=streamed.get(stream_id, False),
                                 )
                                 streamed[stream_id] = True
+                                continue
+                            if stream_state == "superseded":
+                                if streamed.pop(stream_id, False):
+                                    _finish_stream_output()
                                 continue
                             if streamed.get(stream_id):
                                 matched_task_id = str(metadata.get("task_id", "") or "").strip() or None
@@ -637,13 +641,16 @@ def agent(
                             if not stream_id:
                                 continue
                             stream_state = str(msg.metadata.get("_stream_state", "") or "").strip()
-                            if stream_state == "delta":
+                            if stream_state in {"open", "delta"}:
                                 _write_stream_chunk(
                                     content=msg.content,
                                     render_markdown=markdown,
                                     stream_started=streamed.get(stream_id, False),
                                 )
                                 streamed[stream_id] = True
+                            elif stream_state == "superseded":
+                                if streamed.pop(stream_id, False):
+                                    _finish_stream_output()
                             elif streamed.pop(stream_id, False):
                                 _finish_stream_output()
                             elif msg.content:
@@ -1088,7 +1095,7 @@ def cron_run(
                     metadata = msg.metadata or {}
                     stream_id = str(metadata.get("_stream_id", "") or "").strip()
                     stream_state = str(metadata.get("_stream_state", "") or "").strip()
-                    if metadata.get("_stream") and stream_id and stream_state == "delta":
+                    if metadata.get("_stream") and stream_id and stream_state in {"open", "delta", "superseded"}:
                         continue
                     task_id = str(metadata.get("task_id", "") or "").strip() or None
                     reply_kind = str(metadata.get("reply_kind", "") or "").strip()

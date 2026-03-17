@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from emoticorebot.runtime.state_machine import TaskStatus
+from emoticorebot.runtime.state_machine import TaskState
 from emoticorebot.runtime.task_store import RuntimeTaskRecord
 
 TurnAction = Literal["create_task", "resume_task", "cancel_task", "status", "reply"]
@@ -52,7 +52,7 @@ class TaskPolicy:
 
     def decide(self, user_input: str, tasks: list[RuntimeTaskRecord]) -> TurnDirective:
         text = str(user_input or "").strip()
-        waiting = self._latest_task(tasks, status=TaskStatus.WAITING_INPUT)
+        waiting = self._latest_task(tasks, state=TaskState.WAITING)
         active = self._latest_active_task(tasks)
 
         if self._STATUS_PATTERN.search(text) and (waiting is not None or active is not None):
@@ -106,17 +106,17 @@ class TaskPolicy:
     def _latest_task(
         tasks: list[RuntimeTaskRecord],
         *,
-        status: TaskStatus,
+        state: TaskState,
     ) -> RuntimeTaskRecord | None:
         for task in reversed(tasks):
-            if task.status is status:
+            if task.state is state:
                 return task
         return None
 
     @staticmethod
     def _latest_active_task(tasks: list[RuntimeTaskRecord]) -> RuntimeTaskRecord | None:
         for task in reversed(tasks):
-            if task.status not in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.ARCHIVED}:
+            if task.state is not TaskState.DONE:
                 return task
         return None
 

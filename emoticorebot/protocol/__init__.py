@@ -3,7 +3,6 @@
 from .commands import (
     ArchiveTaskPayload,
     AssignAgentPayload,
-    BrainReplyPayload,
     CancelAgentPayload,
     ControlCommandPayload,
     ResumeAgentPayload,
@@ -13,13 +12,12 @@ from .commands import (
 )
 from .envelope import BusEnvelope, build_envelope
 from .events import (
-    ChannelAttachmentPayload,
     DeliveryFailedPayload,
-    InterruptPayload,
     PerceptionEventPayload,
     ReplyBlockedPayload,
     ReplyReadyPayload,
     RepliedPayload,
+    StableInputPayload,
     SystemSignalPayload,
     TaskApprovedReportPayload,
     TaskAskPayload,
@@ -38,8 +36,6 @@ from .events import (
     TaskStartedReportPayload,
     TaskSummaryPayload,
     TaskUpdatePayload,
-    UserMessagePayload,
-    VoiceChunkPayload,
 )
 from .memory_models import (
     MemoryUpdatePayload,
@@ -48,7 +44,6 @@ from .memory_models import (
     ReflectSignalPayload,
 )
 from .priorities import EventPriority, PRIORITY_BY_EVENT_TYPE, priority_for
-from .safety_models import SafetyAuditPayload
 from .task_models import (
     AgentInputContext,
     AgentRole,
@@ -77,10 +72,8 @@ __all__ = [
     "AgentRole",
     "ArchiveTaskPayload",
     "AssignAgentPayload",
-    "BrainReplyPayload",
     "BusEnvelope",
     "CancelAgentPayload",
-    "ChannelAttachmentPayload",
     "ContentBlock",
     "ControlCommandPayload",
     "ControlParameters",
@@ -88,7 +81,6 @@ __all__ = [
     "EventPriority",
     "EventType",
     "InputRequest",
-    "InterruptPayload",
     "MemoryUpdatePayload",
     "MemoryWriteCommittedPayload",
     "MemoryWriteRequestPayload",
@@ -108,7 +100,7 @@ __all__ = [
     "ResumeAgentPayload",
     "ReviewItem",
     "ReviewerContext",
-    "SafetyAuditPayload",
+    "StableInputPayload",
     "SystemSignalPayload",
     "TaskApprovedReportPayload",
     "TaskAskPayload",
@@ -136,8 +128,6 @@ __all__ = [
     "TaskVisibleResult",
     "TaskVisibleState",
     "Topic",
-    "UserMessagePayload",
-    "VoiceChunkPayload",
     "build_envelope",
     "priority_for",
     "topic_for",

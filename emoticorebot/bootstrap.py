@@ -24,7 +24,9 @@ from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersC
 from emoticorebot.agent.context import ContextBuilder
 from emoticorebot.agent.model import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
-from emoticorebot.protocol.task_models import TaskSpec, TaskState
+from emoticorebot.protocol.envelope import BusEnvelope
+from emoticorebot.protocol.events import DeliveryFailedPayload, RepliedPayload, ReplyReadyPayload
+from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import InboundMessage, OutboundMessage, TransportBus
 from emoticorebot.runtime.kernel import RuntimeKernel, TurnReply
 from emoticorebot.session.thread_store import ThreadStore
@@ -108,6 +110,27 @@ class RuntimeHost:
             bus=self.bus,
             message_processor=self._process_message,
         )
+        self._pending_task_origin_replies: dict[str, BusEnvelope[ReplyReadyPayload]] = {}
+        self.kernel.event_bus.subscribe(
+            consumer="runtime_host",
+            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            handler=self._remember_task_origin_reply,
+        )
+        self.kernel.event_bus.subscribe(
+            consumer="runtime_host",
+            event_type=EventType.OUTPUT_REPLY_REDACTED,
+            handler=self._remember_task_origin_reply,
+        )
+        self.kernel.event_bus.subscribe(
+            consumer="runtime_host",
+            event_type=EventType.OUTPUT_REPLIED,
+            handler=self._persist_task_origin_internal_reply,
+        )
+        self.kernel.event_bus.subscribe(
+            consumer="runtime_host",
+            event_type=EventType.OUTPUT_DELIVERY_FAILED,
+            handler=self._discard_task_origin_reply,
+        )
 
         self._running = False
 
@@ -132,15 +155,6 @@ class RuntimeHost:
         key = session_key or msg.session_key
         message_id = str(msg.metadata.get("message_id", "") or "").strip() or self._new_message_id()
         msg.metadata["message_id"] = message_id
-        await self.kernel.interrupt_session(
-            session_id=key,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            sender_id=msg.sender_id,
-            message_id=message_id,
-            content=msg.content,
-            metadata=msg.metadata,
-        )
         if msg.content == "__subconscious_recovery__":
             if self.subconscious:
                 await self.subconscious.handle_energy_recovery()
@@ -372,27 +386,30 @@ class RuntimeHost:
         assistant_timestamp: str,
         message_id: str,
         existing_internal_count: int = 0,
+        source: str = "runtime",
     ) -> list[dict[str, Any]]:
         """构建内部历史记录，包含完整的执行上下文"""
         records: list[dict[str, Any]] = []
-        
+
         # 基础记录
         base_record = {
             "message_id": message_id,
             "role": "assistant",
             "timestamp": assistant_timestamp,
-            "source": "runtime",
+            "source": source,
         }
-        
+
         # Brain 决策记录
         brain_info = final_state.get("brain", {})
         execution_summary = final_state.get("execution_summary", "")
         if brain_info or execution_summary:
+            summary = str(execution_summary or final_state.get("output", "") or "").strip()
             brain_record = {
                 **base_record,
                 "phase": "brain",
                 "event": "brain.decision",
-                "content": {
+                "content": summary,
+                "brain": {
                     "task_action": brain_info.get("task_action", "none"),
                     "final_decision": brain_info.get("final_decision", "answer"),
                     "reply_event_type": brain_info.get("reply_event_type", ""),
@@ -401,15 +418,17 @@ class RuntimeHost:
                 },
             }
             records.append(brain_record)
-        
+
         # Task 记录（如果有）
         task_info = final_state.get("task")
         if task_info:
+            summary = str(task_info.get("summary", "") or final_state.get("output", "") or "").strip()
             task_record = {
                 **base_record,
                 "phase": "task",
                 "event": "task.executed",
-                "content": {
+                "content": summary,
+                "task": {
                     "task_id": task_info.get("task_id", ""),
                     "state": task_info.get("state", ""),
                     "result": task_info.get("result", ""),
@@ -418,48 +437,52 @@ class RuntimeHost:
                 },
             }
             records.append(task_record)
-        
+
         # Task trace 记录（如果有）
         task_trace = list((task_info or {}).get("task_trace", []) or [])
         if task_trace:
+            trace_summary = self._summarize_trace(task_trace)
             trace_record = {
                 **base_record,
                 "phase": "execution",
                 "event": "execution.trace",
-                "content": {
+                "content": trace_summary,
+                "meta": {
                     "trace_count": len(task_trace),
-                    "trace_summary": self._summarize_trace(task_trace),
+                    "trace_summary": trace_summary,
                 },
             }
             records.append(trace_record)
-        
+
         # 如果没有任何特殊记录，至少保留一个占位符
         if not records:
+            output = str(final_state.get("output", "") or "").strip()
             records.append({
                 **base_record,
                 "phase": "brain",
                 "event": "brain.turn.summary",
-                "content": {"output": final_state.get("output", "")},
+                "content": output,
+                "meta": {"summary": output, "output": output},
             })
-        
+
         return records
-    
+
     @staticmethod
     def _summarize_trace(trace: list[dict[str, Any]]) -> str:
         """总结执行追踪"""
         if not trace:
             return ""
-        
+
         tool_calls = [t for t in trace if t.get("type") == "tool_call"]
         if not tool_calls:
             return f"{len(trace)} 个执行步骤"
-        
+
         tool_names = []
         for call in tool_calls:
             name = call.get("tool_name") or call.get("name") or ""
             if name and name not in tool_names:
                 tool_names.append(name)
-        
+
         if tool_names:
             return f"调用了 {len(tool_calls)} 次工具: {', '.join(tool_names[:5])}"
         return f"{len(tool_calls)} 次工具调用"
@@ -468,8 +491,11 @@ class RuntimeHost:
         media_items = self.context.build_media_context(media)
         return [{"type": "text", "text": str(content or "")}, *media_items]
 
-    def _resolve_turn_task_state(self, *, session_id: str, turn: TurnReply) -> TaskState:
-        task = self.kernel.get_task(turn.related_task_id or "") if turn.related_task_id else None
+    def _resolve_turn_task_state(self, *, session_id: str, turn: TurnReply) -> dict[str, Any]:
+        return self._resolve_session_task_state(session_id=session_id, task_id=turn.related_task_id or "")
+
+    def _resolve_session_task_state(self, *, session_id: str, task_id: str = "") -> dict[str, Any]:
+        task = self.kernel.get_task(task_id) if task_id else None
         if task is None:
             task = self.kernel.latest_task_for_session(session_id, include_terminal=True)
         if task is None:
@@ -503,11 +529,11 @@ class RuntimeHost:
         return {"task": compact} if compact else {}
 
     @staticmethod
-    def _compact_task_spec_for_session(task_spec: dict[str, Any] | None) -> TaskSpec:
-        """Keep TaskSpec structured while stripping heavy history from dialogue persistence."""
+    def _compact_task_spec_for_session(task_spec: dict[str, Any] | None) -> dict[str, Any]:
+        """Keep task params structured while stripping heavy history from dialogue persistence."""
         if not isinstance(task_spec, dict):
             return {}
-        compact: TaskSpec = {}
+        compact: dict[str, Any] = {}
         for key in (
             "task_id",
             "origin_message_id",
@@ -532,11 +558,11 @@ class RuntimeHost:
             compact["task_context"] = dict(task_context)
         return compact
 
-    def _compact_task_state_for_session(self, task_state: dict[str, Any] | None) -> TaskState:
-        """Persist a compact but fully structured TaskState into dialogue/session records."""
+    def _compact_task_state_for_session(self, task_state: dict[str, Any] | None) -> dict[str, Any]:
+        """Persist a compact but fully structured task snapshot into dialogue/session records."""
         if not isinstance(task_state, dict):
             return {}
-        compact: TaskState = {}
+        compact: dict[str, Any] = {}
         for key in (
             "invoked",
             "task_id",
@@ -571,14 +597,140 @@ class RuntimeHost:
             compact["params"] = compact_params
         return compact
 
+    async def _remember_task_origin_reply(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
+        if not self._is_task_origin_reply(event):
+            return
+        stream_state = self._reply_stream_state(event.payload.reply.metadata)
+        if stream_state in {"open", "delta", "superseded"}:
+            return
+        reply_id = str(event.payload.reply.reply_id or "").strip()
+        if not reply_id:
+            return
+        self._pending_task_origin_replies[reply_id] = event
+
+    async def _discard_task_origin_reply(self, event: BusEnvelope[DeliveryFailedPayload]) -> None:
+        reply_id = str(event.payload.reply_id or "").strip()
+        if reply_id:
+            self._pending_task_origin_replies.pop(reply_id, None)
+
+    async def _persist_task_origin_internal_reply(self, event: BusEnvelope[RepliedPayload]) -> None:
+        reply_id = str(event.payload.reply_id or "").strip()
+        if not reply_id:
+            return
+        pending = self._pending_task_origin_replies.pop(reply_id, None)
+        if pending is None or not self._is_task_origin_reply(pending):
+            return
+        session_id = str(event.session_id or "").strip()
+        if not session_id:
+            return
+        delivery_message = event.payload.delivery_message
+        assistant_timestamp = str(
+            event.payload.delivered_at
+            or delivery_message.timestamp
+            or datetime.now().isoformat()
+        )
+        self.thread_store.append_internal_messages(
+            session_id,
+            self._build_internal_turn_records(
+                self._task_origin_final_state(pending),
+                assistant_timestamp=assistant_timestamp,
+                message_id=str(delivery_message.message_id or reply_id),
+                source="task",
+            ),
+        )
+
+    def _task_origin_final_state(self, event: BusEnvelope[ReplyReadyPayload]) -> dict[str, Any]:
+        reply_metadata = dict(event.payload.reply.metadata or {})
+        task_event_type = str(reply_metadata.get("task_event_type", "") or "").strip()
+        task_id = str(event.payload.related_task_id or event.task_id or "").strip()
+        reply_text = self._reply_text(event.payload)
+        execution_summary = {
+            str(EventType.TASK_ASK): "任务副路需要用户补充信息。",
+            str(EventType.TASK_END): "任务副路已经结束，并回传结果。",
+        }.get(task_event_type, "任务副路产出了新的内部结果。")
+        return {
+            "turn_id": event.turn_id or "",
+            "output": reply_text,
+            "execution_summary": execution_summary,
+            "brain": {
+                "task_action": "none",
+                "final_decision": "ask_user" if event.payload.reply.kind == "ask_user" else "continue",
+                "execution_summary": execution_summary,
+                "reply_event_type": task_event_type or "task_origin",
+                "turn_id": event.turn_id or "",
+            },
+            "task": self._resolve_session_task_state(
+                session_id=str(event.session_id or "").strip(),
+                task_id=task_id,
+            ),
+        }
+
+    @staticmethod
+    def _reply_text(payload: ReplyReadyPayload) -> str:
+        if payload.reply.plain_text:
+            return str(payload.reply.plain_text).strip()
+        parts = [block.text for block in payload.reply.content_blocks if block.type == "text" and block.text]
+        return "\n".join(str(part).strip() for part in parts if str(part).strip()).strip()
+
+    @staticmethod
+    def _is_task_origin_reply(event: BusEnvelope[ReplyReadyPayload]) -> bool:
+        metadata = dict(event.payload.reply.metadata or {})
+        return str(metadata.get("front_origin", "") or "").strip() == "task"
+
+    @staticmethod
+    def _reply_stream_state(metadata: dict[str, Any] | None) -> str:
+        stream_state = str((metadata or {}).get("stream_state", "") or "").strip()
+        if stream_state == "final":
+            return "close"
+        return stream_state
+
+    @staticmethod
+    def _internal_summary_text(record: dict[str, Any]) -> str:
+        content = record.get("content", "")
+        if isinstance(content, list):
+            text_parts = [
+                str(block.get("text", "") or "").strip()
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            summary = " ".join(part for part in text_parts if part).strip()
+            if summary:
+                return summary
+        elif isinstance(content, dict):
+            summary = str(content.get("summary", "") or "").strip()
+            if summary:
+                return summary
+        else:
+            summary = str(content or "").strip()
+            if summary:
+                return summary
+
+        meta = record.get("meta", {})
+        if isinstance(meta, dict):
+            summary = str(meta.get("summary", "") or meta.get("trace_summary", "") or "").strip()
+            if summary:
+                return summary
+
+        task = record.get("task", {})
+        if isinstance(task, dict):
+            summary = str(task.get("summary", "") or "").strip()
+            if summary:
+                return summary
+
+        brain = record.get("brain", {})
+        if isinstance(brain, dict):
+            return str(brain.get("execution_summary", "") or "").strip()
+
+        return ""
+
     def _snapshot_turn_input(self, session_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         thread = self.thread_store.get_or_create(session_id)
         dialogue_history = thread.get_history(max_messages=self.memory_window, include_task_context=False)
         internal_history = self.thread_store.get_internal_messages(session_id, max_messages=self.memory_window)
         return dialogue_history, internal_history
 
-    @staticmethod
     def _build_history_context(
+        self,
         dialogue_history: list[dict[str, Any]],
         internal_history: list[dict[str, Any]],
     ) -> str:
@@ -598,11 +750,9 @@ class RuntimeHost:
             if role and text:
                 lines.append(f"{role}: {text}")
         for record in internal_history[-3:]:
-            content = record.get("content", {})
-            if isinstance(content, dict):
-                summary = str(content.get("summary", "") or "").strip()
-                if summary:
-                    lines.append(f"internal: {summary}")
+            summary = self._internal_summary_text(record)
+            if summary:
+                lines.append(f"internal: {summary}")
         return "\n".join(lines[-8:])
 
     def _persist_user_message(

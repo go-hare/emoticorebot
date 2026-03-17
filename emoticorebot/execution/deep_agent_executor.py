@@ -12,7 +12,6 @@ from emoticorebot.execution import backend as executor_backend
 from emoticorebot.execution import stream as executor_stream
 from emoticorebot.execution.executor_context import ExecutorContext
 from emoticorebot.execution.tool_runtime import DetailedProgressReporter, ExecutionToolRuntime
-from emoticorebot.protocol.task_models import TaskSpec
 from emoticorebot.protocol.task_result import TaskExecutionResult
 from emoticorebot.utils.llm_utils import blocks_to_llm_content
 
@@ -40,7 +39,7 @@ class DeepAgentExecutor:
 
     async def execute(
         self,
-        task_spec: TaskSpec,
+        task_spec: dict[str, Any],
         *,
         task_id: str,
         progress_reporter: DetailedProgressReporter | None = None,
@@ -123,7 +122,7 @@ class DeepAgentExecutor:
         finally:
             self.tool_runtime.clear()
 
-    def _build_thread_id(self, task_spec: TaskSpec, task_id: str) -> str:
+    def _build_thread_id(self, task_spec: dict[str, Any], task_id: str) -> str:
         session_id = str(task_spec.get("session_id", "") or "").strip()
         if session_id:
             return f"worker:{session_id}:{task_id}"
@@ -132,7 +131,7 @@ class DeepAgentExecutor:
         base = f"{channel}:{chat_id}" if channel or chat_id else "default"
         return f"worker:{base}:{task_id}"
 
-    def _resolve_task_timeout(self, task_spec: TaskSpec) -> float:
+    def _resolve_task_timeout(self, task_spec: dict[str, Any]) -> float:
         raw_timeout = task_spec.get("timeout_s")
         try:
             timeout_s = float(raw_timeout)
@@ -154,7 +153,7 @@ class DeepAgentExecutor:
     async def _invoke_agent(
         self,
         agent: Any,
-        task_spec: TaskSpec,
+        task_spec: dict[str, Any],
         thread_id: str,
         run_id: str,
         *,
@@ -181,6 +180,8 @@ class DeepAgentExecutor:
             for item in list(task_spec.get("success_criteria") or [])
             if str(item).strip()
         ]
+        memory_refs = [str(item).strip() for item in list(task_spec.get("memory_refs") or []) if str(item).strip()]
+        skill_hints = [str(item).strip() for item in list(task_spec.get("skill_hints") or []) if str(item).strip()]
 
         user_parts: list[str] = []
         if task_profile is not None and task_profile.task_hint:
@@ -194,6 +195,10 @@ class DeepAgentExecutor:
             user_parts.append("\n\n完成标准：\n- " + "\n- ".join(success_criteria))
         if expected_output:
             user_parts.append(f"\n\n期望输出：{expected_output}")
+        if memory_refs:
+            user_parts.append("\n\n相关任务经验：\n- " + "\n- ".join(memory_refs[:6]))
+        if skill_hints:
+            user_parts.append("\n\n技能提示：\n- " + "\n- ".join(skill_hints[:6]))
 
         context_parts: list[str] = []
         history_context = str(task_spec.get("history_context", "") or "").strip()

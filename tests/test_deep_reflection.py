@@ -60,6 +60,29 @@ def test_deep_reflection_normalize_skill_hints_uses_skill_hint_type() -> None:
     assert records[0]["payload"]["skill_name"] == "final-result-execution"
 
 
+def test_deep_reflection_derive_skill_names_from_content_when_missing() -> None:
+    records = DeepReflectionService._normalize_skill_hints(
+        [
+            {
+                "summary": "处理代码重构时优先先写测试",
+                "content": "先补测试再改代码",
+                "trigger": "代码重构",
+                "hint": "先写测试",
+            },
+            {
+                "summary": "陪伴对话里多用选项题收敛",
+                "content": "给用户2到3个选项收敛需求",
+                "trigger": "陪伴对话",
+                "hint": "给选项题",
+            },
+        ]
+    )
+
+    assert len(records) == 2
+    assert records[0]["payload"]["skill_name"] != records[1]["payload"]["skill_name"]
+    assert all(record["payload"]["skill_name"] != "unnamed-skill" for record in records)
+
+
 def test_deep_reflection_event_block_includes_updates_and_state() -> None:
     block = DeepReflectionService._build_event_block(
         [

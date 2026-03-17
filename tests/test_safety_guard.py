@@ -1,77 +1,41 @@
 from __future__ import annotations
 
-import asyncio
-
-from emoticorebot.bus.pubsub import PriorityPubSubBus
-from emoticorebot.delivery.service import DeliveryService
-from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
+from emoticorebot.protocol.envelope import build_envelope
 from emoticorebot.protocol.events import ReplyReadyPayload, TaskEndPayload
 from emoticorebot.protocol.task_models import ContentBlock, MessageRef, ReplyDraft
 from emoticorebot.protocol.topics import EventType
-from emoticorebot.runtime.transport_bus import TransportBus
 from emoticorebot.safety.guard import SafetyGuard
 
 
-async def _exercise_guard_redaction() -> None:
-    bus = PriorityPubSubBus()
-    transport = TransportBus()
-    guard = SafetyGuard(bus=bus)
-    delivery = DeliveryService(bus=bus, transport=transport)
-    captured: list[BusEnvelope[ReplyReadyPayload]] = []
-
-    guard.register()
-    delivery.register()
-
-    async def _capture(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        captured.append(event)
-
-    bus.subscribe(consumer="test", event_type=EventType.OUTPUT_REPLY_REDACTED, handler=_capture)
-
-    reply = ReplyDraft(reply_id="reply_1", kind="answer", plain_text="api_key=sk-abcdefghijklmnopqrstuv")
+def test_safety_guard_redacts_sensitive_reply() -> None:
+    guard = SafetyGuard()
     event = build_envelope(
         event_type=EventType.OUTPUT_REPLY_READY,
-        source="runtime",
+        source="brain",
         target="broadcast",
         session_id="sess_1",
         turn_id="turn_1",
         correlation_id="turn_1",
         payload=ReplyReadyPayload(
-            reply=reply,
+            reply=ReplyDraft(reply_id="reply_1", kind="answer", plain_text="api_key=sk-abcdefghijklmnopqrstuv"),
             origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
         ),
     )
 
-    await bus.publish(event)
-    await bus.drain()
+    result = guard.guard_reply_event(event)
 
-    assert len(captured) == 1
-    assert captured[0].payload.reply.plain_text == "api_key=[REDACTED]"
-    outbound = await transport.consume_outbound()
-    assert outbound.content == "api_key=[REDACTED]"
-
-
-def test_safety_guard_redacts_sensitive_reply() -> None:
-    asyncio.run(_exercise_guard_redaction())
+    assert result.decision == "redact"
+    assert result.blocked is None
+    assert result.event is not None
+    assert result.event.event_type == EventType.OUTPUT_REPLY_REDACTED
+    assert result.event.payload.reply.plain_text == "api_key=[REDACTED]"
 
 
-async def _exercise_guard_redaction_for_content_blocks() -> None:
-    bus = PriorityPubSubBus()
-    transport = TransportBus()
-    guard = SafetyGuard(bus=bus)
-    delivery = DeliveryService(bus=bus, transport=transport)
-    captured: list[BusEnvelope[ReplyReadyPayload]] = []
-
-    guard.register()
-    delivery.register()
-
-    async def _capture(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        captured.append(event)
-
-    bus.subscribe(consumer="test", event_type=EventType.OUTPUT_REPLY_REDACTED, handler=_capture)
-
+def test_safety_guard_redacts_sensitive_reply_blocks() -> None:
+    guard = SafetyGuard()
     event = build_envelope(
         event_type=EventType.OUTPUT_REPLY_READY,
-        source="runtime",
+        source="brain",
         target="broadcast",
         session_id="sess_1",
         turn_id="turn_1",
@@ -86,31 +50,42 @@ async def _exercise_guard_redaction_for_content_blocks() -> None:
         ),
     )
 
-    await bus.publish(event)
-    await bus.drain()
+    result = guard.guard_reply_event(event)
 
-    assert len(captured) == 1
-    assert captured[0].payload.reply.content_blocks[0].text == "password=[REDACTED]"
-    outbound = await transport.consume_outbound()
-    assert outbound.content == "password=[REDACTED]"
+    assert result.decision == "redact"
+    assert result.event is not None
+    assert result.event.payload.reply.content_blocks[0].text == "password=[REDACTED]"
 
 
-def test_safety_guard_redacts_sensitive_reply_blocks() -> None:
-    asyncio.run(_exercise_guard_redaction_for_content_blocks())
+def test_safety_guard_blocks_private_key_reply() -> None:
+    guard = SafetyGuard()
+    event = build_envelope(
+        event_type=EventType.OUTPUT_REPLY_READY,
+        source="brain",
+        target="broadcast",
+        session_id="sess_1",
+        turn_id="turn_1",
+        correlation_id="turn_1",
+        payload=ReplyReadyPayload(
+            reply=ReplyDraft(
+                reply_id="reply_3",
+                kind="answer",
+                plain_text="-----BEGIN PRIVATE KEY-----",
+            ),
+            origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
+        ),
+    )
+
+    result = guard.guard_reply_event(event)
+
+    assert result.decision == "block"
+    assert result.event is None
+    assert result.blocked is not None
+    assert result.blocked.policy_name == "secret_filter"
 
 
-async def _exercise_guard_redaction_for_task_output() -> None:
-    bus = PriorityPubSubBus()
-    guard = SafetyGuard(bus=bus)
-    captured: list[BusEnvelope[TaskEndPayload]] = []
-
-    guard.register()
-
-    async def _capture(event: BusEnvelope[TaskEndPayload]) -> None:
-        captured.append(event)
-
-    bus.subscribe(consumer="test", event_type=EventType.TASK_END, handler=_capture)
-
+def test_safety_guard_redacts_sensitive_task_output() -> None:
+    guard = SafetyGuard()
     event = build_envelope(
         event_type=EventType.TASK_END,
         source="runtime",
@@ -128,13 +103,7 @@ async def _exercise_guard_redaction_for_task_output() -> None:
         ),
     )
 
-    await bus.publish(event)
-    await bus.drain()
+    guarded = guard.guard_task_event(event)
 
-    assert len(captured) == 1
-    assert captured[0].payload.output == "api_key=[REDACTED]"
-    assert captured[0].payload.error == "password=[REDACTED]"
-
-
-def test_safety_guard_redacts_sensitive_task_output() -> None:
-    asyncio.run(_exercise_guard_redaction_for_task_output())
+    assert guarded.payload.output == "api_key=[REDACTED]"
+    assert guarded.payload.error == "password=[REDACTED]"

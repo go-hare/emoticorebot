@@ -6,17 +6,7 @@ from typing import Any, Literal, TypedDict
 
 from emoticorebot.brain.decision_packet import BrainControlPacket, BrainFinalDecision, BrainTaskAction
 from emoticorebot.protocol.events import TaskEvent, TaskEventType
-from emoticorebot.protocol.task_models import (
-    ReviewItem,
-    ReviewSeverity,
-    TaskControlState,
-    TaskInputRequest,
-    TaskLifecycleState,
-    TaskResultStatus,
-    TaskSpec,
-    TaskState,
-    TraceItem,
-)
+from emoticorebot.protocol.task_models import ReviewItem, ReviewSeverity, TraceItem
 from emoticorebot.protocol.task_result import TaskExecutionResult
 
 ReflectionSourceType = Literal["user_turn", "task_event", "internal_task_event"]  # 反思输入来源
@@ -73,7 +63,7 @@ class ReflectionInput(TypedDict, total=False):
     emotion: EmotionState  # 情绪快照
     brain: BrainControlPacket  # 主脑决策包
     execution: ExecutionInfo | None  # 标准化执行信息
-    task: TaskState  # 任务快照
+    task: dict[str, Any]  # 任务快照
     task_trace: list[TraceItem]  # 执行追踪
     metadata: dict[str, Any]  # 扩展元数据
 
@@ -168,15 +158,9 @@ __all__ = [
     "ReviewSeverity",
     "SkillHint",
     "StateUpdateDelta",
-    "TaskControlState",
     "TaskExecutionResult",
     "TaskEvent",
     "TaskEventType",
-    "TaskInputRequest",
-    "TaskLifecycleState",
-    "TaskResultStatus",
-    "TaskSpec",
-    "TaskState",
     "TraceItem",
     "TurnReflectionOutput",
 ]

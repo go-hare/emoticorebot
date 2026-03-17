@@ -4,30 +4,26 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-_RUNNING_STATUSES = {"created", "assigned", "running", "planned", "reviewing"}
-_WAITING_STATUSES = {"waiting", "waiting_input"}
-_DONE_STATUSES = {"done", "failed", "cancelled", "archived"}
-
-
-def task_state_from_status(status: str) -> str:
-    normalized = str(status or "").strip()
-    if normalized in _WAITING_STATUSES:
+def normalize_task_state(state: str) -> str:
+    normalized = str(state or "").strip()
+    if normalized == "waiting":
         return "waiting"
-    if normalized in _DONE_STATUSES:
+    if normalized == "done":
         return "done"
-    if normalized in _RUNNING_STATUSES:
+    if normalized == "running":
         return "running"
     return "running"
 
 
-def task_result_from_status(status: str) -> str:
-    normalized = str(status or "").strip()
+def normalize_task_result(state: str, result: str = "none") -> str:
+    normalized = str(state or "").strip()
+    normalized_result = str(result or "").strip() or "none"
+    if normalized != "done":
+        return "none"
+    if normalized_result in {"success", "failed", "cancelled"}:
+        return normalized_result
     if normalized == "done":
         return "success"
-    if normalized == "failed":
-        return "failed"
-    if normalized == "cancelled":
-        return "cancelled"
     return "none"
 
 
@@ -38,13 +34,14 @@ def project_task_from_runtime_snapshot(
     trace: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload = dict(snapshot or {})
-    status = str(payload.get("status", "") or "").strip()
+    state = str(payload.get("state", "") or "").strip()
+    result = str(payload.get("result", "") or "").strip()
     task: dict[str, Any] = {
         "invoked": True,
         "task_id": str(payload.get("task_id", "") or "").strip(),
         "title": str(payload.get("title", "") or "").strip(),
-        "state": task_state_from_status(status),
-        "result": task_result_from_status(status),
+        "state": normalize_task_state(state),
+        "result": normalize_task_result(state, result),
         "summary": str(payload.get("summary", "") or "").strip(),
         "error": str(payload.get("error", "") or "").strip(),
         "stage": str(payload.get("last_progress", "") or "").strip(),
@@ -170,10 +167,10 @@ def _drop_empty(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "normalize_task_result",
+    "normalize_task_state",
     "normalize_input_request",
     "project_task_for_memory",
     "project_task_from_runtime_snapshot",
     "project_task_from_session_view",
-    "task_result_from_status",
-    "task_state_from_status",
 ]

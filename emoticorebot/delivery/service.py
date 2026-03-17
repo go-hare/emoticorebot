@@ -32,17 +32,25 @@ class DeliveryService:
         self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_REPLY_REDACTED, handler=self._deliver)
 
     async def _deliver(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
-        if self._should_deliver is not None and not self._should_deliver(event):
-            await self._publish_failed(event, reason="stale_reply_dropped")
-            return
         payload = event.payload
         reply_metadata = dict(payload.reply.metadata or {})
-        stream_state = str(reply_metadata.get("stream_state", "") or "").strip()
+        stream_state = self._stream_state(reply_metadata)
         origin = payload.origin_message or MessageRef()
         channel = payload.channel_override or origin.channel
         chat_id = payload.chat_id_override or origin.chat_id
+        if self._should_deliver is not None and not self._should_deliver(event):
+            if self._is_stream(reply_metadata):
+                await self._publish_superseded(
+                    event,
+                    channel=channel,
+                    chat_id=chat_id,
+                    reply_metadata=reply_metadata,
+                )
+                return
+            await self._publish_failed(event, reason="stale_reply_dropped")
+            return
         if self._is_suppressed(reply_metadata):
-            if stream_state == "delta":
+            if stream_state in {"open", "delta", "superseded"}:
                 return
             delivered_at = self._utc_now()
             await self._publish_replied(
@@ -87,7 +95,7 @@ class DeliveryService:
             await self._publish_failed(event, reason="delivery_transport_error", retryable=True)
             return
 
-        if stream_state == "delta":
+        if stream_state in {"open", "delta", "superseded"}:
             return
 
         delivered_at = self._utc_now()
@@ -179,6 +187,50 @@ class DeliveryService:
     @staticmethod
     def _is_suppressed(reply_metadata: dict[str, object]) -> bool:
         return bool(reply_metadata.get("suppress_delivery"))
+
+    @staticmethod
+    def _is_stream(reply_metadata: dict[str, object]) -> bool:
+        return bool(str(reply_metadata.get("stream_id", "") or "").strip())
+
+    @staticmethod
+    def _stream_state(reply_metadata: dict[str, object]) -> str:
+        stream_state = str(reply_metadata.get("stream_state", "") or "").strip()
+        if stream_state == "final":
+            return "close"
+        return stream_state
+
+    async def _publish_superseded(
+        self,
+        event: BusEnvelope[ReplyReadyPayload],
+        *,
+        channel: str | None,
+        chat_id: str | None,
+        reply_metadata: dict[str, object],
+    ) -> None:
+        if self._transport is None or not channel or not chat_id:
+            return
+        stream_id = str(reply_metadata.get("stream_id", "") or "").strip()
+        if not stream_id:
+            return
+        await self._transport.publish_outbound(
+            OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content="",
+                message_id=self._delivery_message_id(event.payload.reply.reply_id),
+                reply_to=event.payload.reply.reply_to_message_id or (event.payload.origin_message.message_id if event.payload.origin_message else None),
+                metadata={
+                    "reply_id": event.payload.reply.reply_id,
+                    "reply_kind": event.payload.reply.kind,
+                    "session_id": event.session_id,
+                    "task_id": event.task_id,
+                    "_stream": True,
+                    "_stream_id": stream_id,
+                    "_stream_state": "superseded",
+                    "_stream_index": reply_metadata.get("stream_index"),
+                },
+            )
+        )
 
     @staticmethod
     def _utc_now() -> str:

@@ -257,8 +257,11 @@ class ChannelManager:
         key = (msg.channel, msg.chat_id, stream_id)
         state = self._stream_states.setdefault(key, _StreamDispatchState())
         stream_state = str(metadata.get("_stream_state", "") or "").strip()
-        if stream_state == "delta":
+        if stream_state in {"open", "delta"}:
             await channel.send_stream_delta(msg, state.data)
+            return
+        if stream_state == "superseded":
+            self._stream_states.pop(key, None)
             return
         await channel.send_stream_final(msg, state.data)
         self._stream_states.pop(key, None)

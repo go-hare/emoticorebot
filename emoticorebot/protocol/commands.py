@@ -14,7 +14,6 @@ from .task_models import (
     PlanStep,
     ProtocolModel,
     ProvidedInputBundle,
-    ReplyDraft,
     ReviewerContext,
     TaskRequestSpec,
     TaskStateSnapshot,
@@ -37,6 +36,7 @@ class TaskResumePayload(ProtocolModel):
     state: Literal["running"] = "running"
     user_input: str | None = None
     provided_inputs: ProvidedInputBundle | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
     message: str | None = None
 
 
@@ -45,14 +45,6 @@ class TaskCancelPayload(ProtocolModel):
     task_id: str
     reason: str | None = None
     by: Literal["user", "brain", "system"] | None = None
-
-
-class BrainReplyPayload(ProtocolModel):
-    command_id: str
-    reply: ReplyDraft
-    related_task_id: str | None = None
-    origin_message: MessageRef | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AssignAgentPayload(ProtocolModel):
@@ -106,7 +98,6 @@ class ControlCommandPayload(ProtocolModel):
 __all__ = [
     "ArchiveTaskPayload",
     "AssignAgentPayload",
-    "BrainReplyPayload",
     "CancelAgentPayload",
     "ControlAction",
     "ControlCommandPayload",

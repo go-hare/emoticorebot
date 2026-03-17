@@ -14,20 +14,6 @@ ReviewSeverity = Literal["low", "medium", "high", "critical"]
 ProvidedInputSource = Literal["user_message", "upload", "sensor", "system"]
 TaskVisibleState = Literal["running", "waiting", "done"]
 TaskVisibleResult = Literal["none", "success", "failed", "cancelled"]
-TaskLifecycleState = Literal[
-    "created",
-    "assigned",
-    "running",
-    "planned",
-    "waiting_input",
-    "reviewing",
-    "done",
-    "failed",
-    "cancelled",
-    "archived",
-]
-TaskControlState = Literal["running", "waiting_input", "completed", "failed"]
-TaskResultStatus = Literal["success", "partial", "pending", "failed"]
 TraceItem = dict[str, Any]
 
 
@@ -113,7 +99,8 @@ class ReplyDraft(ProtocolModel):
 
 class TaskStateSnapshot(ProtocolModel):
     task_id: str
-    status: str
+    state: TaskVisibleState
+    result: TaskVisibleResult = "none"
     state_version: int | None = None
     title: str | None = None
     summary: str | None = None
@@ -209,12 +196,6 @@ class PerceptionData(ProtocolModel):
     raw_ref: str | None = None
 
 
-# Transitional type aliases kept only so upper layers can be migrated in place.
-TaskInputRequest = InputRequest
-TaskSpec = TaskRequestSpec
-TaskState = dict[str, Any]
-
-
 __all__ = [
     "AgentInputContext",
     "AgentRole",
@@ -238,12 +219,6 @@ __all__ = [
     "TaskRequestSpec",
     "TaskVisibleResult",
     "TaskVisibleState",
-    "TaskResultStatus",
-    "TaskSpec",
-    "TaskState",
     "TaskStateSnapshot",
-    "TaskControlState",
-    "TaskInputRequest",
-    "TaskLifecycleState",
     "TraceItem",
 ]

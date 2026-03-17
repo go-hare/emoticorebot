@@ -7,12 +7,12 @@ import asyncio
 from emoticorebot.cli import commands
 from emoticorebot.cli.commands import _is_one_shot_task_settled, _pick_one_shot_task_id
 from emoticorebot.protocol.task_models import TaskRequestSpec
-from emoticorebot.runtime.state_machine import TaskStatus
+from emoticorebot.runtime.state_machine import TaskState
 from emoticorebot.runtime.task_store import RuntimeTaskRecord, TaskStore
 from emoticorebot.runtime.transport_bus import OutboundMessage
 
 
-def _task(task_id: str, *, status: TaskStatus, updated_at: str = "2026-03-16T00:00:00Z", state_version: int = 1):
+def _task(task_id: str, *, state: TaskState, updated_at: str = "2026-03-16T00:00:00Z", state_version: int = 1):
     return RuntimeTaskRecord(
         task_id=task_id,
         session_id="cli:direct",
@@ -20,7 +20,7 @@ def _task(task_id: str, *, status: TaskStatus, updated_at: str = "2026-03-16T00:
         request=TaskRequestSpec(request="test"),
         origin_message=None,
         title=task_id,
-        status=status,
+        state=state,
         updated_at=updated_at,
         state_version=state_version,
     )
@@ -28,7 +28,7 @@ def _task(task_id: str, *, status: TaskStatus, updated_at: str = "2026-03-16T00:
 
 def test_pick_one_shot_task_id_prefers_fallback() -> None:
     store = TaskStore()
-    store.add(_task("task_new", status=TaskStatus.RUNNING))
+    store.add(_task("task_new", state=TaskState.RUNNING))
     agent_loop = SimpleNamespace(kernel=SimpleNamespace(task_store=store))
 
     assert _pick_one_shot_task_id(agent_loop, "cli:direct", set(), "task_resume") == "task_resume"
@@ -36,18 +36,18 @@ def test_pick_one_shot_task_id_prefers_fallback() -> None:
 
 def test_pick_one_shot_task_id_returns_newest_new_task() -> None:
     store = TaskStore()
-    store.add(_task("task_old", status=TaskStatus.DONE, updated_at="2026-03-16T00:00:00Z"))
-    store.add(_task("task_newer", status=TaskStatus.RUNNING, updated_at="2026-03-16T00:00:02Z"))
-    store.add(_task("task_newest", status=TaskStatus.RUNNING, updated_at="2026-03-16T00:00:03Z"))
+    store.add(_task("task_old", state=TaskState.DONE, updated_at="2026-03-16T00:00:00Z"))
+    store.add(_task("task_newer", state=TaskState.RUNNING, updated_at="2026-03-16T00:00:02Z"))
+    store.add(_task("task_newest", state=TaskState.RUNNING, updated_at="2026-03-16T00:00:03Z"))
     agent_loop = SimpleNamespace(kernel=SimpleNamespace(task_store=store))
 
     assert _pick_one_shot_task_id(agent_loop, "cli:direct", {"task_old"}, None) == "task_newest"
 
 
 def test_is_one_shot_task_settled_accepts_waiting_input_and_terminal() -> None:
-    waiting = _task("task_waiting", status=TaskStatus.WAITING_INPUT)
-    done = _task("task_done", status=TaskStatus.DONE)
-    running = _task("task_running", status=TaskStatus.RUNNING)
+    waiting = _task("task_waiting", state=TaskState.WAITING)
+    done = _task("task_done", state=TaskState.DONE)
+    running = _task("task_running", state=TaskState.RUNNING)
     tasks = {
         waiting.task_id: waiting,
         done.task_id: done,
@@ -105,7 +105,7 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
             message_id: str | None,
         ) -> str:
             assert deliver is True
-            task = _task("task_streamed", status=TaskStatus.RUNNING)
+            task = _task("task_streamed", state=TaskState.RUNNING)
             task.session_id = session_key
             store.add(task)
             await self._bus.publish_outbound(
@@ -118,7 +118,7 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
                         "reply_kind": "answer",
                         "_stream": True,
                         "_stream_id": "stream_1",
-                        "_stream_state": "delta",
+                        "_stream_state": "open",
                     },
                 )
             )
@@ -132,12 +132,12 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
                         "reply_kind": "status",
                         "_stream": True,
                         "_stream_id": "stream_1",
-                        "_stream_state": "final",
+                        "_stream_state": "close",
                     },
                 )
             )
             await asyncio.sleep(0)
-            task.status = TaskStatus.DONE
+            task.state = TaskState.DONE
             task.touch()
             await self._bus.publish_outbound(
                 OutboundMessage(

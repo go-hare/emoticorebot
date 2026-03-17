@@ -8,6 +8,11 @@ from typing import Any
 import pytest
 
 from emoticorebot.execution.team import WorkerOutcome
+from emoticorebot.io.normalizer import InputNormalizer
+from emoticorebot.protocol.envelope import build_envelope
+from emoticorebot.protocol.events import ReplyReadyPayload
+from emoticorebot.protocol.task_models import ReplyDraft
+from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import TransportBus
 from emoticorebot.runtime.kernel import RuntimeKernel
 
@@ -151,7 +156,7 @@ async def _exercise_kernel_task_flow() -> None:
             assert "已完成" in second.content
             latest_task = kernel.latest_task_for_session("cli:direct", include_terminal=True)
             assert latest_task is not None
-            assert latest_task.status.value in {"done", "archived", "assigned", "running"}
+            assert latest_task.state.value in {"done", "running"}
         finally:
             await kernel.stop()
 
@@ -243,8 +248,8 @@ async def _exercise_kernel_persona_rollback() -> None:
         workspace = Path(tmp_dir)
         kernel = RuntimeKernel(workspace=workspace, transport=transport)
         try:
-            kernel._memory._persona.apply_updates_result("persona", ["先判断再执行"], scope="deep")
-            kernel._memory._persona.apply_updates_result("persona", ["结论优先返回"], scope="deep")
+            kernel.reflection_runtime.persona.apply_updates_result("persona", ["先判断再执行"], scope="deep")
+            kernel.reflection_runtime.persona.apply_updates_result("persona", ["结论优先返回"], scope="deep")
 
             result = await kernel.rollback_persona(
                 target="persona",
@@ -409,10 +414,10 @@ async def _exercise_kernel_streams_cli_reply_before_final_packet() -> None:
             second = await transport.consume_outbound()
 
             assert first.metadata["_stream"] is True
-            assert first.metadata["_stream_state"] == "delta"
+            assert first.metadata["_stream_state"] == "open"
             assert first.content == "你好。"
             assert second.metadata["_stream"] is True
-            assert second.metadata["_stream_state"] == "final"
+            assert second.metadata["_stream_state"] == "close"
             assert second.content == "你好。"
         finally:
             await kernel.stop()
@@ -453,10 +458,10 @@ async def _exercise_kernel_streams_channel_reply_before_final_packet() -> None:
             third = await transport.consume_outbound()
 
             assert first.metadata["_stream"] is True
-            assert first.metadata["_stream_state"] == "delta"
+            assert first.metadata["_stream_state"] == "open"
             assert "正在处理" in first.content
             assert second.metadata["_stream"] is True
-            assert second.metadata["_stream_state"] == "final"
+            assert second.metadata["_stream_state"] == "close"
             assert "正在处理" in second.content
             assert "已完成" in third.content
         finally:
@@ -497,11 +502,11 @@ async def _exercise_kernel_suppresses_task_flow_delivery() -> None:
             )
             assert "开始处理" in reply.content
 
-            def _task_archived() -> bool:
+            def _task_completed() -> bool:
                 task = kernel.latest_task_for_session("cli:suppressed-task", include_terminal=True)
-                return task is not None and task.status.value == "archived"
+                return task is not None and task.state.value == "done"
 
-            await _wait_for(_task_archived)
+            await _wait_for(_task_completed)
             assert transport.outbound_size == 0
         finally:
             await kernel.stop()
@@ -558,7 +563,8 @@ async def _exercise_kernel_interrupt_keeps_background_task_running() -> None:
                 confidence=0.9,
             )
 
-        kernel._team._worker._execute = _delayed_execute.__get__(kernel._team._worker, type(kernel._team._worker))
+        worker = kernel.task_runtime.worker
+        worker._execute = _delayed_execute.__get__(worker, type(worker))
 
         try:
             first = await kernel.handle_user_message(
@@ -572,16 +578,6 @@ async def _exercise_kernel_interrupt_keeps_background_task_running() -> None:
             assert "开始处理" in first.content
 
             await asyncio.wait_for(worker_started.wait(), timeout=1.0)
-            interrupted = await kernel.interrupt_session(
-                session_id="cli:keep-task",
-                channel="cli",
-                chat_id="direct",
-                sender_id="user",
-                message_id="msg_interrupt",
-                content="继续做，不要停",
-            )
-            assert interrupted is True
-
             second = await kernel.handle_user_message(
                 session_id="cli:keep-task",
                 channel="cli",
@@ -600,11 +596,72 @@ async def _exercise_kernel_interrupt_keeps_background_task_running() -> None:
             latest_task = kernel.latest_task_for_session("cli:keep-task", include_terminal=True)
             assert latest_task is not None
             assert latest_task.latest_result is not None
-            assert latest_task.status.value in {"done", "archived"}
-            assert latest_task.error != "interrupted_by_new_user_message"
+            assert latest_task.state.value == "done"
+            assert latest_task.error == ""
         finally:
             await kernel.stop()
 
 
-def test_runtime_kernel_interrupt_keeps_background_task_running() -> None:
+def test_runtime_kernel_new_input_keeps_background_task_running() -> None:
     asyncio.run(_exercise_kernel_interrupt_keeps_background_task_running())
+
+
+class _CapturingNormalizer(InputNormalizer):
+    def __init__(self) -> None:
+        self.last_barge_in: bool | None = None
+
+    def normalize_text_message(self, **kwargs):
+        self.last_barge_in = bool(kwargs.get("barge_in"))
+        return super().normalize_text_message(**kwargs)
+
+
+async def _exercise_kernel_marks_new_input_as_barge_in_when_stream_is_active() -> None:
+    transport = TransportBus()
+    brain_llm = _FakeBrainLLM(
+        _brain_packet(
+            task_action="none",
+            final_decision="answer",
+            final_message="收到，你继续说。",
+        )
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(workspace=Path(tmp_dir), transport=transport, brain_llm=brain_llm)
+        kernel._input_normalizer = _CapturingNormalizer()
+        try:
+            await kernel.start()
+            await kernel._bus.publish(
+                build_envelope(
+                    event_type=EventType.OUTPUT_REPLY_APPROVED,
+                    source="guard",
+                    target="broadcast",
+                    session_id="cli:barge",
+                    turn_id="turn_stream",
+                    correlation_id="turn_stream",
+                    payload=ReplyReadyPayload(
+                        reply=ReplyDraft(
+                            reply_id="reply_stream_open",
+                            kind="answer",
+                            plain_text="你",
+                            metadata={"stream_id": "stream_turn_stream", "stream_state": "open"},
+                        )
+                    ),
+                )
+            )
+            await kernel._bus.drain()
+
+            reply = await kernel.handle_user_message(
+                session_id="cli:barge",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_barge",
+                content="打断一下",
+            )
+            assert reply.content == "收到，你继续说。"
+            assert kernel._input_normalizer.last_barge_in is True
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_marks_new_input_as_barge_in_when_stream_is_active() -> None:
+    asyncio.run(_exercise_kernel_marks_new_input_as_barge_in_when_stream_is_active())

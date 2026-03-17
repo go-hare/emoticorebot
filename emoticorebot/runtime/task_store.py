@@ -15,8 +15,9 @@ from emoticorebot.protocol.task_models import (
     ReviewItem,
     TaskRequestSpec,
     TaskStateSnapshot,
+    TaskVisibleResult,
 )
-from emoticorebot.runtime.state_machine import TaskStatus
+from emoticorebot.runtime.state_machine import TaskState
 
 
 def utc_now() -> str:
@@ -31,8 +32,10 @@ class RuntimeTaskRecord:
     request: TaskRequestSpec
     origin_message: MessageRef | None
     title: str
-    status: TaskStatus = TaskStatus.CREATED
+    state: TaskState = TaskState.RUNNING
+    result: TaskVisibleResult = "none"
     state_version: int = 1
+    created_at: str = field(default_factory=utc_now)
     summary: str = ""
     error: str = ""
     assignee: AgentRole | None = None
@@ -43,6 +46,7 @@ class RuntimeTaskRecord:
     last_progress: str = ""
     input_request: InputRequest | None = None
     updated_at: str = field(default_factory=utc_now)
+    ended_at: str | None = None
     current_assignment_id: str | None = None
     current_review_id: str | None = None
     latest_result: TaskResultReportPayload | None = None
@@ -50,11 +54,22 @@ class RuntimeTaskRecord:
     latest_findings: list[ReviewItem] = field(default_factory=list)
     suppress_delivery: bool = False
 
+    def __post_init__(self) -> None:
+        if self.state is TaskState.DONE:
+            if self.result == "none":
+                self.result = "success"
+            if not self.ended_at:
+                self.ended_at = self.updated_at
+        else:
+            self.result = "none"
+            self.ended_at = None
+
     def snapshot(self) -> TaskStateSnapshot:
         return TaskStateSnapshot(
             task_id=self.task_id,
             state_version=self.state_version,
-            status=self.status.value,
+            state=self.state.value,
+            result=self.result,
             title=self.title,
             summary=self.summary or None,
             error=self.error or None,
@@ -100,11 +115,7 @@ class TaskStore:
         return [task for task in self._tasks.values() if task.session_id == wanted]
 
     def active_for_session(self, session_id: str) -> list[RuntimeTaskRecord]:
-        return [
-            task
-            for task in self.for_session(session_id)
-            if task.status not in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.ARCHIVED}
-        ]
+        return [task for task in self.for_session(session_id) if task.state is not TaskState.DONE]
 
     def latest_for_session(
         self,
@@ -119,7 +130,7 @@ class TaskStore:
 
     def waiting_for_session(self, session_id: str) -> RuntimeTaskRecord | None:
         for task in reversed(self.for_session(session_id)):
-            if task.status is TaskStatus.WAITING_INPUT:
+            if task.state is TaskState.WAITING:
                 return task
         return None
 

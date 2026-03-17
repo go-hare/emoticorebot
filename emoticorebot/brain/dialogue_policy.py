@@ -11,6 +11,7 @@ from emoticorebot.protocol.events import (
     TaskUpdatePayload,
 )
 from emoticorebot.runtime.task_store import RuntimeTaskRecord
+from emoticorebot.utils.task_projection import normalize_task_result, normalize_task_state
 
 
 class DialoguePolicy:
@@ -52,18 +53,18 @@ class DialoguePolicy:
     def status(task: RuntimeTaskRecord | None) -> str:
         if task is None:
             return "当前没有进行中的任务。"
+        state = normalize_task_state(task.state.value)
+        result = normalize_task_result(task.state.value, task.result)
         status_text = {
-            "created": "刚创建",
-            "assigned": "已派发",
             "running": "执行中",
-            "planned": "已规划",
-            "waiting_input": "等你补充信息",
-            "reviewing": "审核中",
-            "done": "已完成",
-            "failed": "失败",
-            "cancelled": "已取消",
-            "archived": "已归档",
-        }.get(task.status.value, task.status.value)
+            "waiting": "等你补充信息",
+            "done": {
+                "success": "已完成",
+                "failed": "失败",
+                "cancelled": "已取消",
+                "none": "已结束",
+            }.get(result, "已结束"),
+        }.get(state, "执行中")
         if task.summary:
             return f"{task.title or task.task_id} 当前{status_text}。{task.summary}"
         if task.last_progress:

@@ -5,9 +5,9 @@ import asyncio
 import pytest
 
 from emoticorebot.bus import BackpressureController, BackpressureError, PriorityPubSubBus, block, redact
+from emoticorebot.protocol.commands import TaskCancelPayload
 from emoticorebot.protocol.envelope import build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload, SystemSignalPayload, UserMessagePayload
-from emoticorebot.protocol.safety_models import SafetyAuditPayload
+from emoticorebot.protocol.events import ReplyReadyPayload, StableInputPayload, SystemSignalPayload
 from emoticorebot.protocol.task_models import MessageRef, ReplyDraft
 from emoticorebot.protocol.topics import EventType, Topic
 
@@ -32,28 +32,34 @@ def test_priority_bus_dispatches_higher_priority_first() -> None:
             seen.append(event.event_type)
 
         bus.subscribe(consumer="brain", handler=handler, topic=Topic.INPUT_EVENT)
+        bus.subscribe(consumer="runtime", handler=handler, topic=Topic.TASK_COMMAND)
 
         low = build_envelope(
-            event_type=EventType.INPUT_USER_MESSAGE,
-            source="channel",
+            event_type=EventType.INPUT_STABLE,
+            source="input_normalizer",
             target="broadcast",
-            payload=UserMessagePayload(
+            payload=StableInputPayload(
+                input_id="turn_1",
+                input_kind="text",
+                channel_kind="chat",
                 message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
                 plain_text="hello",
+                metadata={"channel_kind": "chat"},
             ),
         )
         high = build_envelope(
-            event_type=EventType.INPUT_INTERRUPT,
-            source="channel",
-            target="broadcast",
-            payload=SystemSignalPayload(signal_id="interrupt", signal_type="warning"),
+            event_type=EventType.TASK_CANCEL,
+            source="brain",
+            target="runtime",
+            session_id="sess_1",
+            payload=TaskCancelPayload(command_id="cmd_1", task_id="task_1"),
         )
 
         await bus.publish(low)
         await bus.publish(high)
         await bus.drain()
 
-        assert seen == [EventType.INPUT_INTERRUPT, EventType.INPUT_USER_MESSAGE]
+        assert seen == [EventType.TASK_CANCEL, EventType.INPUT_STABLE]
 
     asyncio.run(_run())
 
@@ -96,14 +102,16 @@ def test_interceptor_can_redact_and_block() -> None:
             text = outcome.event.payload.reply.plain_text or ""
             if "secret" in text:
                 audit_event = build_envelope(
-                    event_type=EventType.SAFETY_BLOCKED,
-                    source="safety",
+                    event_type=EventType.SYSTEM_HEALTH_WARNING,
+                    source="guard",
                     target="broadcast",
                     session_id=outcome.event.session_id,
-                    payload=SafetyAuditPayload(
-                        decision_id="decision_block",
-                        decision="blocked",
-                        intercepted_event_type=outcome.event.event_type,
+                    payload=SystemSignalPayload(
+                        signal_id="signal_block",
+                        signal_type="health_warning",
+                        reason="reply_blocked",
+                        related_event_id=outcome.event.event_id,
+                        severity="warning",
                     ),
                 )
                 return block(outcome.event, audit_event)
@@ -119,28 +127,30 @@ def test_interceptor_can_redact_and_block() -> None:
                 }
             )
             audit_event = build_envelope(
-                event_type=EventType.SAFETY_REDACTED,
-                source="safety",
+                event_type=EventType.SYSTEM_WARNING,
+                source="guard",
                 target="broadcast",
                 session_id=outcome.event.session_id,
-                payload=SafetyAuditPayload(
-                    decision_id="decision_redact",
-                    decision="redacted",
-                    intercepted_event_type=outcome.event.event_type,
+                payload=SystemSignalPayload(
+                    signal_id="signal_redact",
+                    signal_type="warning",
+                    reason="reply_redacted",
+                    related_event_id=outcome.event.event_id,
+                    severity="warning",
                 ),
             )
             return redact(redacted_event, audit_event)
 
         bus.register_interceptor(topic=Topic.OUTPUT_EVENT, handler=interceptor)
         bus.subscribe(consumer="delivery", handler=delivery, topic=Topic.OUTPUT_EVENT)
-        bus.subscribe(consumer="audit", handler=audit, topic=Topic.SAFETY_EVENT)
+        bus.subscribe(consumer="audit", handler=audit, topic=Topic.SYSTEM_SIGNAL)
 
         await bus.publish(_reply_event(reply_id="reply_2", text="contains token"))
         await bus.publish(_reply_event(reply_id="reply_3", text="contains secret"))
         await bus.drain()
 
         assert delivered == ["[REDACTED]"]
-        assert audits == [EventType.SAFETY_REDACTED, EventType.SAFETY_BLOCKED]
+        assert audits == [EventType.SYSTEM_WARNING, EventType.SYSTEM_HEALTH_WARNING]
 
     asyncio.run(_run())
 
@@ -216,12 +226,16 @@ def test_subscriber_failure_emits_warning_and_bus_keeps_running() -> None:
         try:
             for message_id in ("msg_1", "msg_2"):
                 event = build_envelope(
-                    event_type=EventType.INPUT_USER_MESSAGE,
-                    source="channel",
+                    event_type=EventType.INPUT_STABLE,
+                    source="input_normalizer",
                     target="broadcast",
-                    payload=UserMessagePayload(
+                    payload=StableInputPayload(
+                        input_id=message_id,
+                        input_kind="text",
+                        channel_kind="chat",
                         message=MessageRef(channel="cli", chat_id="direct", message_id=message_id),
                         plain_text="hello",
+                        metadata={"channel_kind": "chat"},
                     ),
                 )
                 await bus.publish(event)

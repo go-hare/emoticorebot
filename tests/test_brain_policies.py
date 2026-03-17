@@ -3,8 +3,8 @@ from __future__ import annotations
 from emoticorebot.brain.dialogue_policy import DialoguePolicy
 from emoticorebot.brain.task_policy import TaskPolicy
 from emoticorebot.protocol.events import TaskAskPayload, TaskEndPayload
-from emoticorebot.protocol.task_models import InputRequest, TaskRequestSpec
-from emoticorebot.runtime.state_machine import TaskStatus
+from emoticorebot.protocol.task_models import TaskRequestSpec
+from emoticorebot.runtime.state_machine import TaskState
 from emoticorebot.runtime.task_store import RuntimeTaskRecord
 
 
@@ -12,7 +12,8 @@ def _task(
     *,
     task_id: str = "task_1",
     title: str = "创建 add.py",
-    status: TaskStatus = TaskStatus.RUNNING,
+    state: TaskState = TaskState.RUNNING,
+    result: str = "none",
     summary: str = "",
     last_progress: str = "",
 ) -> RuntimeTaskRecord:
@@ -23,7 +24,8 @@ def _task(
         request=TaskRequestSpec(request="请新增 add.py 新增方法 add(a,b) 返回 a+b", title=title),
         origin_message=None,
         title=title,
-        status=status,
+        state=state,
+        result=result,
         summary=summary,
         last_progress=last_progress,
     )
@@ -44,7 +46,7 @@ def test_task_policy_returns_status_for_existing_active_task() -> None:
 
 
 def test_task_policy_uses_waiting_task_as_resume_target() -> None:
-    waiting = _task(status=TaskStatus.WAITING_INPUT, summary="需要城市")
+    waiting = _task(state=TaskState.WAITING, summary="需要城市")
 
     directive = TaskPolicy().decide("上海", [waiting])
 
@@ -72,9 +74,19 @@ def test_dialogue_policy_formats_status_with_progress() -> None:
     assert "正在执行内部任务" in text
 
 
+def test_dialogue_policy_uses_compact_task_states_and_results() -> None:
+    running = DialoguePolicy.status(_task(state=TaskState.RUNNING))
+    waiting = DialoguePolicy.status(_task(state=TaskState.WAITING))
+    failed = DialoguePolicy.status(_task(state=TaskState.DONE, result="failed", summary="命令执行失败"))
+
+    assert "执行中" in running
+    assert "等你补充信息" in waiting
+    assert "失败" in failed
+
+
 def test_dialogue_policy_formats_need_input() -> None:
     text = DialoguePolicy.task_ask(
-        _task(status=TaskStatus.WAITING_INPUT),
+        _task(state=TaskState.WAITING),
         TaskAskPayload(
             task_id="task_1",
             question="你想查哪个城市？",
@@ -89,7 +101,7 @@ def test_dialogue_policy_formats_need_input() -> None:
 
 def test_dialogue_policy_formats_task_result() -> None:
     text = DialoguePolicy().task_end(
-        _task(status=TaskStatus.DONE),
+        _task(state=TaskState.DONE),
         TaskEndPayload(
             task_id="task_1",
             result="success",

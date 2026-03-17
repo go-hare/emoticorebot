@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from emoticorebot.types import BrainControlPacket, EmotionState, ExecutionInfo, ReflectionInput, TaskState
+from emoticorebot.types import BrainControlPacket, EmotionState, ExecutionInfo, ReflectionInput
 
 _SOURCE_TYPES = {"user_turn", "task_event", "internal_task_event"}
 _EXECUTION_STATUSES = {"none", "done", "need_more", "failed", "waiting_input", "running", "partial", "completed"}
@@ -169,20 +169,20 @@ def _normalize_execution_info(value: Any) -> ExecutionInfo | None:
 def _build_execution_info(
     data: dict[str, Any],
     metadata: dict[str, Any],
-    task: TaskState,
+    task: dict[str, Any],
 ) -> ExecutionInfo | None:
     execution_metadata = _normalize_dict(metadata.get("execution"))
     execution_summary = _as_text(data.get("execution_summary")) or _as_text(execution_metadata.get("summary"))
     task_action = _as_text(execution_metadata.get("task_action"))
 
     status = _normalize_execution_status(
-        lifecycle_status=_as_text(task.get("status")),
-        result_status=_as_text(task.get("result_status")),
+        state=_as_text(task.get("state")),
+        result=_as_text(task.get("result")),
     )
     if status == "none":
         status = _normalize_execution_status(
-            lifecycle_status=_as_text(execution_metadata.get("status")),
-            result_status=_as_text(execution_metadata.get("result_status")),
+            state=_as_text(execution_metadata.get("status")),
+            result=_as_text(execution_metadata.get("result_status")),
         )
 
     missing = _normalize_str_list(task.get("missing"))
@@ -217,15 +217,17 @@ def _build_execution_info(
     }
 
 
-def _normalize_execution_status(*, lifecycle_status: str, result_status: str) -> str:
-    lifecycle = _as_text(lifecycle_status).lower()
-    result = _as_text(result_status).lower()
+def _normalize_execution_status(*, state: str, result: str) -> str:
+    lifecycle = _as_text(state).lower()
+    result = _as_text(result).lower()
 
-    if lifecycle == "waiting_input":
+    if lifecycle in {"waiting", "waiting_input"}:
         return "waiting_input"
     if lifecycle == "blocked_input":
         return "need_more"
     if lifecycle == "failed" or result == "failed":
+        return "failed"
+    if lifecycle == "done" and result == "cancelled":
         return "failed"
     if result == "partial":
         return "partial"
@@ -240,12 +242,12 @@ def _normalize_execution_status(*, lifecycle_status: str, result_status: str) ->
     return "none"
 
 
-def _normalize_task_state(value: Any) -> TaskState:
+def _normalize_task_state(value: Any) -> dict[str, Any]:
     payload = _normalize_dict(value)
     if not payload:
         return {}
 
-    normalized: TaskState = {}
+    normalized: dict[str, Any] = {}
 
     if "invoked" in payload:
         normalized["invoked"] = bool(payload.get("invoked"))
@@ -253,13 +255,11 @@ def _normalize_task_state(value: Any) -> TaskState:
     for key in (
         "task_id",
         "title",
-        "status",
-        "result_status",
-        "control_state",
+        "state",
+        "result",
         "summary",
         "analysis",
         "error",
-        "stage_info",
         "recommended_action",
     ):
         text = _as_text(payload.get(key))

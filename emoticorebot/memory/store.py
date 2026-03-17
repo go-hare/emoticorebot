@@ -207,7 +207,7 @@ class MemoryStore:
                 for record in experience
                 if str(record.get("type", "")) in {"tool_experience", "error_pattern", "workflow_pattern"}
             ][:3],
-            "skill_hints": [self._compact_record(record) for record in hints[:3]],
+            "skill_hints": [self._compact_skill_hint_record(record) for record in hints[:3]],
         }
 
     def recent(self, *, limit: int = 10) -> list[dict[str, Any]]:
@@ -257,6 +257,24 @@ class MemoryStore:
             "importance": int(record.get("importance", 5) or 5),
             "confidence": float(record.get("confidence", 0.0) or 0.0),
         }
+
+    @staticmethod
+    def _compact_skill_hint_record(record: dict[str, Any]) -> dict[str, Any]:
+        compact = MemoryStore._compact_record(record)
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        hint_payload = {
+            key: value
+            for key, value in {
+                "skill_name": str(payload.get("skill_name", "") or "").strip(),
+                "skill_id": str(payload.get("skill_id", "") or "").strip(),
+                "trigger": str(payload.get("trigger", "") or "").strip(),
+                "hint": str(payload.get("hint", "") or "").strip(),
+            }.items()
+            if value
+        }
+        if hint_payload:
+            compact["payload"] = hint_payload
+        return compact
 
     def _get_vector_index(self) -> ChromaPersistentIndex | None:
         if self._vector_ready:

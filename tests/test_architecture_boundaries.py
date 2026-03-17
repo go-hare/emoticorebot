@@ -18,6 +18,17 @@ def test_legacy_runtime_modules_are_removed() -> None:
     assert not (PACKAGE_ROOT / "agent" / "central" / "central.py").exists()
     assert not any((PACKAGE_ROOT / "agent" / "central").glob("*.py"))
     assert not (PACKAGE_ROOT / "session" / "manager.py").exists()
+    assert (PACKAGE_ROOT / "session" / "runtime.py").exists()
+    assert (PACKAGE_ROOT / "front" / "controller.py").exists()
+    assert (PACKAGE_ROOT / "task" / "runtime.py").exists()
+    assert (PACKAGE_ROOT / "task" / "coordinator.py").exists()
+    assert (PACKAGE_ROOT / "reflection" / "runtime.py").exists()
+    assert (PACKAGE_ROOT / "io" / "normalizer.py").exists()
+    assert (PACKAGE_ROOT / "delivery" / "runtime.py").exists()
+    assert not (PACKAGE_ROOT / "runtime" / "service.py").exists()
+    assert not (PACKAGE_ROOT / "runtime" / "scheduler.py").exists()
+    assert not (PACKAGE_ROOT / "runtime" / "running_task.py").exists()
+    assert not (PACKAGE_ROOT / "runtime" / "task_state.py").exists()
     assert not (PACKAGE_ROOT / "runtime" / "runtime.py").exists()
     assert not (PACKAGE_ROOT / "brain" / "companion_brain.py").exists()
     assert not (PACKAGE_ROOT / "brain" / "event_narrator.py").exists()
@@ -27,6 +38,7 @@ def test_legacy_runtime_modules_are_removed() -> None:
     assert not (PACKAGE_ROOT / "agent" / "reflection" / "coordinator.py").exists()
     assert not (PACKAGE_ROOT / "agent" / "reflection" / "memory.py").exists()
     assert not (PACKAGE_ROOT / "agent" / "reflection" / "skill.py").exists()
+    assert not (PACKAGE_ROOT / "protocol" / "safety_models.py").exists()
 
 
 def test_runtime_host_depends_on_thread_store_not_session_manager() -> None:
@@ -50,18 +62,54 @@ def test_command_shortcuts_preserve_message_correlation() -> None:
 def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     bootstrap = _read("emoticorebot/bootstrap.py")
     kernel = _read("emoticorebot/runtime/kernel.py")
+    executive = _read("emoticorebot/brain/executive.py")
+    front = _read("emoticorebot/front/controller.py")
+    task = _read("emoticorebot/task/runtime.py")
 
     assert "_turn_locks" not in bootstrap
     assert "_state_locks" not in bootstrap
-    assert "await self.kernel.interrupt_session(" in bootstrap
     assert "if turn_id and not self.kernel.is_current_turn(" in bootstrap
     assert "self.kernel = RuntimeKernel(" in bootstrap
     assert "session_lock_for" not in kernel
     assert "self._pending_turns" in kernel
     assert "self._pending_turn_by_session" in kernel
     assert "self._active_turn_by_session" in kernel
-    assert "EventType.INPUT_INTERRUPT" in kernel
     assert "EventType.OUTPUT_REPLY_APPROVED" in kernel
+    assert "InputNormalizer()" in kernel
+    assert "TaskRuntime(" in kernel
+    assert "FrontRuntime(" in kernel
+    assert "ReflectionRuntime(" in kernel
+    assert "DeliveryRuntime(" in kernel
+    assert "self._guard =" not in kernel
+    assert "reply_guard=self._guard" not in kernel
+    assert "self._runtime =" not in kernel
+    assert "self._team =" not in kernel
+    assert "self._brain =" not in kernel
+    assert "self._memory =" not in kernel
+    assert "self._delivery =" not in kernel
+    assert "self._reply_guard = reply_guard or SafetyGuard()" in front
+    assert "self._reply_guard = reply_guard or SafetyGuard()" in executive
+    assert "guard_reply_event" in executive
+    assert "RuntimeService" not in task
+    assert "EventType.INPUT_STABLE" in executive
+    assert "EventType.INPUT_INTERRUPT" not in executive
+    assert "OUTPUT_REPLY_BLOCKED" not in _read("emoticorebot/protocol/topics.py")
+    assert "SAFETY_BLOCKED" not in _read("emoticorebot/protocol/topics.py")
+    assert "INPUT_VOICE_CHUNK" not in _read("emoticorebot/protocol/topics.py")
+
+
+def test_runtime_wrappers_no_longer_describe_themselves_as_compatibility_layers() -> None:
+    front = _read("emoticorebot/front/controller.py")
+    task = _read("emoticorebot/task/runtime.py")
+    delivery = _read("emoticorebot/delivery/runtime.py")
+    reflection = _read("emoticorebot/reflection/runtime.py")
+    session = _read("emoticorebot/session/runtime.py")
+
+    assert "Compatibility" not in front
+    assert "Compatibility" not in task
+    assert "Compatibility" not in delivery
+    assert "Compatibility" not in reflection
+    assert "Compatibility" not in session
 
 
 def test_reflection_pipeline_runs_through_kernel_memory_governor() -> None:
@@ -91,10 +139,11 @@ def test_reflection_pipeline_runs_through_kernel_memory_governor() -> None:
     assert "MemoryRetrieval" in context
     assert "MemoryStore(" not in context
     assert "memory.skill_hint" in crystallizer
-    assert "self._memory = MemoryGovernor(" in kernel
+    assert "self._reflection = ReflectionRuntime(" in kernel
     assert "return await self.kernel.run_deep_reflection" in host
     assert "_schedule_turn_reflection" not in host
     assert "ReflectionCoordinator" not in host
+    assert "event_type=EventType.REFLECT_DEEP" not in executive
 
 
 def test_memory_phase6_is_split_into_governor_persona_and_reflection_modules() -> None:
@@ -128,7 +177,6 @@ def test_source_tree_has_no_legacy_brain_or_task_system_imports() -> None:
         source = path.read_text(encoding="utf-8")
         assert "from emoticorebot.agent.brain import" not in source, str(path)
         assert "from emoticorebot.agent.central" not in source, str(path)
-        assert "from emoticorebot.session.manager import" not in source, str(path)
         assert "SessionTaskSystem" not in source, str(path)
         assert "BrainService" not in source, str(path)
         assert "CentralAgentService" not in source, str(path)

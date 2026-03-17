@@ -66,7 +66,7 @@ async def _exercise_channel_manager_uses_stream_hooks() -> None:
                 channel="fake",
                 chat_id="chat_1",
                 content="你",
-                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "delta"},
+                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "open"},
             )
         )
         await bus.publish_outbound(
@@ -74,7 +74,7 @@ async def _exercise_channel_manager_uses_stream_hooks() -> None:
                 channel="fake",
                 chat_id="chat_1",
                 content="你好。",
-                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "final"},
+                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "close"},
             )
         )
 
@@ -107,7 +107,7 @@ async def _exercise_channel_manager_fallback_stream_suppresses_final_duplicate()
                 channel="fallback",
                 chat_id="chat_1",
                 content="你",
-                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "delta"},
+                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "open"},
             )
         )
         await bus.publish_outbound(
@@ -115,7 +115,7 @@ async def _exercise_channel_manager_fallback_stream_suppresses_final_duplicate()
                 channel="fallback",
                 chat_id="chat_1",
                 content="你好。",
-                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "final"},
+                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "close"},
             )
         )
 
@@ -147,7 +147,7 @@ async def _exercise_channel_manager_clears_interrupted_stream_state_on_followup_
                 channel="fake",
                 chat_id="chat_1",
                 content="你",
-                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "delta"},
+                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "open"},
             )
         )
 
@@ -179,6 +179,48 @@ async def _exercise_channel_manager_clears_interrupted_stream_state_on_followup_
 
 def test_channel_manager_clears_interrupted_stream_state_on_followup_message() -> None:
     asyncio.run(_exercise_channel_manager_clears_interrupted_stream_state_on_followup_message())
+
+
+async def _exercise_channel_manager_clears_superseded_stream_state() -> None:
+    bus = TransportBus()
+    manager = ChannelManager(Config(), bus)
+    channel = _FakeStreamingChannel(bus)
+    manager.channels = {"fake": channel}
+
+    dispatch = asyncio.create_task(manager._dispatch_outbound())
+    try:
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="fake",
+                chat_id="chat_1",
+                content="你",
+                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "open"},
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while len(channel.delta_calls) < 1 and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="fake",
+                chat_id="chat_1",
+                content="",
+                metadata={"_stream": True, "_stream_id": "stream_1", "_stream_state": "superseded"},
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while manager._stream_states and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+
+        assert manager._stream_states == {}
+    finally:
+        dispatch.cancel()
+        await asyncio.gather(dispatch, return_exceptions=True)
+
+
+def test_channel_manager_clears_superseded_stream_state() -> None:
+    asyncio.run(_exercise_channel_manager_clears_superseded_stream_state())
 
 
 class _FakeMatrixChannel(BaseChannel):

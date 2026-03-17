@@ -6,8 +6,6 @@ import json
 import re
 from typing import Any, Literal, TypedDict
 
-from emoticorebot.protocol.task_models import TaskSpec
-
 BrainFinalDecision = Literal["", "answer", "ask_user", "continue"]
 BrainTaskAction = Literal["", "none", "create_task", "resume_task", "cancel_task"]
 
@@ -34,7 +32,7 @@ class BrainControlPacket(TypedDict, total=False):
     task_reason: str
     final_decision: BrainFinalDecision
     final_message: str
-    task: TaskSpec
+    task: dict[str, Any]
 
 
 def normalize_str_list(value: Any) -> list[str]:
@@ -48,7 +46,7 @@ def normalize_str_list(value: Any) -> list[str]:
     return out
 
 
-def normalize_task_spec(payload: Any, actual: dict[str, Any] | None = None) -> TaskSpec:
+def normalize_task_spec(payload: Any, actual: dict[str, Any] | None = None) -> dict[str, Any]:
     """Normalize task spec for v3 brain packets."""
     model_task = payload if isinstance(payload, dict) else {}
     source = dict(actual or {})
@@ -58,7 +56,7 @@ def normalize_task_spec(payload: Any, actual: dict[str, Any] | None = None) -> T
             return source.get(key)
         return model_task.get(key)
 
-    task: TaskSpec = {}
+    task: dict[str, Any] = {}
     text_fields = (
         "task_id",
         "title",

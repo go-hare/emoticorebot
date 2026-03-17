@@ -7,27 +7,20 @@ from enum import StrEnum
 
 class Topic(StrEnum):
     INPUT_EVENT = "input.event"
-    BRAIN_COMMAND = "brain.command"
+    REFLECTION_EVENT = "reflection.event"
     RUNTIME_COMMAND = "runtime.command"
     TASK_COMMAND = "task.command"
     TASK_REPORT = "task.report"
     TASK_EVENT = "task.event"
     OUTPUT_EVENT = "output.event"
     MEMORY_SIGNAL = "memory.signal"
-    SAFETY_EVENT = "safety.event"
     CONTROL_COMMAND = "control.command"
     PERCEPTION_EVENT = "perception.event"
     SYSTEM_SIGNAL = "system.signal"
 
 
 class EventType(StrEnum):
-    INPUT_USER_MESSAGE = "input.event.user_message"
-    INPUT_INTERRUPT = "input.event.interrupt"
-    INPUT_VOICE_CHUNK = "input.event.voice_chunk"
-    INPUT_CHANNEL_ATTACHMENT = "input.event.channel_attachment"
-
-    BRAIN_REPLY = "brain.command.reply"
-    BRAIN_ASK_USER = "brain.command.ask_user"
+    INPUT_STABLE = "input.event.stable"
 
     TASK_CREATE = "task.command.create"
     TASK_RESUME = "task.command.resume"
@@ -53,24 +46,19 @@ class EventType(StrEnum):
     TASK_ASK = "task.event.ask"
     TASK_END = "task.event.end"
 
+    REFLECT_LIGHT = "reflection.event.light"
+    REFLECT_DEEP = "reflection.event.deep"
+
     OUTPUT_REPLY_READY = "output.event.reply_ready"
     OUTPUT_REPLY_APPROVED = "output.event.reply_approved"
     OUTPUT_REPLY_REDACTED = "output.event.reply_redacted"
-    OUTPUT_REPLY_BLOCKED = "output.event.reply_blocked"
     OUTPUT_REPLIED = "output.event.replied"
     OUTPUT_DELIVERY_FAILED = "output.event.delivery_failed"
 
-    MEMORY_REFLECT_TURN = "memory.signal.reflect_turn"
-    MEMORY_REFLECT_DEEP = "memory.signal.reflect_deep"
     MEMORY_WRITE_REQUEST = "memory.signal.write_request"
     MEMORY_WRITE_COMMITTED = "memory.signal.write_committed"
     MEMORY_UPDATE_PERSONA = "memory.signal.update_persona"
     MEMORY_UPDATE_USER_MODEL = "memory.signal.update_user_model"
-
-    SAFETY_ALLOWED = "safety.event.allowed"
-    SAFETY_REDACTED = "safety.event.redacted"
-    SAFETY_BLOCKED = "safety.event.blocked"
-    SAFETY_WARNING = "safety.event.warning"
 
     CONTROL_SPEAK = "control.command.speak"
     CONTROL_MOVE = "control.command.move"

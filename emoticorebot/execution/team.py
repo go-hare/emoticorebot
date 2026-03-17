@@ -388,6 +388,7 @@ class WorkerAgent(_AsyncAgent):
             "history_context": task.request.history_context or "",
             "constraints": list(task.request.constraints),
             "success_criteria": list(task.request.success_criteria),
+            "memory_refs": list(task.request.memory_refs),
             "skill_hints": list(task.request.skill_hints),
             "session_id": str(session_id or task.session_id or "").strip(),
             "task_context": task_context,
