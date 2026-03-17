@@ -137,14 +137,9 @@ def normalize_brain_packet(payload: Any, *, current_context: dict[str, Any]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Raw JSON parsing – used when the brain agent outputs plain text JSON
-# instead of structured_response.
+# Tagged brain output parsing.
 # ---------------------------------------------------------------------------
 
-_JSON_FENCE_RE = re.compile(
-    r"```(?:json)?\s*\n?(.*?)\n?\s*```",
-    re.DOTALL,
-)
 _TAG_SECTION_RE = re.compile(r"^\s*####([a-zA-Z_]+)####\s*$", re.MULTILINE)
 
 
@@ -158,14 +153,8 @@ def _extract_brain_text(result: Any) -> str:
     elif not isinstance(result, dict):
         result = {"messages": [result]}
 
-    structured = result.get("structured_response")
-    if _looks_like_brain_packet(structured):
-        return json.dumps(structured, ensure_ascii=False)
-
     messages = result.get("messages", [])
     for msg in reversed(messages):
-        if _looks_like_brain_packet(msg):
-            return json.dumps(msg, ensure_ascii=False)
         if isinstance(msg, str) and msg.strip():
             return msg.strip()
         content = getattr(msg, "content", None)
@@ -272,18 +261,17 @@ def _parse_tagged_brain_text(text: str) -> dict[str, Any] | None:
 
 
 def parse_raw_brain_json(result: Any) -> dict[str, Any]:
-    """Extract a ``BrainControlPacket`` from an agent result.
-
-    The function first tries ``result["structured_response"]`` (backward-compat).
-    If that is *None*, it falls back to extracting the last AI message's text
-    content. It supports:
-    - plain JSON objects
-    - tagged output blocks: ``####user####`` and ``####task####``
-
-    Raises ``RuntimeError`` when the text cannot be parsed.
-    """
+    """Extract a ``BrainControlPacket`` from tagged brain output."""
     if _looks_like_brain_packet(result):
         return result
+    if isinstance(result, dict):
+        structured = result.get("structured_response")
+        if _looks_like_brain_packet(structured):
+            return structured
+        messages = result.get("messages", [])
+        for msg in reversed(messages):
+            if _looks_like_brain_packet(msg):
+                return msg
 
     text = _extract_brain_text(result)
     if not text:
@@ -293,20 +281,7 @@ def parse_raw_brain_json(result: Any) -> dict[str, Any]:
     if tagged_payload is not None:
         return tagged_payload
 
-    # Strip markdown ```json ... ``` fences if present
-    fence_match = _JSON_FENCE_RE.search(text)
-    if fence_match:
-        text = fence_match.group(1).strip()
-
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Brain agent output is neither tagged text nor valid JSON: {exc}\n---\n{text[:500]}") from exc
-
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"Brain agent JSON is not an object: {type(payload).__name__}")
-
-    return payload
+    raise RuntimeError("Brain agent output must contain non-empty ####user#### and ####task#### blocks")
 
 
 __all__ = [

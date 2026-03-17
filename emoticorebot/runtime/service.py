@@ -23,6 +23,7 @@ class RuntimeService:
 
     def register(self) -> None:
         self._bus.subscribe(consumer="runtime", topic=Topic.BRAIN_COMMAND, handler=self._dispatch)
+        self._bus.subscribe(consumer="runtime", topic=Topic.TASK_COMMAND, handler=self._dispatch)
         self._bus.subscribe(consumer="runtime", topic=Topic.TASK_REPORT, handler=self._dispatch)
         self._bus.subscribe(consumer="runtime", event_type=EventType.RUNTIME_ARCHIVE_TASK, handler=self._dispatch)
         self._bus.subscribe(consumer="runtime", event_type=EventType.SYSTEM_TIMEOUT, handler=self._dispatch)

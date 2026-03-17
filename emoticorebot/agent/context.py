@@ -38,6 +38,9 @@ class ContextBuilder:
     def build_task_memory_bundle(self, *, query: str, limit: int = 6) -> dict[str, list[dict[str, Any]]]:
         return self.memory.build_task_memory_bundle(query=query, limit=limit)
 
+    def close(self) -> None:
+        self.memory.close()
+
     def build_brain_decision_system_prompt(
         self,
         query: str = "",

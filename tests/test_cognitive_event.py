@@ -37,6 +37,41 @@ def test_build_turn_event_persists_full_brain_emotion_snapshot() -> None:
     assert brain_state["emotion_prompt"] == "[当前情绪: 兴奋] 非常兴奋，话比较多，喜欢感叹号"
 
 
+def test_build_turn_event_projects_task_to_three_state_view() -> None:
+    events = CognitiveEvent.build_turn_events(
+        reflection_input={
+            "message_id": "msg_task",
+            "session_id": "cli:task",
+            "user_input": "继续做任务",
+            "assistant_output": "我继续处理。",
+            "task": {
+                "task_id": "task_1",
+                "title": "创建 add.py",
+                "state": "waiting",
+                "result": "none",
+                "summary": "等待用户补充路径",
+            },
+            "execution": {
+                "invoked": True,
+                "status": "waiting_input",
+                "summary": "需要补充路径",
+                "missing": ["path"],
+            },
+        },
+        importance=0.6,
+        turn_reflection={"summary": "任务仍在等待输入。"},
+    )
+
+    assert len(events) == 1
+    assert events[0].task == {
+        "used": True,
+        "state": "waiting",
+        "result": "none",
+        "summary": "等待用户补充路径",
+        "missing": ["path"],
+    }
+
+
 def test_state_update_keeps_all_delta_keys_even_when_zero() -> None:
     state_update = TurnReflectionService._normalize_state_update(
         {

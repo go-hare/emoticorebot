@@ -23,30 +23,28 @@ from .task_models import (
 ControlAction = Literal["speak", "move", "stop", "manipulate"]
 
 
-class BrainCreateTaskPayload(TaskRequestSpec):
+class TaskCreatePayload(ProtocolModel):
     command_id: str
-    origin_message: MessageRef
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    request: str
+    goal: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+    message: str | None = None
 
 
-class BrainResumeTaskPayload(ProtocolModel):
+class TaskResumePayload(ProtocolModel):
     command_id: str
     task_id: str
+    state: Literal["running"] = "running"
     user_input: str | None = None
     provided_inputs: ProvidedInputBundle | None = None
-    origin_message: MessageRef | None = None
-    resume_reason: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    message: str | None = None
 
 
-class BrainCancelTaskPayload(ProtocolModel):
+class TaskCancelPayload(ProtocolModel):
     command_id: str
     task_id: str
     reason: str | None = None
-    user_visible_reason: str | None = None
-    hard_stop: bool | None = None
-    origin_message: MessageRef | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    by: Literal["user", "brain", "system"] | None = None
 
 
 class BrainReplyPayload(ProtocolModel):
@@ -108,12 +106,12 @@ class ControlCommandPayload(ProtocolModel):
 __all__ = [
     "ArchiveTaskPayload",
     "AssignAgentPayload",
-    "BrainCancelTaskPayload",
-    "BrainCreateTaskPayload",
     "BrainReplyPayload",
-    "BrainResumeTaskPayload",
     "CancelAgentPayload",
     "ControlAction",
     "ControlCommandPayload",
     "ResumeAgentPayload",
+    "TaskCancelPayload",
+    "TaskCreatePayload",
+    "TaskResumePayload",
 ]

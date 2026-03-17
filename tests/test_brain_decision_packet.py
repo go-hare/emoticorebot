@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from emoticorebot.brain.decision_packet import normalize_brain_packet, parse_raw_brain_json
 
 
@@ -78,3 +80,10 @@ task_id=task_123
         "final_message": "好，我继续处理。",
         "task": {"task_id": "task_123"},
     }
+
+
+def test_json_text_brain_output_is_rejected() -> None:
+    with pytest.raises(RuntimeError, match="####user#### and ####task####"):
+        parse_raw_brain_json(
+            '{"task_action":"none","final_decision":"answer","final_message":"1 + 1 = 2"}'
+        )

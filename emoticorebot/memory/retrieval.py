@@ -35,5 +35,8 @@ class MemoryRetrieval:
     def build_brain_context(self, *, query: str, limit: int = 8) -> str:
         return self._store.build_brain_context(query=query, limit=limit)
 
+    def close(self) -> None:
+        self._store.close()
+
 
 __all__ = ["MemoryRetrieval"]

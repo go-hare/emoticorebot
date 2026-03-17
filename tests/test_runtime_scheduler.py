@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from emoticorebot.protocol.commands import (
-    BrainCancelTaskPayload,
-    BrainCreateTaskPayload,
     BrainReplyPayload,
-    BrainResumeTaskPayload,
+    TaskCancelPayload,
+    TaskCreatePayload,
+    TaskResumePayload,
 )
 from emoticorebot.protocol.envelope import build_envelope
 from emoticorebot.protocol.events import (
@@ -24,44 +24,52 @@ def _origin_message() -> MessageRef:
     return MessageRef(channel="cli", chat_id="direct", message_id="msg_1")
 
 
-def test_create_task_emits_created_then_assigned_then_assign_command() -> None:
+def _create_payload(*, request: str, **context: object) -> TaskCreatePayload:
+    payload_context = {"origin_message": _origin_message().model_dump(exclude_none=True)}
+    payload_context.update(context)
+    return TaskCreatePayload(command_id="cmd_1", request=request, context=payload_context)
+
+
+def test_create_task_emits_update_then_assign_command() -> None:
     scheduler = RuntimeScheduler()
     command = build_envelope(
-        event_type=EventType.BRAIN_CREATE_TASK,
+        event_type=EventType.TASK_CREATE,
         source="brain",
         target="runtime",
         session_id="sess_1",
-        payload=BrainCreateTaskPayload(
+        payload=TaskCreatePayload(
             command_id="cmd_1",
             request="fix the bug",
-            preferred_agent="worker",
-            origin_message=_origin_message(),
+            context={
+                "preferred_agent": "worker",
+                "origin_message": _origin_message().model_dump(exclude_none=True),
+            },
         ),
     )
 
     outputs = scheduler.dispatch(command)
 
     assert [event.event_type for event in outputs] == [
-        EventType.TASK_EVENT_CREATED,
-        EventType.TASK_EVENT_ASSIGNED,
+        EventType.TASK_UPDATE,
         EventType.RUNTIME_ASSIGN_AGENT,
     ]
+    assert outputs[0].payload.message.startswith("开始处理")
     assert outputs[1].payload.agent_role == "worker"
 
 
-def test_need_input_then_resume_emits_assigned_and_resume_command() -> None:
+def test_need_input_then_resume_emits_update_and_resume_command() -> None:
     scheduler = RuntimeScheduler()
     create_outputs = scheduler.dispatch(
         build_envelope(
-            event_type=EventType.BRAIN_CREATE_TASK,
+            event_type=EventType.TASK_CREATE,
             source="brain",
             target="runtime",
             session_id="sess_1",
-            payload=BrainCreateTaskPayload(command_id="cmd_1", request="collect more info", origin_message=_origin_message()),
+            payload=_create_payload(request="collect more info"),
         )
     )
     task_id = create_outputs[0].task_id
-    assignment_id = create_outputs[2].payload.assignment_id
+    assignment_id = create_outputs[1].payload.assignment_id
 
     scheduler.dispatch(
         build_envelope(
@@ -92,48 +100,44 @@ def test_need_input_then_resume_emits_assigned_and_resume_command() -> None:
             ),
         )
     )
-    assert need_input[0].event_type == EventType.TASK_EVENT_NEED_INPUT
+    assert need_input[0].event_type == EventType.TASK_ASK
+    assert need_input[0].payload.question == "Which city?"
 
     resumed = scheduler.dispatch(
         build_envelope(
-            event_type=EventType.BRAIN_RESUME_TASK,
+            event_type=EventType.TASK_RESUME,
             source="brain",
             target="runtime",
             session_id="sess_1",
             task_id=task_id,
-            payload=BrainResumeTaskPayload(
+            payload=TaskResumePayload(
                 command_id="cmd_resume",
                 task_id=task_id,
+                state="running",
                 user_input="Shanghai",
-                origin_message=_origin_message(),
             ),
         )
     )
 
     assert [event.event_type for event in resumed] == [
-        EventType.TASK_EVENT_ASSIGNED,
+        EventType.TASK_UPDATE,
         EventType.RUNTIME_RESUME_AGENT,
     ]
 
 
-def test_review_flow_emits_reviewing_then_approved_then_result() -> None:
+def test_review_flow_emits_summary_then_terminal_end() -> None:
     scheduler = RuntimeScheduler()
     create_outputs = scheduler.dispatch(
         build_envelope(
-            event_type=EventType.BRAIN_CREATE_TASK,
+            event_type=EventType.TASK_CREATE,
             source="brain",
             target="runtime",
             session_id="sess_1",
-            payload=BrainCreateTaskPayload(
-                command_id="cmd_1",
-                request="write deployment plan",
-                review_policy="required",
-                origin_message=_origin_message(),
-            ),
+            payload=_create_payload(request="write deployment plan", review_policy="required"),
         )
     )
     task_id = create_outputs[0].task_id
-    assignment_id = create_outputs[2].payload.assignment_id
+    assignment_id = create_outputs[1].payload.assignment_id
 
     scheduler.dispatch(
         build_envelope(
@@ -164,7 +168,7 @@ def test_review_flow_emits_reviewing_then_approved_then_result() -> None:
     )
 
     assert [event.event_type for event in review_outputs] == [
-        EventType.TASK_EVENT_REVIEWING,
+        EventType.TASK_SUMMARY,
         EventType.RUNTIME_ASSIGN_AGENT,
     ]
 
@@ -183,41 +187,39 @@ def test_review_flow_emits_reviewing_then_approved_then_result() -> None:
         )
     )
 
-    assert [event.event_type for event in approved_outputs] == [
-        EventType.TASK_EVENT_APPROVED,
-        EventType.TASK_EVENT_RESULT,
-    ]
-    assert approved_outputs[1].payload.result_text == "deployment plan"
+    assert [event.event_type for event in approved_outputs] == [EventType.TASK_END]
+    assert approved_outputs[0].payload.output == "deployment plan"
 
 
-def test_cancel_from_assigned_emits_cancelled_and_cancel_agent() -> None:
+def test_cancel_from_assigned_emits_end_and_cancel_agent() -> None:
     scheduler = RuntimeScheduler()
     create_outputs = scheduler.dispatch(
         build_envelope(
-            event_type=EventType.BRAIN_CREATE_TASK,
+            event_type=EventType.TASK_CREATE,
             source="brain",
             target="runtime",
             session_id="sess_1",
-            payload=BrainCreateTaskPayload(command_id="cmd_1", request="stop me later", origin_message=_origin_message()),
+            payload=_create_payload(request="stop me later"),
         )
     )
     task_id = create_outputs[0].task_id
 
     cancelled = scheduler.dispatch(
         build_envelope(
-            event_type=EventType.BRAIN_CANCEL_TASK,
+            event_type=EventType.TASK_CANCEL,
             source="brain",
             target="runtime",
             session_id="sess_1",
             task_id=task_id,
-            payload=BrainCancelTaskPayload(command_id="cmd_cancel", task_id=task_id, reason="user_requested"),
+            payload=TaskCancelPayload(command_id="cmd_cancel", task_id=task_id, reason="user_requested"),
         )
     )
 
     assert [event.event_type for event in cancelled] == [
-        EventType.TASK_EVENT_CANCELLED,
+        EventType.TASK_END,
         EventType.RUNTIME_CANCEL_AGENT,
     ]
+    assert cancelled[0].payload.result == "cancelled"
 
 
 def test_reply_command_becomes_reply_ready() -> None:
@@ -245,15 +247,15 @@ def test_reply_command_for_terminal_task_does_not_archive_before_delivery_ack() 
     scheduler = RuntimeScheduler()
     create_outputs = scheduler.dispatch(
         build_envelope(
-            event_type=EventType.BRAIN_CREATE_TASK,
+            event_type=EventType.TASK_CREATE,
             source="brain",
             target="runtime",
             session_id="sess_1",
-            payload=BrainCreateTaskPayload(command_id="cmd_1", request="ship it", origin_message=_origin_message()),
+            payload=_create_payload(request="ship it"),
         )
     )
     task_id = create_outputs[0].task_id
-    assignment_id = create_outputs[2].payload.assignment_id
+    assignment_id = create_outputs[1].payload.assignment_id
 
     scheduler.dispatch(
         build_envelope(
@@ -305,15 +307,15 @@ def test_replied_for_terminal_task_emits_archive_command() -> None:
     scheduler = RuntimeScheduler()
     create_outputs = scheduler.dispatch(
         build_envelope(
-            event_type=EventType.BRAIN_CREATE_TASK,
+            event_type=EventType.TASK_CREATE,
             source="brain",
             target="runtime",
             session_id="sess_1",
-            payload=BrainCreateTaskPayload(command_id="cmd_1", request="ship it", origin_message=_origin_message()),
+            payload=_create_payload(request="ship it"),
         )
     )
     task_id = create_outputs[0].task_id
-    assignment_id = create_outputs[2].payload.assignment_id
+    assignment_id = create_outputs[1].payload.assignment_id
 
     scheduler.dispatch(
         build_envelope(
@@ -368,15 +370,15 @@ def test_delivery_failed_for_terminal_task_emits_archive_command() -> None:
     scheduler = RuntimeScheduler()
     create_outputs = scheduler.dispatch(
         build_envelope(
-            event_type=EventType.BRAIN_CREATE_TASK,
+            event_type=EventType.TASK_CREATE,
             source="brain",
             target="runtime",
             session_id="sess_1",
-            payload=BrainCreateTaskPayload(command_id="cmd_1", request="ship the change", origin_message=_origin_message()),
+            payload=_create_payload(request="ship the change"),
         )
     )
     task_id = create_outputs[0].task_id
-    assignment_id = create_outputs[2].payload.assignment_id
+    assignment_id = create_outputs[1].payload.assignment_id
 
     scheduler.dispatch(
         build_envelope(

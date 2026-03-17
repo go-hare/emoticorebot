@@ -5,8 +5,8 @@ import asyncio
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.delivery.service import DeliveryService
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload, TaskResultEventPayload
-from emoticorebot.protocol.task_models import ContentBlock, MessageRef, ReplyDraft, TaskStateSnapshot
+from emoticorebot.protocol.events import ReplyReadyPayload, TaskEndPayload
+from emoticorebot.protocol.task_models import ContentBlock, MessageRef, ReplyDraft
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import TransportBus
 from emoticorebot.safety.guard import SafetyGuard
@@ -99,32 +99,32 @@ def test_safety_guard_redacts_sensitive_reply_blocks() -> None:
     asyncio.run(_exercise_guard_redaction_for_content_blocks())
 
 
-async def _exercise_guard_redaction_for_task_blocks() -> None:
+async def _exercise_guard_redaction_for_task_output() -> None:
     bus = PriorityPubSubBus()
     guard = SafetyGuard(bus=bus)
-    captured: list[BusEnvelope[TaskResultEventPayload]] = []
+    captured: list[BusEnvelope[TaskEndPayload]] = []
 
     guard.register()
 
-    async def _capture(event: BusEnvelope[TaskResultEventPayload]) -> None:
+    async def _capture(event: BusEnvelope[TaskEndPayload]) -> None:
         captured.append(event)
 
-    bus.subscribe(consumer="test", event_type=EventType.TASK_EVENT_RESULT, handler=_capture)
+    bus.subscribe(consumer="test", event_type=EventType.TASK_END, handler=_capture)
 
     event = build_envelope(
-        event_type=EventType.TASK_EVENT_RESULT,
+        event_type=EventType.TASK_END,
         source="runtime",
         target="broadcast",
         session_id="sess_1",
         turn_id="turn_1",
         task_id="task_1",
         correlation_id="task_1",
-        payload=TaskResultEventPayload(
+        payload=TaskEndPayload(
             task_id="task_1",
-            state=TaskStateSnapshot(task_id="task_1", status="done"),
+            result="success",
             summary="done",
-            result_blocks=[ContentBlock(type="text", text="api_key=sk-abcdefghijklmnopqrstuv")],
-            artifacts=[ContentBlock(type="text", text="password=secret123")],
+            output="api_key=sk-abcdefghijklmnopqrstuv",
+            error="password=secret123",
         ),
     )
 
@@ -132,9 +132,9 @@ async def _exercise_guard_redaction_for_task_blocks() -> None:
     await bus.drain()
 
     assert len(captured) == 1
-    assert captured[0].payload.result_blocks[0].text == "api_key=[REDACTED]"
-    assert captured[0].payload.artifacts[0].text == "password=[REDACTED]"
+    assert captured[0].payload.output == "api_key=[REDACTED]"
+    assert captured[0].payload.error == "password=[REDACTED]"
 
 
-def test_safety_guard_redacts_sensitive_task_blocks() -> None:
-    asyncio.run(_exercise_guard_redaction_for_task_blocks())
+def test_safety_guard_redacts_sensitive_task_output() -> None:
+    asyncio.run(_exercise_guard_redaction_for_task_output())

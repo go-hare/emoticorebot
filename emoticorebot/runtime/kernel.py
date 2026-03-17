@@ -22,6 +22,7 @@ from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import TransportBus
 from emoticorebot.runtime.service import RuntimeService
 from emoticorebot.safety.guard import SafetyGuard
+from emoticorebot.session.runtime import SessionRuntime
 
 
 @dataclass(slots=True)
@@ -52,13 +53,16 @@ class RuntimeKernel:
         providers_config: ProvidersConfig | None = None,
     ) -> None:
         self._brain_llm = brain_llm
+        self._context_builder = context_builder
         self._bus = PriorityPubSubBus()
         self._runtime = RuntimeService(bus=self._bus)
+        self._session = SessionRuntime(bus=self._bus, task_store=self._runtime.scheduler.task_store)
         self._brain = ExecutiveBrain(
             bus=self._bus,
             task_store=self._runtime.scheduler.task_store,
             brain_llm=brain_llm,
             context_builder=context_builder,
+            session_runtime=self._session,
         )
         self._team = AgentTeam(
             bus=self._bus,
@@ -81,6 +85,7 @@ class RuntimeKernel:
         self._active_turn_by_session: dict[str, str] = {}
         self._started = False
 
+        self._session.register()
         self._runtime.register()
         self._brain.register()
         self._team.register()
@@ -95,6 +100,10 @@ class RuntimeKernel:
     def task_store(self):
         return self._runtime.scheduler.task_store
 
+    @property
+    def session_runtime(self) -> SessionRuntime:
+        return self._session
+
     async def start(self) -> None:
         if self._started:
             return
@@ -105,6 +114,8 @@ class RuntimeKernel:
         await self._brain.stop()
         await self._team.stop()
         await self._bus.stop()
+        self._memory.close()
+        self._close_context_builder()
         self._started = False
 
     async def handle_user_message(
@@ -142,7 +153,7 @@ class RuntimeKernel:
         envelope = build_envelope(
             event_type=EventType.INPUT_USER_MESSAGE,
             source="gateway",
-            target="brain",
+            target="broadcast",
             session_id=session_id,
             turn_id=turn_id,
             correlation_id=turn_id,
@@ -174,6 +185,7 @@ class RuntimeKernel:
 
     def clear_session(self, session_id: str) -> None:
         self.task_store.remove_session(session_id)
+        self._session.clear_session(session_id)
         self._pending_turn_by_session.pop(session_id, None)
         self._active_turn_by_session.pop(session_id, None)
 
@@ -288,6 +300,11 @@ class RuntimeKernel:
         if current_turn_id is None:
             return True
         return current_turn_id == turn_id
+
+    def _close_context_builder(self) -> None:
+        close = getattr(self._context_builder, "close", None)
+        if callable(close):
+            close()
 
 
 __all__ = ["RuntimeKernel", "TurnReply"]

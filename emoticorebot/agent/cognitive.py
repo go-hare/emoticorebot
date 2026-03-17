@@ -10,6 +10,8 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from emoticorebot.types import ReflectionInput
 
+from emoticorebot.utils.task_projection import project_task_for_memory
+
 
 @dataclass
 class CognitiveEvent:
@@ -249,25 +251,7 @@ class CognitiveEvent:
         execution = (
             reflection_input.get("execution") if isinstance(reflection_input.get("execution"), dict) else {}
         )
-
-        summary = str(task.get("summary", "") or task.get("analysis", "") or execution.get("summary", "") or "").strip()
-        status = str(task.get("status", "") or execution.get("status", "") or "none").strip() or "none"
-        result_status = str(task.get("result_status", "") or "").strip()
-        control_state = str(task.get("control_state", "") or "idle").strip()
-
-        raw_missing = list(task.get("missing", []) or execution.get("missing", []) or [])
-        missing = [str(item).strip() for item in raw_missing if str(item).strip()]
-
-        used = bool(execution.get("invoked")) or bool(task)
-
-        return {
-            "used": used,
-            "status": status,
-            "result_status": result_status,
-            "summary": summary,
-            "control_state": control_state,
-            "missing": missing,
-        }
+        return project_task_for_memory(task, execution=execution)
 
     @staticmethod
     def _normalize_turn_reflection(value: dict[str, Any] | None) -> dict[str, Any]:

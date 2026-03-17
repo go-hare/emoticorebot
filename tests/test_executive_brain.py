@@ -4,9 +4,9 @@ import asyncio
 
 from emoticorebot.brain.executive import ExecutiveBrain
 from emoticorebot.bus.pubsub import PriorityPubSubBus
+from emoticorebot.protocol.commands import TaskCancelPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.commands import BrainCancelTaskPayload, BrainReplyPayload
-from emoticorebot.protocol.events import InterruptPayload, TaskProgressEventPayload, TaskResultEventPayload
+from emoticorebot.protocol.events import InterruptPayload, TaskEndPayload
 from emoticorebot.protocol.task_models import MessageRef, ProtocolModel, TaskRequestSpec
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.state_machine import TaskStatus
@@ -51,18 +51,19 @@ async def _exercise_terminal_reflection() -> None:
     task = store.require("task_1")
     await bus.publish(
         build_envelope(
-            event_type=EventType.TASK_EVENT_RESULT,
+            event_type=EventType.TASK_END,
             source="runtime",
             target="broadcast",
             session_id="sess_1",
             turn_id="turn_1",
             task_id="task_1",
             correlation_id="task_1",
-            payload=TaskResultEventPayload(
+            payload=TaskEndPayload(
                 task_id="task_1",
-                state=task.snapshot(),
+                result="success",
+                updated_at=task.updated_at,
                 summary="已完成",
-                result_text="任务已经完成。",
+                output="任务已经完成。",
             ),
         )
     )
@@ -71,6 +72,9 @@ async def _exercise_terminal_reflection() -> None:
     assert len(turn_events) == 1
     assert turn_events[0].payload.reason == "task_result"
     assert "reflection_input" in turn_events[0].payload.metadata
+    task_projection = turn_events[0].payload.metadata["reflection_input"]["task"]
+    assert task_projection["state"] == "done"
+    assert task_projection["result"] == "success"
     assert len(deep_events) == 1
     assert deep_events[0].payload.reason == "task_result"
     assert deep_events[0].payload.metadata["reflection_input"]["assistant_output"]
@@ -80,53 +84,7 @@ def test_executive_brain_emits_turn_and_deep_reflection_for_terminal_result() ->
     asyncio.run(_exercise_terminal_reflection())
 
 
-async def _exercise_progress_reply() -> None:
-    bus = PriorityPubSubBus()
-    store = _task_store()
-    brain = ExecutiveBrain(bus=bus, task_store=store)
-    brain.register()
-
-    replies: list[BusEnvelope[BrainReplyPayload]] = []
-
-    async def _capture(event: BusEnvelope[BrainReplyPayload]) -> None:
-        replies.append(event)
-
-    bus.subscribe(consumer="runtime", event_type=EventType.BRAIN_REPLY, handler=_capture)
-
-    task = store.require("task_1")
-    task.status = TaskStatus.RUNNING
-    task.touch()
-
-    await bus.publish(
-        build_envelope(
-            event_type=EventType.TASK_EVENT_PROGRESS,
-            source="runtime",
-            target="broadcast",
-            session_id="sess_1",
-            turn_id="turn_1",
-            task_id="task_1",
-            correlation_id="task_1",
-            payload=TaskProgressEventPayload(
-                task_id="task_1",
-                state=task.snapshot(),
-                summary="write_file 已完成：Wrote 31 characters to add.py",
-                detail="tool",
-                metadata={"tool_name": "write_file"},
-            ),
-        )
-    )
-    await bus.drain()
-
-    assert len(replies) == 1
-    assert "进展" in replies[0].payload.reply.plain_text
-    assert "write_file 已完成" in replies[0].payload.reply.plain_text
-
-
-def test_executive_brain_emits_progress_reply_for_tool_progress() -> None:
-    asyncio.run(_exercise_progress_reply())
-
-
-async def _exercise_interrupt_cancels_active_task() -> None:
+async def _exercise_interrupt_does_not_cancel_active_task() -> None:
     bus = PriorityPubSubBus()
     store = TaskStore()
     store.add(
@@ -144,12 +102,12 @@ async def _exercise_interrupt_cancels_active_task() -> None:
     brain = ExecutiveBrain(bus=bus, task_store=store)
     brain.register()
 
-    cancels: list[BusEnvelope[BrainCancelTaskPayload]] = []
+    cancels: list[BusEnvelope[TaskCancelPayload]] = []
 
-    async def _capture(event: BusEnvelope[BrainCancelTaskPayload]) -> None:
+    async def _capture(event: BusEnvelope[TaskCancelPayload]) -> None:
         cancels.append(event)
 
-    bus.subscribe(consumer="runtime", event_type=EventType.BRAIN_CANCEL_TASK, handler=_capture)
+    bus.subscribe(consumer="runtime", event_type=EventType.TASK_CANCEL, handler=_capture)
 
     await bus.publish(
         build_envelope(
@@ -171,11 +129,63 @@ async def _exercise_interrupt_cancels_active_task() -> None:
     )
     await bus.drain()
 
+    assert len(cancels) == 0
+
+
+def test_executive_brain_interrupt_does_not_cancel_active_task_by_default() -> None:
+    asyncio.run(_exercise_interrupt_does_not_cancel_active_task())
+
+
+async def _exercise_interrupt_cancels_active_task_when_requested() -> None:
+    bus = PriorityPubSubBus()
+    store = TaskStore()
+    store.add(
+        RuntimeTaskRecord(
+            task_id="task_running",
+            session_id="sess_1",
+            turn_id="turn_1",
+            request=TaskRequestSpec(request="完成任务", title="完成任务"),
+            origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
+            title="完成任务",
+            status=TaskStatus.RUNNING,
+            assignee="worker",
+        )
+    )
+    brain = ExecutiveBrain(bus=bus, task_store=store)
+    brain.register()
+
+    cancels: list[BusEnvelope[TaskCancelPayload]] = []
+
+    async def _capture(event: BusEnvelope[TaskCancelPayload]) -> None:
+        cancels.append(event)
+
+    bus.subscribe(consumer="runtime", event_type=EventType.TASK_CANCEL, handler=_capture)
+
+    await bus.publish(
+        build_envelope(
+            event_type=EventType.INPUT_INTERRUPT,
+            source="gateway",
+            target="broadcast",
+            session_id="sess_1",
+            turn_id="turn_1",
+            task_id="task_running",
+            correlation_id="task_running",
+            payload=InterruptPayload(
+                message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_2"),
+                interrupt_type="new_user_message",
+                plain_text="停掉它",
+                target_task_id="task_running",
+                urgent=True,
+                metadata={"cancel_active_task": True},
+            ),
+        )
+    )
+    await bus.drain()
+
     assert len(cancels) == 1
     assert cancels[0].payload.task_id == "task_running"
     assert cancels[0].payload.reason == "interrupted_by_new_user_message"
-    assert cancels[0].payload.hard_stop is True
 
 
-def test_executive_brain_interrupt_cancels_active_task() -> None:
-    asyncio.run(_exercise_interrupt_cancels_active_task())
+def test_executive_brain_interrupt_cancels_active_task_when_requested() -> None:
+    asyncio.run(_exercise_interrupt_cancels_active_task_when_requested())

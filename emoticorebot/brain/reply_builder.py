@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
-from emoticorebot.protocol.commands import BrainReplyPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
+from emoticorebot.protocol.events import ReplyReadyPayload
 from emoticorebot.protocol.task_models import MessageRef, ReplyDraft, ReplyKind
 from emoticorebot.protocol.topics import EventType
 
@@ -16,12 +16,11 @@ def _new_id(prefix: str) -> str:
 
 
 class ReplyBuilder:
-    """Creates brain reply and ask-user commands with stable protocol fields."""
+    """Creates output.reply_ready envelopes with stable protocol fields."""
 
     def build(
         self,
         *,
-        event_type: str,
         session_id: str,
         turn_id: str | None,
         text: str,
@@ -33,7 +32,7 @@ class ReplyBuilder:
         safe_fallback: bool = False,
         reply_id: str | None = None,
         reply_metadata: dict[str, Any] | None = None,
-    ) -> BusEnvelope[BrainReplyPayload]:
+    ) -> BusEnvelope[ReplyReadyPayload]:
         reply = ReplyDraft(
             reply_id=reply_id or _new_id("reply"),
             kind=kind,
@@ -43,27 +42,27 @@ class ReplyBuilder:
             metadata=dict(reply_metadata or {}),
         )
         return build_envelope(
-            event_type=event_type,
+            event_type=EventType.OUTPUT_REPLY_READY,
             source="brain",
-            target="runtime",
+            target="broadcast",
             session_id=session_id,
             turn_id=turn_id,
             task_id=related_task_id,
             correlation_id=correlation_id or related_task_id or turn_id,
             causation_id=causation_id,
-            payload=BrainReplyPayload(
-                command_id=_new_id("cmd"),
+            payload=ReplyReadyPayload(
                 reply=reply,
                 related_task_id=related_task_id,
                 origin_message=origin_message,
+                related_event_id=causation_id,
             ),
         )
 
-    def reply(self, **kwargs: object) -> BusEnvelope[BrainReplyPayload]:
-        return self.build(event_type=EventType.BRAIN_REPLY, **kwargs)
+    def reply(self, **kwargs: object) -> BusEnvelope[ReplyReadyPayload]:
+        return self.build(**kwargs)
 
-    def ask_user(self, **kwargs: object) -> BusEnvelope[BrainReplyPayload]:
-        return self.build(event_type=EventType.BRAIN_ASK_USER, kind="ask_user", **kwargs)
+    def ask_user(self, **kwargs: object) -> BusEnvelope[ReplyReadyPayload]:
+        return self.build(kind="ask_user", **kwargs)
 
 
 __all__ = ["ReplyBuilder"]

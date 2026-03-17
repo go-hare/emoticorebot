@@ -66,6 +66,22 @@ class MemoryStore:
                     records.append(parsed)
         return records
 
+    def close(self) -> None:
+        vector_index = self._vector_index
+        if vector_index is not None:
+            try:
+                vector_index.close()
+            except Exception:
+                pass
+        object.__setattr__(self, "_vector_index", None)
+        object.__setattr__(self, "_vector_ready", False)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            return
+
     def append_many(self, records: Iterable[dict[str, Any]]) -> list[str]:
         existing_keys = {
             self._dedupe_key(record)

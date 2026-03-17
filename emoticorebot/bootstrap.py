@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -30,6 +29,7 @@ from emoticorebot.runtime.transport_bus import InboundMessage, OutboundMessage, 
 from emoticorebot.runtime.kernel import RuntimeKernel, TurnReply
 from emoticorebot.session.thread_store import ThreadStore
 from emoticorebot.utils.llm_utils import extract_message_text
+from emoticorebot.utils.task_projection import project_task_from_runtime_snapshot, project_task_from_session_view
 
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
@@ -128,6 +128,7 @@ class RuntimeHost:
         session_key: str | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
+        """处理消息（核心逻辑）"""
         key = session_key or msg.session_key
         message_id = str(msg.metadata.get("message_id", "") or "").strip() or self._new_message_id()
         msg.metadata["message_id"] = message_id
@@ -140,28 +141,11 @@ class RuntimeHost:
             content=msg.content,
             metadata=msg.metadata,
         )
-        return await self._process_message_turn(
-            msg=msg,
-            session_key=key,
-            message_id=message_id,
-            on_progress=on_progress,
-        )
-
-    async def _process_message_turn(
-        self,
-        *,
-        msg: InboundMessage,
-        session_key: str,
-        message_id: str,
-        on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> OutboundMessage | None:
-        """处理消息（核心逻辑）"""
         if msg.content == "__subconscious_recovery__":
             if self.subconscious:
                 await self.subconscious.handle_energy_recovery()
             return None
 
-        key = session_key
         cmd = msg.content.strip().lower()
 
         if cmd == "/new":
@@ -206,7 +190,6 @@ class RuntimeHost:
             session_id=key,
             media=msg.media,
             message_metadata=msg.metadata,
-            on_progress=on_progress,
         )
         turn_id = str(final_state.get("turn_id", "") or "").strip()
         if turn_id and not self.kernel.is_current_turn(session_id=key, turn_id=turn_id):
@@ -328,39 +311,6 @@ class RuntimeHost:
 /new - 开始新对话
 /help - 显示此帮助信息"""
 
-    @staticmethod
-    def _load_pad_from_workspace(workspace: Path) -> dict[str, float]:
-        state_file = workspace / "current_state.md"
-        pad = {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}
-        if not state_file.exists():
-            return pad
-        try:
-            text = state_file.read_text(encoding="utf-8")
-            pleasure = re.search(r"Pleasure[^|]*\|\s*([-\d.]+)", text, re.IGNORECASE)
-            arousal = re.search(r"Arousal[^|]*\|\s*([-\d.]+)", text, re.IGNORECASE)
-            dominance = re.search(r"Dominance[^|]*\|\s*([-\d.]+)", text, re.IGNORECASE)
-            if pleasure:
-                pad["pleasure"] = max(-1.0, min(1.0, float(pleasure.group(1))))
-            if arousal:
-                pad["arousal"] = max(-1.0, min(1.0, float(arousal.group(1))))
-            if dominance:
-                pad["dominance"] = max(-1.0, min(1.0, float(dominance.group(1))))
-        except Exception:
-            return {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}
-        return pad
-
-    @staticmethod
-    def _get_emotion_label(pad: dict[str, float]) -> str:
-        pleasure = float(pad.get("pleasure", 0.0))
-        arousal = float(pad.get("arousal", 0.5))
-        if pleasure < -0.5:
-            return "难过" if arousal < 0.3 else "生气"
-        if pleasure > 0.5:
-            return "兴奋" if arousal > 0.7 else "开心"
-        if arousal < 0.2:
-            return "低落"
-        return "平静"
-
     async def _run_user_message(
         self,
         *,
@@ -373,26 +323,7 @@ class RuntimeHost:
         session_id: str,
         media: list[str] | None,
         message_metadata: dict[str, Any] | None,
-        on_progress: Callable[..., Awaitable[None]] | None,
     ) -> tuple[str, dict[str, Any]]:
-        pad = self._load_pad_from_workspace(self.workspace)
-        final_state: dict[str, Any] = {
-            "source_type": "user_turn",
-            "user_input": user_input,
-            "dialogue_history": dialogue_history,
-            "internal_history": internal_history,
-            "message_id": message_id,
-            "media": list(media or []),
-            "workspace": str(self.workspace),
-            "session_id": session_id,
-            "channel": channel,
-            "chat_id": chat_id,
-            "done": False,
-            "output": "",
-        }
-        if on_progress is not None:
-            final_state["on_progress"] = on_progress
-
         turn = await self.kernel.handle_user_message(
             session_id=session_id,
             channel=channel,
@@ -416,37 +347,21 @@ class RuntimeHost:
         execution_summary = "brain/runtime kernel completed turn dispatch"
         final_decision = "continue" if task_action != "none" else "answer"
 
-        final_state["output"] = message
-        final_state["assistant_output"] = message
-        final_state["turn_id"] = turn.turn_id
-        final_state["execution_summary"] = execution_summary
-        final_state["done"] = True
-        final_state["brain"] = {
-            "task_action": task_action,
-            "final_decision": final_decision,
-            "execution_summary": execution_summary,
-            "reply_event_type": turn.event_type,
+        final_state: dict[str, Any] = {
             "turn_id": turn.turn_id,
-        }
-        
-        # 构建完整的 metadata 结构供 reflection 使用
-        final_state["metadata"] = {
-            "message_id": message_id,
-            "execution": {
-                "summary": execution_summary,
-                "brain_decision": final_decision,
+            "output": message,
+            "execution_summary": execution_summary,
+            "brain": {
                 "task_action": task_action,
+                "final_decision": final_decision,
+                "execution_summary": execution_summary,
+                "reply_event_type": turn.event_type,
+                "turn_id": turn.turn_id,
             },
-            "channel": channel,
-            "chat_id": chat_id,
         }
-
         task_snapshot = self._resolve_turn_task_state(session_id=session_id, turn=turn)
         if task_snapshot:
             final_state["task"] = task_snapshot
-            final_state["metadata"]["task"] = dict(task_snapshot)
-
-        final_state["task_trace"] = list((final_state.get("task") or {}).get("task_trace", []) or [])
 
         return message, final_state
 
@@ -489,25 +404,24 @@ class RuntimeHost:
         
         # Task 记录（如果有）
         task_info = final_state.get("task")
-        metadata_task = (final_state.get("metadata", {}) or {}).get("task")
-        if task_info or metadata_task:
+        if task_info:
             task_record = {
                 **base_record,
                 "phase": "task",
                 "event": "task.executed",
                 "content": {
-                    "task_id": (task_info or {}).get("task_id", "") or (metadata_task or {}).get("task_id", ""),
-                    "status": (task_info or {}).get("status", "") or (metadata_task or {}).get("status", ""),
-                    "result_status": (task_info or {}).get("result_status", "") or (metadata_task or {}).get("result_status", ""),
-                    "summary": (task_info or {}).get("summary", "") or (metadata_task or {}).get("summary", ""),
-                    "missing": (task_info or {}).get("missing", []) or (metadata_task or {}).get("missing", []),
+                    "task_id": task_info.get("task_id", ""),
+                    "state": task_info.get("state", ""),
+                    "result": task_info.get("result", ""),
+                    "summary": task_info.get("summary", ""),
+                    "missing": task_info.get("missing", []),
                 },
             }
             records.append(task_record)
         
         # Task trace 记录（如果有）
-        task_trace = final_state.get("task_trace", [])
-        if task_trace and isinstance(task_trace, list):
+        task_trace = list((task_info or {}).get("task_trace", []) or [])
+        if task_trace:
             trace_record = {
                 **base_record,
                 "phase": "execution",
@@ -560,36 +474,22 @@ class RuntimeHost:
             task = self.kernel.latest_task_for_session(session_id, include_terminal=True)
         if task is None:
             return {}
-        snapshot = task.snapshot().model_dump(exclude_none=True)
         request = task.request.model_dump(exclude_none=True)
-        status = str(snapshot.get("status", "") or "").strip()
-        result_status = {
-            "done": "success",
-            "failed": "failed",
-            "cancelled": "failed",
-        }.get(status, "pending")
-        control_state = {
-            "waiting_input": "waiting_input",
-            "done": "completed",
-            "failed": "failed",
-            "cancelled": "failed",
-        }.get(status, "running")
-        compact: TaskState = {
-            "invoked": True,
-            "task_id": snapshot.get("task_id", ""),
-            "title": snapshot.get("title", ""),
-            "status": status,
-            "result_status": result_status,
-            "control_state": control_state,
-            "summary": snapshot.get("summary", ""),
-            "error": snapshot.get("error", ""),
-            "stage_info": snapshot.get("last_progress", ""),
-            "params": self._compact_task_spec_for_session(request),
-        }
-        input_request = snapshot.get("input_request")
-        if isinstance(input_request, dict) and input_request:
-            compact["input_request"] = input_request
-        return self._compact_task_state_for_session(compact)
+        params = self._compact_task_spec_for_session(request)
+        task_view = self.kernel.session_runtime.task_view(session_id, task.task_id)
+        if task_view is not None:
+            return self._compact_task_state_for_session(
+                project_task_from_session_view(
+                    task_view,
+                    params=params,
+                )
+            )
+        return self._compact_task_state_for_session(
+            project_task_from_runtime_snapshot(
+                task.snapshot().model_dump(exclude_none=True),
+                params=params,
+            )
+        )
 
     @staticmethod
     def _new_message_id() -> str:
@@ -641,13 +541,11 @@ class RuntimeHost:
             "invoked",
             "task_id",
             "title",
-            "status",
-            "result_status",
-            "control_state",
+            "state",
+            "result",
             "summary",
-            "analysis",
             "error",
-            "stage_info",
+            "stage",
             "recommended_action",
             "confidence",
             "attempt_count",
@@ -664,9 +562,6 @@ class RuntimeHost:
                 "field": str(input_request.get("field", "") or "").strip(),
                 "question": str(input_request.get("question", "") or "").strip(),
             }
-        pending_review = task_state.get("pending_review")
-        if isinstance(pending_review, list) and pending_review:
-            compact["pending_review"] = [item for item in pending_review if isinstance(item, dict)]
         task_trace = task_state.get("task_trace")
         if isinstance(task_trace, list) and task_trace:
             compact["task_trace"] = [item for item in task_trace if isinstance(item, dict)]

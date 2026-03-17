@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from emoticorebot.brain.dialogue_policy import DialoguePolicy
 from emoticorebot.brain.task_policy import TaskPolicy
-from emoticorebot.protocol.events import TaskNeedInputEventPayload, TaskResultEventPayload
+from emoticorebot.protocol.events import TaskAskPayload, TaskEndPayload
 from emoticorebot.protocol.task_models import InputRequest, TaskRequestSpec
 from emoticorebot.runtime.state_machine import TaskStatus
 from emoticorebot.runtime.task_store import RuntimeTaskRecord
@@ -73,13 +73,13 @@ def test_dialogue_policy_formats_status_with_progress() -> None:
 
 
 def test_dialogue_policy_formats_need_input() -> None:
-    text = DialoguePolicy.need_input(
+    text = DialoguePolicy.task_ask(
         _task(status=TaskStatus.WAITING_INPUT),
-        TaskNeedInputEventPayload(
+        TaskAskPayload(
             task_id="task_1",
-            state=_task(status=TaskStatus.WAITING_INPUT).snapshot(),
-            input_request=InputRequest(field="city", question="你想查哪个城市？", required=True),
-            summary="已经识别到你想查天气。",
+            question="你想查哪个城市？",
+            field="city",
+            why="已经识别到你想查天气。",
         ),
     )
 
@@ -88,13 +88,13 @@ def test_dialogue_policy_formats_need_input() -> None:
 
 
 def test_dialogue_policy_formats_task_result() -> None:
-    text = DialoguePolicy().task_result(
+    text = DialoguePolicy().task_end(
         _task(status=TaskStatus.DONE),
-        TaskResultEventPayload(
+        TaskEndPayload(
             task_id="task_1",
-            state=_task(status=TaskStatus.DONE).snapshot(),
+            result="success",
             summary="文件已经写入工作区。",
-            result_text="add.py 已创建完成。",
+            output="add.py 已创建完成。",
         ),
     )
 

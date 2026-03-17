@@ -14,6 +14,8 @@
 详细文档：
 
 - [docs/final-brain-runtime-architecture.zh-CN.md](docs/final-brain-runtime-architecture.zh-CN.md)
+- [docs/companion-task-architecture.zh-CN.md](docs/companion-task-architecture.zh-CN.md)
+- [docs/dual-full-duplex-refactor.zh-CN.md](docs/dual-full-duplex-refactor.zh-CN.md)
 
 ---
 

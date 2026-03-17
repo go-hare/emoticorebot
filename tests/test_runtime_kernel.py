@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
 import pytest
 
+from emoticorebot.execution.team import WorkerOutcome
 from emoticorebot.runtime.transport_bus import TransportBus
 from emoticorebot.runtime.kernel import RuntimeKernel
 
@@ -33,6 +33,18 @@ class _StreamingBrainLLM:
             yield chunk
 
 
+class _QueuedBrainLLM:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.prompts: list[Any] = []
+
+    async def ainvoke(self, prompt: Any):
+        self.prompts.append(prompt)
+        if not self.responses:
+            raise AssertionError("queued brain llm ran out of scripted responses")
+        return self.responses.pop(0)
+
+
 class _FakeContextBuilder:
     def build_brain_decision_system_prompt(self, *, query: str = "") -> str:
         return f"decision system for: {query}"
@@ -49,16 +61,26 @@ def _brain_packet(
     task_reason: str = "",
     task: dict[str, object] | None = None,
 ) -> str:
-    return json.dumps(
-        {
-            "task_action": task_action,
-            "task_reason": task_reason,
-            "final_decision": final_decision,
-            "final_message": final_message,
-            "task": task or {},
-        },
-        ensure_ascii=False,
-    )
+    lines = [
+        "####user####",
+        final_message,
+        "",
+        "####task####",
+        f"mode={final_decision}",
+        f"action={task_action}",
+    ]
+    task_payload = task or {}
+    if task_reason:
+        lines.append(f"reason={task_reason}")
+    for key in ("task_id", "title", "request", "goal", "expected_output", "history_context", "review_policy", "preferred_agent"):
+        value = str(task_payload.get(key, "") or "").strip()
+        if value:
+            lines.append(f"{key}={value}")
+    for key in ("constraints", "success_criteria", "memory_refs", "skill_hints"):
+        values = [str(item).strip() for item in list(task_payload.get(key, []) or []) if str(item).strip()]
+        if values:
+            lines.append(f"{key}={'|'.join(values)}")
+    return "\n".join(lines) + "\n"
 
 
 async def _wait_for(predicate, *, timeout: float = 1.0) -> None:
@@ -121,7 +143,7 @@ async def _exercise_kernel_task_flow() -> None:
             )
             assert "开始处理" in reply.content
 
-            await _wait_for(lambda: transport.outbound_size >= 2)
+            await _wait_for(lambda: transport.outbound_size >= 2, timeout=2.0)
             first = await transport.consume_outbound()
             second = await transport.consume_outbound()
 
@@ -162,7 +184,7 @@ action=create_task
             )
             assert "好的" in reply.content
 
-            await _wait_for(lambda: transport.outbound_size >= 2)
+            await _wait_for(lambda: transport.outbound_size >= 2, timeout=2.0)
             first = await transport.consume_outbound()
             second = await transport.consume_outbound()
 
@@ -182,18 +204,18 @@ def test_runtime_kernel_runs_minimal_brain_packet_task_flow() -> None:
 async def _exercise_kernel_falls_back_when_create_task_reply_is_empty() -> None:
     transport = TransportBus()
     brain_llm = _FakeBrainLLM(
-        _brain_packet(
-            task_action="create_task",
-            final_decision="continue",
-            final_message="",
-            task_reason="需要执行文件创建任务",
-            task={
+        {
+            "task_action": "create_task",
+            "task_reason": "需要执行文件创建任务",
+            "final_decision": "continue",
+            "final_message": "",
+            "task": {
                 "title": "创建 add.py",
                 "request": "创建 add.py，让 add(a, b) 返回 a + b",
                 "review_policy": "skip",
                 "preferred_agent": "worker",
             },
-        )
+        }
     )
     with TemporaryDirectory() as tmp_dir:
         kernel = RuntimeKernel(workspace=Path(tmp_dir), transport=transport, brain_llm=brain_llm)
@@ -317,13 +339,10 @@ def test_runtime_kernel_suppresses_direct_reply_delivery() -> None:
 async def _exercise_kernel_brain_uses_system_and_user_messages() -> None:
     transport = TransportBus()
     brain_llm = _FakeBrainLLM(
-        json.dumps(
-            {
-                "task_action": "none",
-                "final_decision": "answer",
-                "final_message": "收到",
-            },
-            ensure_ascii=False,
+        _brain_packet(
+            task_action="none",
+            final_decision="answer",
+            final_message="收到",
         )
     )
     with TemporaryDirectory() as tmp_dir:
@@ -348,8 +367,8 @@ async def _exercise_kernel_brain_uses_system_and_user_messages() -> None:
             assert len(messages) == 2
             assert getattr(messages[0], "type", "") == "system"
             assert getattr(messages[1], "type", "") == "human"
-            assert "decision system for: 你好" in str(getattr(messages[0], "content", ""))
-            assert "full system for: 你好" not in str(getattr(messages[0], "content", ""))
+            assert "full system for: 你好" in str(getattr(messages[0], "content", ""))
+            assert "decision system for: 你好" not in str(getattr(messages[0], "content", ""))
             assert "## 当前轮执行要求" in str(getattr(messages[1], "content", ""))
             assert "## 用户消息" in str(getattr(messages[1], "content", ""))
         finally:
@@ -428,7 +447,7 @@ async def _exercise_kernel_streams_channel_reply_before_final_packet() -> None:
             )
             assert "正在处理" in reply.content
 
-            await _wait_for(lambda: transport.outbound_size >= 3)
+            await _wait_for(lambda: transport.outbound_size >= 3, timeout=2.0)
             first = await transport.consume_outbound()
             second = await transport.consume_outbound()
             third = await transport.consume_outbound()
@@ -490,3 +509,102 @@ async def _exercise_kernel_suppresses_task_flow_delivery() -> None:
 
 def test_runtime_kernel_suppresses_task_flow_delivery() -> None:
     asyncio.run(_exercise_kernel_suppresses_task_flow_delivery())
+
+
+async def _exercise_kernel_interrupt_keeps_background_task_running() -> None:
+    transport = TransportBus()
+    brain_llm = _QueuedBrainLLM(
+        [
+            _brain_packet(
+                task_action="create_task",
+                final_decision="continue",
+                final_message="已接收，开始处理。",
+                task_reason="需要执行代码修改任务",
+                task={
+                    "title": "修改 add.py",
+                    "request": "修改 add.py，让 add(a, b) 返回 a + b",
+                    "review_policy": "skip",
+                    "preferred_agent": "worker",
+                },
+            ),
+            _brain_packet(
+                task_action="none",
+                final_decision="answer",
+                final_message="我还在处理前一个任务，同时继续回应你。",
+            ),
+        ]
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(workspace=Path(tmp_dir), transport=transport, brain_llm=brain_llm)
+        worker_started = asyncio.Event()
+
+        async def _delayed_execute(
+            self,
+            *,
+            task,
+            assignment_id,
+            session_id,
+            turn_id,
+            correlation_id,
+            resume_input=None,
+        ):
+            del assignment_id, session_id, turn_id, correlation_id, resume_input
+            worker_started.set()
+            await asyncio.sleep(0.1)
+            return WorkerOutcome(
+                status="result",
+                summary=f"{task.title} 已完成",
+                result_text=f"{task.title} 已完成",
+                confidence=0.9,
+            )
+
+        kernel._team._worker._execute = _delayed_execute.__get__(kernel._team._worker, type(kernel._team._worker))
+
+        try:
+            first = await kernel.handle_user_message(
+                session_id="cli:keep-task",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_first",
+                content="修改 add.py，让 add(a, b) 返回 a + b",
+            )
+            assert "开始处理" in first.content
+
+            await asyncio.wait_for(worker_started.wait(), timeout=1.0)
+            interrupted = await kernel.interrupt_session(
+                session_id="cli:keep-task",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_interrupt",
+                content="继续做，不要停",
+            )
+            assert interrupted is True
+
+            second = await kernel.handle_user_message(
+                session_id="cli:keep-task",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_second",
+                content="你还在吗？",
+            )
+            assert "继续回应" in second.content
+
+            def _task_completed() -> bool:
+                latest = kernel.latest_task_for_session("cli:keep-task", include_terminal=True)
+                return latest is not None and latest.latest_result is not None
+
+            await _wait_for(_task_completed, timeout=1.5)
+            latest_task = kernel.latest_task_for_session("cli:keep-task", include_terminal=True)
+            assert latest_task is not None
+            assert latest_task.latest_result is not None
+            assert latest_task.status.value in {"done", "archived"}
+            assert latest_task.error != "interrupted_by_new_user_message"
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_interrupt_keeps_background_task_running() -> None:
+    asyncio.run(_exercise_kernel_interrupt_keeps_background_task_running())

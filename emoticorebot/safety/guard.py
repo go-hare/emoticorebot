@@ -9,7 +9,7 @@ from uuid import uuid4
 from emoticorebot.bus.interceptor import InterceptorOutcome, allow, block, redact
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import ReplyBlockedPayload, SystemSignalPayload
+from emoticorebot.protocol.events import ReplyBlockedPayload, SystemSignalPayload, TaskEndPayload
 from emoticorebot.protocol.safety_models import SafetyAuditPayload
 from emoticorebot.protocol.task_models import ContentBlock, ProtocolModel, ReplyDraft
 from emoticorebot.protocol.topics import EventType, Topic
@@ -75,7 +75,7 @@ class SafetyGuard:
 
     async def _intercept_task_event(self, outcome: InterceptorOutcome) -> InterceptorOutcome:
         event = outcome.event
-        if event.event_type not in {EventType.TASK_EVENT_RESULT, EventType.TASK_EVENT_FAILED}:
+        if event.event_type != EventType.TASK_END:
             return outcome
 
         payload = event.payload
@@ -170,24 +170,18 @@ class SafetyGuard:
 
     def _task_surface_text(self, payload: ProtocolModel) -> str:
         parts: list[str] = []
-        for field in ("result_text", "reason"):
+        for field in ("output", "error"):
             value = getattr(payload, field, None)
             if isinstance(value, str) and value.strip():
                 parts.append(value.strip())
-        for field in ("result_blocks", "artifacts"):
-            parts.extend(self._content_block_text(block) for block in getattr(payload, field, []) or [])
         return "\n".join(part for part in parts if part)
 
     def _redact_task_payload(self, payload: ProtocolModel) -> ProtocolModel:
         updates: dict[str, Any] = {}
-        for field in ("result_text", "reason"):
+        for field in ("output", "error"):
             value = getattr(payload, field, None)
             if isinstance(value, str) and value:
                 updates[field] = self._redact_text(value)
-        for field in ("result_blocks", "artifacts"):
-            blocks = getattr(payload, field, None)
-            if blocks:
-                updates[field] = [self._redact_content_block(block) for block in blocks]
         return payload.model_copy(update=updates)
 
     def _reply_surface_text(self, reply: ReplyDraft) -> str:

@@ -11,15 +11,18 @@ def build_task_context(payload: dict[str, Any] | None) -> str:
         return ""
 
     title = str(task.get("title", "") or task.get("goal", "") or task.get("task_id", "")).strip()
-    status = str(task.get("status", "") or "").strip()
-    summary = str(task.get("summary", "") or task.get("analysis", "") or "").strip()
+    state = str(task.get("state", "") or "").strip()
+    result = str(task.get("result", "") or "").strip()
+    summary = str(task.get("summary", "") or "").strip()
     missing = [str(item).strip() for item in list(task.get("missing", []) or []) if str(item).strip()]
 
     parts: list[str] = []
     if title:
         parts.append(f"任务: {title}")
-    if status:
-        parts.append(f"状态: {status}")
+    if state:
+        parts.append(f"状态: {state}")
+    if result and result != "none":
+        parts.append(f"结果: {result}")
     if summary:
         parts.append(f"总结: {summary}")
     if missing:

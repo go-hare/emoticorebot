@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from emoticorebot.protocol.commands import AssignAgentPayload, BrainReplyPayload
+from emoticorebot.protocol.commands import AssignAgentPayload, BrainReplyPayload, TaskCreatePayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload, TaskCreatedEventPayload
+from emoticorebot.protocol.events import ReplyReadyPayload
 from emoticorebot.protocol.priorities import EventPriority, priority_for
 from emoticorebot.protocol.task_models import ReplyDraft, TaskStateSnapshot
 from emoticorebot.protocol.topics import EventType, Topic
@@ -46,28 +46,25 @@ def test_business_event_requires_session_id() -> None:
 
 
 def test_nested_payloads_validate_against_document_models() -> None:
-    event = TaskCreatedEventPayload.model_validate(
+    event = TaskCreatePayload.model_validate(
         {
-            "task_id": "task_1",
-            "state": {
-                "task_id": "task_1",
-                "status": "created",
-            },
-            "task_request": {
-                "request": "write a report",
+            "command_id": "cmd_1",
+            "request": "write a report",
+            "goal": "produce a concise report",
+            "context": {
                 "title": "report",
                 "review_policy": "required",
-            },
-            "origin_message": {
-                "channel": "cli",
-                "chat_id": "direct",
-                "message_id": "msg_1",
+                "origin_message": {
+                    "channel": "cli",
+                    "chat_id": "direct",
+                    "message_id": "msg_1",
+                },
             },
         }
     )
 
-    assert event.task_request.request == "write a report"
-    assert event.origin_message.message_id == "msg_1"
+    assert event.request == "write a report"
+    assert event.context["origin_message"]["message_id"] == "msg_1"
 
 
 def test_assign_agent_payload_uses_typed_nested_models() -> None:
@@ -110,5 +107,5 @@ def test_safe_fallback_is_nested_inside_reply_draft() -> None:
 
 def test_priority_mapping_matches_document_examples() -> None:
     assert priority_for(EventType.INPUT_INTERRUPT) == EventPriority.P0
-    assert priority_for(EventType.TASK_EVENT_RESULT) == EventPriority.P2
+    assert priority_for(EventType.TASK_END) == EventPriority.P2
     assert priority_for(EventType.MEMORY_WRITE_REQUEST) == EventPriority.P4

@@ -12,6 +12,8 @@ ReviewPolicy = Literal["skip", "optional", "required"]
 PlanStepStatus = Literal["pending", "running", "done", "failed", "skipped"]
 ReviewSeverity = Literal["low", "medium", "high", "critical"]
 ProvidedInputSource = Literal["user_message", "upload", "sensor", "system"]
+TaskVisibleState = Literal["running", "waiting", "done"]
+TaskVisibleResult = Literal["none", "success", "failed", "cancelled"]
 TaskLifecycleState = Literal[
     "created",
     "assigned",
@@ -234,6 +236,8 @@ __all__ = [
     "ReviewSeverity",
     "ReviewerContext",
     "TaskRequestSpec",
+    "TaskVisibleResult",
+    "TaskVisibleState",
     "TaskResultStatus",
     "TaskSpec",
     "TaskState",

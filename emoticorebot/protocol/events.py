@@ -18,24 +18,15 @@ from .task_models import (
     ReviewItem,
     TaskRequestSpec,
     TaskStateSnapshot,
+    TaskVisibleResult,
+    TaskVisibleState,
+    TraceItem,
 )
 
 PerceptionType = Literal["wake_word", "vision", "proximity", "localization"]
 SignalType = Literal["timeout", "backpressure", "health_warning", "warning"]
-TaskEventType = Literal[
-    "created",
-    "assigned",
-    "started",
-    "progress",
-    "need_input",
-    "planned",
-    "reviewing",
-    "approved",
-    "rejected",
-    "result",
-    "failed",
-    "cancelled",
-]
+TaskCommandType = Literal["create", "resume", "cancel"]
+TaskEventType = Literal["update", "summary", "ask", "end"]
 TaskEvent = dict[str, Any]
 
 
@@ -176,81 +167,42 @@ class TaskCancelledReportPayload(ProtocolModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class TaskEventBasePayload(ProtocolModel):
+class TaskNotificationPayload(ProtocolModel):
     task_id: str
-    state: TaskStateSnapshot
-    summary: str | None = None
-    assignee: str | None = None
-    input_request: InputRequest | None = None
-    plan_id: str | None = None
-    review_required: bool | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    state: TaskVisibleState
+    result: TaskVisibleResult = "none"
+    updated_at: str | None = None
+    trace_append: list[TraceItem] = Field(default_factory=list)
 
 
-class TaskCreatedEventPayload(TaskEventBasePayload):
-    task_request: TaskRequestSpec
-    origin_message: MessageRef
-
-
-class TaskAssignedEventPayload(TaskEventBasePayload):
-    assignment_id: str
-    agent_role: AgentRole
-
-
-class TaskStartedEventPayload(TaskEventBasePayload):
-    assignment_id: str
-    agent_role: AgentRole
-    started_at: str | None = None
-
-
-class TaskProgressEventPayload(TaskEventBasePayload):
+class TaskUpdatePayload(TaskNotificationPayload):
+    state: Literal["running"] = "running"
+    message: str
     progress: float | None = None
-    detail: str | None = None
-    current_step_id: str | None = None
+    stage: str | None = None
+
+
+class TaskSummaryPayload(TaskNotificationPayload):
+    state: Literal["running"] = "running"
+    summary: str
+    stage: str | None = None
     next_step: str | None = None
 
 
-class TaskNeedInputEventPayload(TaskEventBasePayload):
-    input_request: InputRequest
-    partial_result: str | None = None
+class TaskAskPayload(TaskNotificationPayload):
+    state: Literal["waiting"] = "waiting"
+    question: str
+    field: str | None = None
+    why: str | None = None
 
 
-class TaskPlannedEventPayload(TaskEventBasePayload):
-    plan_id: str
-    steps: list[PlanStep] = Field(default_factory=list)
-
-
-class TaskReviewingEventPayload(TaskEventBasePayload):
-    review_id: str
-    reviewer_role: AgentRole
-
-
-class TaskApprovedEventPayload(TaskEventBasePayload):
-    review_id: str
-    notes: str | None = None
-
-
-class TaskRejectedEventPayload(TaskEventBasePayload):
-    review_id: str
-    rejection_reason: str | None = None
-    findings: list[ReviewItem] = Field(default_factory=list)
-
-
-class TaskResultEventPayload(TaskEventBasePayload):
-    result_text: str | None = None
-    result_blocks: list[ContentBlock] = Field(default_factory=list)
-    artifacts: list[ContentBlock] = Field(default_factory=list)
-    confidence: float | None = None
-
-
-class TaskFailedEventPayload(TaskEventBasePayload):
-    reason: str | None = None
-    retryable: bool | None = None
-
-
-class TaskCancelledEventPayload(TaskEventBasePayload):
-    reason: str | None = None
-    cancelled_by: str | None = None
+class TaskEndPayload(TaskNotificationPayload):
+    state: Literal["done"] = "done"
+    result: Literal["success", "failed", "cancelled"]
+    summary: str | None = None
+    output: str | None = None
+    error: str | None = None
+    trace_final: list[TraceItem] = Field(default_factory=list)
 
 
 class ReplyReadyPayload(ProtocolModel):
@@ -318,30 +270,23 @@ __all__ = [
     "RepliedPayload",
     "SignalType",
     "SystemSignalPayload",
+    "TaskApprovedReportPayload",
+    "TaskAskPayload",
+    "TaskCancelledReportPayload",
+    "TaskCommandType",
+    "TaskEndPayload",
     "TaskEvent",
     "TaskEventType",
-    "TaskApprovedEventPayload",
-    "TaskApprovedReportPayload",
-    "TaskAssignedEventPayload",
-    "TaskCancelledEventPayload",
-    "TaskCancelledReportPayload",
-    "TaskCreatedEventPayload",
-    "TaskEventBasePayload",
-    "TaskFailedEventPayload",
     "TaskFailedReportPayload",
-    "TaskNeedInputEventPayload",
     "TaskNeedInputReportPayload",
+    "TaskNotificationPayload",
     "TaskPlanReadyReportPayload",
-    "TaskPlannedEventPayload",
-    "TaskProgressEventPayload",
     "TaskProgressReportPayload",
-    "TaskRejectedEventPayload",
     "TaskRejectedReportPayload",
-    "TaskResultEventPayload",
     "TaskResultReportPayload",
-    "TaskReviewingEventPayload",
-    "TaskStartedEventPayload",
     "TaskStartedReportPayload",
+    "TaskSummaryPayload",
+    "TaskUpdatePayload",
     "UserMessagePayload",
     "VoiceChunkPayload",
 ]

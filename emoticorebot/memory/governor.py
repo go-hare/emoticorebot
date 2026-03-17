@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from weakref import ref
 
 from emoticorebot.agent.reflection.deep import DeepReflectionResult, DeepReflectionService
 from emoticorebot.agent.reflection.turn import TurnReflectionService
@@ -89,13 +90,52 @@ class MemoryGovernor:
         self._recent_context_ids: OrderedDict[str, deque[str]] = OrderedDict()
 
     def register(self) -> None:
-        self._bus.subscribe(consumer="memory_governor", event_type=EventType.MEMORY_REFLECT_TURN, handler=self._on_reflect_signal)
-        self._bus.subscribe(consumer="memory_governor", event_type=EventType.MEMORY_REFLECT_DEEP, handler=self._on_reflect_signal)
-        self._bus.subscribe(consumer="memory_governor", event_type=EventType.MEMORY_WRITE_REQUEST, handler=self._on_write_request)
-        self._bus.subscribe(consumer="memory_governor", event_type=EventType.TASK_EVENT_RESULT, handler=self._remember_event)
-        self._bus.subscribe(consumer="memory_governor", event_type=EventType.TASK_EVENT_FAILED, handler=self._remember_event)
-        self._bus.subscribe(consumer="memory_governor", event_type=EventType.TASK_EVENT_CANCELLED, handler=self._remember_event)
-        self._bus.subscribe(consumer="memory_governor", event_type=EventType.OUTPUT_REPLIED, handler=self._on_replied)
+        self._bus.subscribe(
+            consumer="memory_governor",
+            event_type=EventType.MEMORY_REFLECT_TURN,
+            handler=self._weak_handler("_on_reflect_signal"),
+        )
+        self._bus.subscribe(
+            consumer="memory_governor",
+            event_type=EventType.MEMORY_REFLECT_DEEP,
+            handler=self._weak_handler("_on_reflect_signal"),
+        )
+        self._bus.subscribe(
+            consumer="memory_governor",
+            event_type=EventType.MEMORY_WRITE_REQUEST,
+            handler=self._weak_handler("_on_write_request"),
+        )
+        self._bus.subscribe(
+            consumer="memory_governor",
+            event_type=EventType.TASK_END,
+            handler=self._weak_handler("_remember_event"),
+        )
+        self._bus.subscribe(
+            consumer="memory_governor",
+            event_type=EventType.OUTPUT_REPLIED,
+            handler=self._weak_handler("_on_replied"),
+        )
+
+    def close(self) -> None:
+        self._memory_store.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            return
+
+    def _weak_handler(self, method_name: str):
+        weak_self = ref(self)
+
+        async def _handler(event: BusEnvelope[ProtocolModel]) -> None:
+            current = weak_self()
+            if current is None:
+                return None
+            method = getattr(current, method_name)
+            await method(event)
+
+        return _handler
 
     async def run_deep_reflection(
         self,

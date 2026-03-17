@@ -52,7 +52,6 @@ class EmbeddingFactory:
 class ChromaPersistentIndex:
     """A tiny Chroma PersistentClient wrapper used as the vector mirror of memory.jsonl."""
 
-    _CLIENTS: ClassVar[dict[str, Any]] = {}
     _FAILED_PATHS: ClassVar[set[str]] = set()
 
     def __init__(
@@ -65,6 +64,7 @@ class ChromaPersistentIndex:
         self.workspace = workspace
         self.embedding_function = embedding_function
         self.collection_name = collection_name
+        self._client: Any | None = None
 
     @property
     def index_dir(self) -> Path:
@@ -82,6 +82,23 @@ class ChromaPersistentIndex:
 
     def is_enabled(self) -> bool:
         return self.embedding_function is not None and self._get_client() is not None
+
+    def close(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception as exc:
+            logger.warning("Chroma client close failed for {}: {}", self.index_dir, exc)
+        finally:
+            self._client = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            return
 
     def search(self, query: str, *, limit: int = 8, record_access: bool = True) -> list[VectorSearchHit]:
         client = self._get_client()
@@ -190,15 +207,16 @@ class ChromaPersistentIndex:
 
     def _get_client(self) -> Any | None:
         path_key = str(self.index_dir)
-        if path_key in self._CLIENTS:
-            return self._CLIENTS[path_key]
+        client = self._client
+        if client is not None:
+            return client
         if path_key in self._FAILED_PATHS:
             return None
         try:
             import chromadb
 
             client = chromadb.PersistentClient(path=path_key)
-            self._CLIENTS[path_key] = client
+            self._client = client
             return client
         except Exception as exc:
             logger.warning("Chroma PersistentClient is unavailable for {}: {}", path_key, exc)

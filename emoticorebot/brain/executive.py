@@ -11,22 +11,20 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.brain.decision_packet import BrainControlPacket, normalize_brain_packet, parse_raw_brain_json
-from emoticorebot.protocol.commands import BrainCancelTaskPayload, BrainCreateTaskPayload, BrainResumeTaskPayload
+from emoticorebot.protocol.commands import TaskCancelPayload, TaskCreatePayload, TaskResumePayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.events import (
     InterruptPayload,
     ReplyBlockedPayload,
-    TaskCancelledEventPayload,
-    TaskFailedEventPayload,
-    TaskNeedInputEventPayload,
-    TaskProgressEventPayload,
-    TaskResultEventPayload,
+    TaskAskPayload,
+    TaskEndPayload,
     UserMessagePayload,
 )
 from emoticorebot.protocol.memory_models import ReflectSignalPayload
 from emoticorebot.protocol.task_models import MessageRef, ProvidedInputBundle, ProvidedInputItem
 from emoticorebot.protocol.topics import EventType, Topic
 from emoticorebot.runtime.task_store import TaskStore
+from emoticorebot.utils.task_projection import project_task_from_runtime_snapshot, project_task_from_session_view
 
 from .dialogue_policy import DialoguePolicy
 from .reply_builder import ReplyBuilder
@@ -120,6 +118,7 @@ class ExecutiveBrain:
         task_store: TaskStore,
         brain_llm: Any | None = None,
         context_builder: Any | None = None,
+        session_runtime: Any | None = None,
         dialogue: DialoguePolicy | None = None,
         replies: ReplyBuilder | None = None,
     ) -> None:
@@ -127,21 +126,18 @@ class ExecutiveBrain:
         self._tasks = task_store
         self._brain_llm = brain_llm
         self._context_builder = context_builder
+        self._session_runtime = session_runtime
         self._dialogue = dialogue or DialoguePolicy()
         self._replies = replies or ReplyBuilder()
         self._session_origins: dict[str, MessageRef] = {}
         self._cancel_replied_task_ids: set[str] = set()
-        self._last_progress_replies: dict[str, str] = {}
         self._tasks_in_flight: set[asyncio.Task[None]] = set()
         self._active_user_turns: dict[str, asyncio.Task[None]] = {}
 
     def register(self) -> None:
         self._bus.subscribe(consumer="brain", topic=Topic.INPUT_EVENT, handler=self._on_input_event)
-        self._bus.subscribe(consumer="brain", event_type=EventType.TASK_EVENT_NEED_INPUT, handler=self._on_need_input)
-        self._bus.subscribe(consumer="brain", event_type=EventType.TASK_EVENT_PROGRESS, handler=self._on_task_progress)
-        self._bus.subscribe(consumer="brain", event_type=EventType.TASK_EVENT_RESULT, handler=self._on_task_result)
-        self._bus.subscribe(consumer="brain", event_type=EventType.TASK_EVENT_FAILED, handler=self._on_task_failed)
-        self._bus.subscribe(consumer="brain", event_type=EventType.TASK_EVENT_CANCELLED, handler=self._on_task_cancelled)
+        self._bus.subscribe(consumer="brain", event_type=EventType.TASK_ASK, handler=self._on_task_ask)
+        self._bus.subscribe(consumer="brain", event_type=EventType.TASK_END, handler=self._on_task_end)
         self._bus.subscribe(consumer="brain", event_type=EventType.OUTPUT_REPLY_BLOCKED, handler=self._on_reply_blocked)
         self._bus.subscribe(consumer="brain", event_type=EventType.SAFETY_BLOCKED, handler=self._ignore)
         self._bus.subscribe(consumer="brain", event_type=EventType.MEMORY_UPDATE_PERSONA, handler=self._ignore)
@@ -249,31 +245,24 @@ class ExecutiveBrain:
             task = packet.get("task", {}) if isinstance(packet.get("task"), dict) else {}
             await self._bus.publish(
                 build_envelope(
-                    event_type=EventType.BRAIN_CREATE_TASK,
-                    source="brain",
+                    event_type=EventType.TASK_CREATE,
+                    source="front",
                     target="runtime",
                     session_id=session_id,
                     turn_id=event.turn_id,
                     correlation_id=event.turn_id,
                     causation_id=event.event_id,
-                    payload=BrainCreateTaskPayload(
+                    payload=TaskCreatePayload(
                         command_id=_new_command_id(),
-                        title=str(task.get("title", "") or "").strip() or None,
                         request=str(task.get("request", "") or "").strip() or user_text,
                         goal=str(task.get("goal", "") or "").strip() or None,
-                        expected_output=str(task.get("expected_output", "") or "").strip() or None,
-                        constraints=list(task.get("constraints", []) or []),
-                        success_criteria=list(task.get("success_criteria", []) or []),
-                        history_context=str(task.get("history_context", "") or "").strip()
-                        or str(payload.metadata.get("history_context", "") or "").strip()
-                        or None,
-                        memory_refs=list(task.get("memory_refs", []) or []),
-                        skill_hints=list(task.get("skill_hints", []) or []),
-                        content_blocks=list(payload.content_blocks),
-                        review_policy=str(task.get("review_policy", "") or "").strip() or self._review_policy(payload),
-                        preferred_agent=str(task.get("preferred_agent", "") or "").strip() or self._preferred_agent(payload),
-                        origin_message=origin,
-                        metadata=self._command_metadata(suppress_delivery=suppress_delivery),
+                        context=self._task_create_context(
+                            task=task,
+                            payload=payload,
+                            origin=origin,
+                            suppress_delivery=suppress_delivery,
+                        ),
+                        message=str(packet.get("task_reason", "") or "").strip() or None,
                     ),
                 )
             )
@@ -293,17 +282,18 @@ class ExecutiveBrain:
             suppress_task_reply = suppress_delivery or self._task_suppress_delivery(reflection_task)
             await self._bus.publish(
                 build_envelope(
-                    event_type=EventType.BRAIN_RESUME_TASK,
-                    source="brain",
+                    event_type=EventType.TASK_RESUME,
+                    source="front",
                     target="runtime",
                     session_id=session_id,
                     turn_id=event.turn_id,
                     task_id=task_id,
                     correlation_id=task_id or event.turn_id,
                     causation_id=event.event_id,
-                    payload=BrainResumeTaskPayload(
+                    payload=TaskResumePayload(
                         command_id=_new_command_id(),
                         task_id=task_id,
+                        state="running",
                         user_input=user_text,
                         provided_inputs=ProvidedInputBundle(
                             plain_text=user_text,
@@ -317,9 +307,7 @@ class ExecutiveBrain:
                             source_message=origin,
                             source_event_id=event.event_id,
                         ),
-                        origin_message=origin,
-                        resume_reason=str(packet.get("task_reason", "") or "").strip() or "user_follow_up",
-                        metadata=self._command_metadata(suppress_delivery=suppress_task_reply),
+                        message=str(packet.get("task_reason", "") or "").strip() or "user_follow_up",
                     ),
                 )
             )
@@ -344,22 +332,19 @@ class ExecutiveBrain:
             suppress_task_reply = suppress_delivery or self._task_suppress_delivery(task)
             await self._bus.publish(
                 build_envelope(
-                    event_type=EventType.BRAIN_CANCEL_TASK,
-                    source="brain",
+                    event_type=EventType.TASK_CANCEL,
+                    source="front",
                     target="runtime",
                     session_id=session_id,
                     turn_id=event.turn_id,
                     task_id=task_id,
                     correlation_id=task_id or event.turn_id,
                     causation_id=event.event_id,
-                    payload=BrainCancelTaskPayload(
+                    payload=TaskCancelPayload(
                         command_id=_new_command_id(),
                         task_id=task_id,
                         reason=str(packet.get("task_reason", "") or "").strip() or "user_cancelled",
-                        user_visible_reason=reply_text,
-                        hard_stop=False,
-                        origin_message=origin,
-                        metadata=self._command_metadata(suppress_delivery=suppress_task_reply),
+                        by="user",
                     ),
                 )
             )
@@ -404,6 +389,8 @@ class ExecutiveBrain:
         )
 
     async def _on_interrupt(self, event: BusEnvelope[InterruptPayload]) -> None:
+        if not self._should_cancel_task_on_interrupt(event.payload):
+            return
         task_id = str(event.payload.target_task_id or "").strip()
         if not task_id:
             task = self._tasks.latest_for_session(event.session_id or "", include_terminal=False)
@@ -414,44 +401,32 @@ class ExecutiveBrain:
         if task is None:
             return
         self._cancel_replied_task_ids.add(task_id)
-        self._last_progress_replies.pop(task_id, None)
         await self._bus.publish(
             build_envelope(
-                event_type=EventType.BRAIN_CANCEL_TASK,
-                source="brain",
+                event_type=EventType.TASK_CANCEL,
+                source="front",
                 target="runtime",
                 session_id=event.session_id,
                 turn_id=event.turn_id,
                 task_id=task_id,
                 correlation_id=task_id,
                 causation_id=event.event_id,
-                payload=BrainCancelTaskPayload(
+                payload=TaskCancelPayload(
                     command_id=_new_command_id(),
                     task_id=task_id,
                     reason="interrupted_by_new_user_message",
-                    hard_stop=True,
-                    origin_message=event.payload.message,
-                    metadata=self._merge_reply_metadata(
-                        {"interrupt_type": event.payload.interrupt_type},
-                        self._command_metadata(
-                            suppress_delivery=(
-                                self._suppress_delivery_from_metadata(event.payload.metadata)
-                                or self._task_suppress_delivery(task)
-                            ),
-                        ),
-                    )
-                    or {},
+                    by="brain",
                 ),
             )
         )
 
-    async def _on_need_input(self, event: BusEnvelope[TaskNeedInputEventPayload]) -> None:
+    async def _on_task_ask(self, event: BusEnvelope[TaskAskPayload]) -> None:
         task = self._tasks.get(event.payload.task_id)
         await self._bus.publish(
             self._replies.ask_user(
                 session_id=event.session_id or "",
                 turn_id=event.turn_id,
-                text=self._dialogue.need_input(task, event.payload),
+                text=self._dialogue.task_ask(task, event.payload),
                 origin_message=self._origin_for(event.session_id or "", task),
                 related_task_id=event.payload.task_id,
                 causation_id=event.event_id,
@@ -460,104 +435,12 @@ class ExecutiveBrain:
             )
         )
 
-    async def _on_task_progress(self, event: BusEnvelope[TaskProgressEventPayload]) -> None:
-        tool_name = str(event.payload.metadata.get("tool_name", "") or "").strip()
-        summary = str(event.payload.summary or "").strip()
-        if not summary or tool_name not in {"write_file", "edit_file", "insert_lines", "replace_lines", "delete_lines", "exec"}:
-            return
-        if self._last_progress_replies.get(event.payload.task_id) == summary:
-            return
-        self._last_progress_replies[event.payload.task_id] = summary
-        task = self._tasks.get(event.payload.task_id)
-        await self._bus.publish(
-            self._replies.reply(
-                session_id=event.session_id or "",
-                turn_id=event.turn_id,
-                text=self._dialogue.task_progress(task, event.payload),
-                origin_message=self._origin_for(event.session_id or "", task),
-                related_task_id=event.payload.task_id,
-                causation_id=event.event_id,
-                correlation_id=event.correlation_id or event.payload.task_id,
-                kind="status",
-                reply_metadata=self._reply_metadata(task=task),
-            )
-        )
-
-    async def _on_task_result(self, event: BusEnvelope[TaskResultEventPayload]) -> None:
-        self._last_progress_replies.pop(event.payload.task_id, None)
-        task = self._tasks.get(event.payload.task_id)
-        reply_text = self._dialogue.task_result(task, event.payload)
-        await self._bus.publish(
-            self._replies.reply(
-                session_id=event.session_id or "",
-                turn_id=event.turn_id,
-                text=reply_text,
-                origin_message=self._origin_for(event.session_id or "", task),
-                related_task_id=event.payload.task_id,
-                causation_id=event.event_id,
-                correlation_id=event.correlation_id or event.payload.task_id,
-                reply_metadata=self._reply_metadata(task=task),
-            )
-        )
-        metadata = self._task_event_reflection_metadata(
-            event=event,
-            task=task,
-            reply_text=reply_text,
-            execution=self._execution_payload(
-                status="done",
-                summary=event.payload.summary or reply_text,
-                confidence=event.payload.confidence,
-            ),
-        )
-        await self._publish_reflection(event, reason="task_result", metadata=metadata)
-        await self._publish_reflection(
-            event,
-            reason="task_result",
-            event_type=EventType.MEMORY_REFLECT_DEEP,
-            metadata=metadata,
-        )
-
-    async def _on_task_failed(self, event: BusEnvelope[TaskFailedEventPayload]) -> None:
-        self._last_progress_replies.pop(event.payload.task_id, None)
-        task = self._tasks.get(event.payload.task_id)
-        reply_text = self._dialogue.task_failed(task, event.payload)
-        await self._bus.publish(
-            self._replies.reply(
-                session_id=event.session_id or "",
-                turn_id=event.turn_id,
-                text=reply_text,
-                origin_message=self._origin_for(event.session_id or "", task),
-                related_task_id=event.payload.task_id,
-                causation_id=event.event_id,
-                correlation_id=event.correlation_id or event.payload.task_id,
-                reply_metadata=self._reply_metadata(task=task),
-            )
-        )
-        metadata = self._task_event_reflection_metadata(
-            event=event,
-            task=task,
-            reply_text=reply_text,
-            execution=self._execution_payload(
-                status="failed",
-                summary=event.payload.summary or reply_text,
-                failure_reason=event.payload.reason,
-            ),
-        )
-        await self._publish_reflection(event, reason="task_failed", metadata=metadata)
-        await self._publish_reflection(
-            event,
-            reason="task_failed",
-            event_type=EventType.MEMORY_REFLECT_DEEP,
-            metadata=metadata,
-        )
-
-    async def _on_task_cancelled(self, event: BusEnvelope[TaskCancelledEventPayload]) -> None:
-        self._last_progress_replies.pop(event.payload.task_id, None)
+    async def _on_task_end(self, event: BusEnvelope[TaskEndPayload]) -> None:
         if event.payload.task_id in self._cancel_replied_task_ids:
             self._cancel_replied_task_ids.discard(event.payload.task_id)
             return
         task = self._tasks.get(event.payload.task_id)
-        reply_text = self._dialogue.cancelled_event(task, event.payload)
+        reply_text = self._dialogue.task_end(task, event.payload)
         await self._bus.publish(
             self._replies.reply(
                 session_id=event.session_id or "",
@@ -575,16 +458,13 @@ class ExecutiveBrain:
             event=event,
             task=task,
             reply_text=reply_text,
-            execution=self._execution_payload(
-                status="failed",
-                summary=reply_text,
-                failure_reason=event.payload.reason or "task_cancelled",
-            ),
+            execution=self._task_end_execution(event.payload, task=task, reply_text=reply_text),
         )
-        await self._publish_reflection(event, reason="task_cancelled", metadata=metadata)
+        reason = self._task_end_reason(event.payload)
+        await self._publish_reflection(event, reason=reason, metadata=metadata)
         await self._publish_reflection(
             event,
-            reason="task_cancelled",
+            reason=reason,
             event_type=EventType.MEMORY_REFLECT_DEEP,
             metadata=metadata,
         )
@@ -669,8 +549,35 @@ class ExecutiveBrain:
         return bool(getattr(task, "suppress_delivery", False)) if task is not None else False
 
     @staticmethod
-    def _command_metadata(*, suppress_delivery: bool) -> dict[str, Any]:
+    def _delivery_flag(*, suppress_delivery: bool) -> dict[str, Any]:
         return {"suppress_delivery": True} if suppress_delivery else {}
+
+    def _task_create_context(
+        self,
+        *,
+        task: dict[str, object],
+        payload: UserMessagePayload,
+        origin: MessageRef,
+        suppress_delivery: bool,
+    ) -> dict[str, Any]:
+        return self._compact_dict(
+            {
+                "title": str(task.get("title", "") or "").strip() or None,
+                "expected_output": str(task.get("expected_output", "") or "").strip() or None,
+                "constraints": self._string_list(task.get("constraints")),
+                "success_criteria": self._string_list(task.get("success_criteria")),
+                "history_context": str(task.get("history_context", "") or "").strip()
+                or str(payload.metadata.get("history_context", "") or "").strip()
+                or None,
+                "memory_refs": self._string_list(task.get("memory_refs")),
+                "skill_hints": self._string_list(task.get("skill_hints")),
+                "content_blocks": list(payload.content_blocks),
+                "review_policy": str(task.get("review_policy", "") or "").strip() or self._review_policy(payload),
+                "preferred_agent": str(task.get("preferred_agent", "") or "").strip() or self._preferred_agent(payload),
+                "origin_message": origin.model_dump(exclude_none=True),
+                "suppress_delivery": True if suppress_delivery else None,
+            }
+        )
 
     @staticmethod
     def _merge_reply_metadata(*parts: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -689,10 +596,20 @@ class ExecutiveBrain:
     ) -> dict[str, Any] | None:
         return self._merge_reply_metadata(
             extra,
-            self._command_metadata(
+            self._delivery_flag(
                 suppress_delivery=suppress_delivery or self._task_suppress_delivery(task),
             ),
         )
+
+    @staticmethod
+    def _string_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item.strip() for item in (str(entry or "") for entry in value) if item.strip()]
+
+    @staticmethod
+    def _compact_dict(payload: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in payload.items() if value not in ("", None, [], {})}
 
     async def _decide_user_turn(
         self,
@@ -706,6 +623,7 @@ class ExecutiveBrain:
             raise RuntimeError("ExecutiveBrain requires brain_llm for user-turn decisions")
 
         messages = self._build_brain_decision_messages(
+            session_id=event.session_id or "",
             user_text=user_text,
             history_context=str(event.payload.metadata.get("history_context", "") or "").strip(),
             tasks=tasks,
@@ -719,9 +637,9 @@ class ExecutiveBrain:
                 "history_context": str(event.payload.metadata.get("history_context", "") or "").strip(),
                 "review_policy": self._review_policy(event.payload) or "",
                 "preferred_agent": self._preferred_agent(event.payload) or "",
-                "waiting_task_id": self._latest_waiting_task_id(tasks),
-                "active_task_id": self._latest_active_task_id(tasks),
-                "latest_task_id": self._latest_task_id(tasks),
+                "waiting_task_id": self._latest_waiting_task_id(event.session_id or "", tasks),
+                "active_task_id": self._latest_active_task_id(event.session_id or "", tasks),
+                "latest_task_id": self._latest_task_id(event.session_id or "", tasks),
             },
         )
 
@@ -757,22 +675,23 @@ class ExecutiveBrain:
     def _build_brain_decision_messages(
         self,
         *,
+        session_id: str,
         user_text: str,
         history_context: str,
         tasks: list[object],
     ) -> list[SystemMessage | HumanMessage]:
         system_prompt = ""
-        if self._context_builder is not None and hasattr(self._context_builder, "build_brain_decision_system_prompt"):
-            system_prompt = self._context_builder.build_brain_decision_system_prompt(query=user_text)
-        elif self._context_builder is not None and hasattr(self._context_builder, "build_brain_system_prompt"):
+        if self._context_builder is not None and hasattr(self._context_builder, "build_brain_system_prompt"):
             system_prompt = self._context_builder.build_brain_system_prompt(query=user_text)
+        elif self._context_builder is not None and hasattr(self._context_builder, "build_brain_decision_system_prompt"):
+            system_prompt = self._context_builder.build_brain_decision_system_prompt(query=user_text)
         messages: list[SystemMessage | HumanMessage] = []
         if system_prompt.strip():
             messages.append(SystemMessage(content=system_prompt.strip()))
-        messages.append(HumanMessage(content=self._user_turn_instruction(history_context, tasks, user_text)))
+        messages.append(HumanMessage(content=self._user_turn_instruction(session_id, history_context, tasks, user_text)))
         return messages
 
-    def _user_turn_instruction(self, history_context: str, tasks: list[object], user_text: str) -> str:
+    def _user_turn_instruction(self, session_id: str, history_context: str, tasks: list[object], user_text: str) -> str:
         lines = [
             "## 当前轮执行要求",
             "你现在要对这条用户输入做一次完整决策，并且只能输出两个文本区块：`####user####` 和 `####task####`。",
@@ -795,7 +714,7 @@ class ExecutiveBrain:
             "凡是用户要求创建文件、修改文件、运行命令、检查环境、调用工具、生成产物，必须输出 `action=create_task`。",
             "不要假装任务已经完成；只要还没有经过 runtime/worker 执行，就不能在 `####user####` 里声称文件已创建、命令已运行或结果已落盘。",
         ]
-        task_lines = self._task_context_lines(tasks)
+        task_lines = self._task_context_lines(session_id, tasks)
         if history_context:
             lines.extend(["", "## 最近对话摘要", history_context])
         if task_lines:
@@ -803,8 +722,7 @@ class ExecutiveBrain:
         lines.extend(["", "## 用户消息", user_text])
         return "\n".join(lines).strip()
 
-    @staticmethod
-    def _task_context_lines(tasks: list[object]) -> list[str]:
+    def _task_context_lines(self, session_id: str, tasks: list[object]) -> list[str]:
         lines: list[str] = []
         for task in tasks[-5:]:
             title = str(getattr(task, "title", "") or getattr(task, "task_id", "")).strip()
@@ -814,6 +732,10 @@ class ExecutiveBrain:
             request = ""
             if getattr(task, "request", None) is not None:
                 request = str(getattr(task, "request").request or "").strip()
+            session_task = self._session_task_view(session_id, task_id)
+            if session_task is not None:
+                status = session_task.state
+                summary = session_task.summary or summary
             item = {
                 "task_id": task_id,
                 "title": title,
@@ -821,6 +743,9 @@ class ExecutiveBrain:
                 "summary": summary,
                 "request": request,
             }
+            trace_summary = self._task_trace_summary(task_id)
+            if trace_summary:
+                item["trace"] = trace_summary
             lines.append(f"- {item}")
         return lines
 
@@ -895,7 +820,7 @@ class ExecutiveBrain:
                 "channel": origin.channel or "",
                 "chat_id": origin.chat_id or "",
                 "brain": dict(brain_packet),
-                "task": self._task_snapshot(task),
+                "task": self._task_snapshot(task, session_id=event.session_id or ""),
                 "execution": execution or {},
                 "metadata": {"source_event_type": event.event_type},
             }
@@ -904,7 +829,7 @@ class ExecutiveBrain:
     def _task_event_reflection_metadata(
         self,
         *,
-        event: BusEnvelope[TaskResultEventPayload | TaskFailedEventPayload | TaskCancelledEventPayload],
+        event: BusEnvelope[TaskEndPayload],
         task: object,
         reply_text: str,
         execution: dict[str, Any],
@@ -924,7 +849,7 @@ class ExecutiveBrain:
                 "assistant_output": reply_text,
                 "channel": origin.channel or "",
                 "chat_id": origin.chat_id or "",
-                "task": event.payload.state.model_dump(),
+                "task": self._task_snapshot(task, session_id=event.session_id or ""),
                 "execution": execution,
                 "metadata": {"source_event_type": event.event_type, "related_task_id": event.task_id or ""},
             }
@@ -951,32 +876,96 @@ class ExecutiveBrain:
         }
 
     @staticmethod
-    def _task_snapshot(task: object) -> dict[str, Any]:
-        if task is None or not hasattr(task, "snapshot"):
-            return {}
-        return getattr(task, "snapshot")().model_dump()
+    def _task_end_reason(payload: TaskEndPayload) -> str:
+        return {
+            "success": "task_result",
+            "failed": "task_failed",
+            "cancelled": "task_cancelled",
+        }.get(payload.result, "task_end")
 
     @staticmethod
-    def _latest_waiting_task_id(tasks: list[object]) -> str:
+    def _task_end_execution(payload: TaskEndPayload, *, task: object, reply_text: str) -> dict[str, Any]:
+        confidence = getattr(getattr(task, "latest_result", None), "confidence", None)
+        if payload.result == "success":
+            return ExecutiveBrain._execution_payload(
+                status="done",
+                summary=payload.summary or reply_text,
+                confidence=confidence,
+            )
+        if payload.result == "cancelled":
+            return ExecutiveBrain._execution_payload(
+                status="failed",
+                summary=payload.summary or reply_text,
+                failure_reason=payload.error or "task_cancelled",
+            )
+        return ExecutiveBrain._execution_payload(
+            status="failed",
+            summary=payload.summary or reply_text,
+            failure_reason=payload.error,
+        )
+
+    def _task_snapshot(self, task: object, *, session_id: str = "") -> dict[str, Any]:
+        if task is None or not hasattr(task, "snapshot"):
+            return {}
+        params = {}
+        if getattr(task, "request", None) is not None:
+            params = getattr(task, "request").model_dump(exclude_none=True)
+        task_id = str(getattr(task, "task_id", "") or "").strip()
+        if self._session_runtime is not None and session_id and task_id:
+            task_view = self._session_runtime.task_view(session_id, task_id)
+            if task_view is not None:
+                return project_task_from_session_view(task_view, params=params)
+        return project_task_from_runtime_snapshot(
+            getattr(task, "snapshot")().model_dump(exclude_none=True),
+            params=params,
+        )
+
+    def _latest_waiting_task_id(self, session_id: str, tasks: list[object]) -> str:
+        if self._session_runtime is not None:
+            task_id = str(self._session_runtime.latest_waiting_task_id(session_id) or "").strip()
+            if task_id:
+                return task_id
         for task in reversed(tasks):
             status = str(getattr(getattr(task, "status", None), "value", "") or "")
             if status == "waiting_input":
                 return str(getattr(task, "task_id", "") or "").strip()
         return ""
 
-    @staticmethod
-    def _latest_active_task_id(tasks: list[object]) -> str:
+    def _latest_active_task_id(self, session_id: str, tasks: list[object]) -> str:
+        if self._session_runtime is not None:
+            task_id = str(self._session_runtime.latest_active_task_id(session_id) or "").strip()
+            if task_id:
+                return task_id
         for task in reversed(tasks):
             status = str(getattr(getattr(task, "status", None), "value", "") or "")
             if status not in {"done", "failed", "cancelled", "archived"}:
                 return str(getattr(task, "task_id", "") or "").strip()
         return ""
 
-    @staticmethod
-    def _latest_task_id(tasks: list[object]) -> str:
+    def _latest_task_id(self, session_id: str, tasks: list[object]) -> str:
+        if self._session_runtime is not None:
+            task_id = str(self._session_runtime.latest_task_id(session_id) or "").strip()
+            if task_id:
+                return task_id
         if not tasks:
             return ""
         return str(getattr(tasks[-1], "task_id", "") or "").strip()
+
+    @staticmethod
+    def _should_cancel_task_on_interrupt(payload: InterruptPayload) -> bool:
+        if bool((payload.metadata or {}).get("cancel_active_task")):
+            return True
+        return str(payload.interrupt_type or "").strip() in {"cancel_task", "hard_interrupt"}
+
+    def _session_task_view(self, session_id: str, task_id: str) -> Any | None:
+        if self._session_runtime is None or not session_id or not task_id:
+            return None
+        return self._session_runtime.task_view(session_id, task_id)
+
+    def _task_trace_summary(self, task_id: str) -> str:
+        if self._session_runtime is None or not task_id:
+            return ""
+        return " | ".join(self._session_runtime.task_trace_summary(task_id, limit=2))
 
     @staticmethod
     def _execution_from_packet(packet: BrainControlPacket, *, task: object) -> dict[str, Any]:
