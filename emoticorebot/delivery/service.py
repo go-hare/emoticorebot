@@ -28,18 +28,21 @@ class DeliveryService:
         self._should_deliver = should_deliver
 
     def register(self) -> None:
-        self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_REPLY_APPROVED, handler=self._deliver)
-        self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_REPLY_REDACTED, handler=self._deliver)
+        self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_INLINE_READY, handler=self._deliver)
+        self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_PUSH_READY, handler=self._deliver)
+        self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_STREAM_OPEN, handler=self._deliver)
+        self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_STREAM_DELTA, handler=self._deliver)
+        self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_STREAM_CLOSE, handler=self._deliver)
 
     async def _deliver(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
         payload = event.payload
         reply_metadata = dict(payload.reply.metadata or {})
-        stream_state = self._stream_state(reply_metadata)
+        stream_state = self._stream_state(event.event_type, reply_metadata)
         origin = payload.origin_message or MessageRef()
         channel = payload.channel_override or origin.channel
         chat_id = payload.chat_id_override or origin.chat_id
         if self._should_deliver is not None and not self._should_deliver(event):
-            if self._is_stream(reply_metadata):
+            if self._is_stream(event.event_type, reply_metadata):
                 await self._publish_superseded(
                     event,
                     channel=channel,
@@ -83,7 +86,7 @@ class DeliveryService:
                 "reply_kind": payload.reply.kind,
                 "session_id": event.session_id,
                 "task_id": event.task_id,
-                "_stream": bool(reply_metadata.get("stream_id")),
+                "_stream": bool(reply_metadata.get("stream_id")) or stream_state in {"open", "delta", "close"},
                 "_stream_id": str(reply_metadata.get("stream_id", "") or "").strip(),
                 "_stream_state": stream_state,
                 "_stream_index": reply_metadata.get("stream_index"),
@@ -104,7 +107,7 @@ class DeliveryService:
             channel=channel,
             chat_id=chat_id,
             delivery_message_id=delivery_message_id,
-            delivery_mode=payload.delivery_mode or "chat",
+            delivery_mode=payload.delivery_mode,
             delivered_at=delivered_at,
             reply_to_message_id=payload.reply.reply_to_message_id or origin.message_id,
         )
@@ -189,11 +192,23 @@ class DeliveryService:
         return bool(reply_metadata.get("suppress_delivery"))
 
     @staticmethod
-    def _is_stream(reply_metadata: dict[str, object]) -> bool:
+    def _is_stream(event_type: str, reply_metadata: dict[str, object]) -> bool:
+        if str(event_type) in {
+            str(EventType.OUTPUT_STREAM_OPEN),
+            str(EventType.OUTPUT_STREAM_DELTA),
+            str(EventType.OUTPUT_STREAM_CLOSE),
+        }:
+            return True
         return bool(str(reply_metadata.get("stream_id", "") or "").strip())
 
     @staticmethod
-    def _stream_state(reply_metadata: dict[str, object]) -> str:
+    def _stream_state(event_type: str, reply_metadata: dict[str, object]) -> str:
+        if str(event_type) == str(EventType.OUTPUT_STREAM_OPEN):
+            return "open"
+        if str(event_type) == str(EventType.OUTPUT_STREAM_DELTA):
+            return "delta"
+        if str(event_type) == str(EventType.OUTPUT_STREAM_CLOSE):
+            return "close"
         stream_state = str(reply_metadata.get("stream_state", "") or "").strip()
         if stream_state == "final":
             return "close"

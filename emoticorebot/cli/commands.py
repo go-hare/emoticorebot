@@ -297,7 +297,7 @@ def _create_workspace_templates(workspace: Path):
 
 @app.command()
 def gateway(
-    port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
+    port: int | None = typer.Option(None, "--port", "-p", help="Reserved gateway port override"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Start the emoticorebot gateway."""
@@ -312,10 +312,14 @@ def gateway(
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
-    
-    console.print(f"{__logo__} Starting emoticorebot gateway on port {port}...")
-    
+
     config = load_config()
+    resolved_port = port if port is not None else config.gateway.port
+    console.print(f"{__logo__} Starting emoticorebot gateway...")
+    console.print(
+        f"[dim]Port setting {resolved_port} is reserved for future webhook-based channels; "
+        "the current gateway does not bind a local listener.[/dim]"
+    )
     bus = TransportBus()
     thread_store = ThreadStore(config.workspace_path)
     
@@ -358,6 +362,7 @@ def gateway(
     agent.initialize_subconscious(
         enable_reflection=True,  # 启用反思和主动对话
         enable_heartbeat=hb_cfg.enabled,  # 根据配置启用心跳
+        heartbeat_interval_s=hb_cfg.interval_s,
     )
     
     # Create channel manager
@@ -1188,7 +1193,8 @@ def status():
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
     if config_path.exists():
-        console.print(f"Model: {config.agents.defaults.model}")
+        console.print(f"Brain Model: {config.agents.defaults.brain_mode.model}")
+        console.print(f"Worker Model: {config.agents.defaults.worker_mode.model}")
 
 
 if __name__ == "__main__":

@@ -41,11 +41,21 @@ class BusEnvelope(ProtocolModel, Generic[PayloadT]):
 
     @model_validator(mode="after")
     def validate_envelope(self) -> "BusEnvelope[PayloadT]":
+        from .event_contracts import is_known_event_type, payload_model_for_event
+
         if self.priority < EventPriority.P0 or self.priority > EventPriority.P4:
             raise ValueError("priority must be between 0 and 4")
         expected_topic = topic_for(self.event_type)
         if self.topic != expected_topic:
             raise ValueError(f"topic {self.topic!r} does not match event type {self.event_type!r}")
+        expected_payload_model = payload_model_for_event(self.event_type)
+        if is_known_event_type(self.event_type) and expected_payload_model is None:
+            raise ValueError(f"event payload contract is missing for {self.event_type!r}")
+        if expected_payload_model is not None and not isinstance(self.payload, expected_payload_model):
+            raise ValueError(
+                f"payload {self.payload.__class__.__name__!r} does not match "
+                f"expected {expected_payload_model.__name__!r} for {self.event_type!r}"
+            )
         if expected_topic != Topic.INPUT_EVENT and expected_topic != Topic.SYSTEM_SIGNAL and not self.session_id:
             raise ValueError("session_id is required for business-path events")
         return self

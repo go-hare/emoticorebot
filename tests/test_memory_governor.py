@@ -40,7 +40,7 @@ async def _publish_delivery_gate(bus: PriorityPubSubBus, *, session_id: str, tur
                     message_id="reply_1",
                     reply_to_message_id="msg_1",
                 ),
-                delivery_mode="chat",
+                delivery_mode="inline",
             ),
         )
     )

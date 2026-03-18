@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import Field
 
+from .contracts import RightBrainJobAction, RightBrainStrategy
+from .events import TurnInputPayload
 from .task_models import (
     AgentInputContext,
     AgentRole,
@@ -20,6 +22,22 @@ from .task_models import (
 )
 
 ControlAction = Literal["speak", "move", "stop", "manipulate"]
+class LeftReplyRequestPayload(ProtocolModel):
+    request_id: str
+    turn_input: TurnInputPayload
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RightBrainJobRequestPayload(ProtocolModel):
+    job_id: str
+    right_brain_strategy: RightBrainStrategy = "async"
+    job_action: RightBrainJobAction
+    source_text: str | None = None
+    request_text: str | None = None
+    task_id: str | None = None
+    goal: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskCreatePayload(ProtocolModel):
@@ -101,6 +119,10 @@ __all__ = [
     "CancelAgentPayload",
     "ControlAction",
     "ControlCommandPayload",
+    "LeftReplyRequestPayload",
+    "RightBrainJobAction",
+    "RightBrainJobRequestPayload",
+    "RightBrainStrategy",
     "ResumeAgentPayload",
     "TaskCancelPayload",
     "TaskCreatePayload",

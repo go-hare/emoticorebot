@@ -88,8 +88,11 @@ class RuntimeKernel:
         self._delivery_runtime = DeliveryRuntime(bus=self._bus, transport=transport, should_deliver=self._should_deliver_reply)
         self._delivery_runtime.register()
         self._reflection.register()
-        self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_REPLY_APPROVED, handler=self._capture_reply)
-        self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_REPLY_REDACTED, handler=self._capture_reply)
+        self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_INLINE_READY, handler=self._capture_reply)
+        self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_PUSH_READY, handler=self._capture_reply)
+        self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_STREAM_OPEN, handler=self._capture_reply)
+        self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_STREAM_DELTA, handler=self._capture_reply)
+        self._bus.subscribe(consumer="kernel", event_type=EventType.OUTPUT_STREAM_CLOSE, handler=self._capture_reply)
 
     @property
     def task_store(self):
@@ -227,7 +230,9 @@ class RuntimeKernel:
     async def _capture_reply(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
         if not self._should_deliver_reply(event):
             return
-        stream_state = str(event.payload.reply.metadata.get("stream_state", "") or "").strip()
+        if self._is_task_origin_reply(event):
+            return
+        stream_state = self._stream_state(event)
         if stream_state in {"open", "delta", "superseded"}:
             return
         key = (event.session_id or "", event.turn_id or "")
@@ -249,6 +254,8 @@ class RuntimeKernel:
         )
 
     def _should_deliver_reply(self, event: BusEnvelope[ReplyReadyPayload]) -> bool:
+        if self._is_task_origin_reply(event):
+            return self._task_origin_reply_is_active(event)
         session_id = str(event.session_id or "").strip()
         turn_id = str(event.turn_id or "").strip()
         if not session_id or not turn_id:
@@ -257,6 +264,29 @@ class RuntimeKernel:
         if current_turn_id is None:
             return True
         return current_turn_id == turn_id
+
+    @staticmethod
+    def _is_task_origin_reply(event: BusEnvelope[ReplyReadyPayload]) -> bool:
+        metadata = dict(event.payload.reply.metadata or {})
+        return str(metadata.get("front_origin", "") or "").strip() == "task"
+
+    def _task_origin_reply_is_active(self, event: BusEnvelope[ReplyReadyPayload]) -> bool:
+        task_id = str(event.payload.related_task_id or event.task_id or "").strip()
+        if not task_id:
+            return True
+        return self.task_store.get(task_id) is not None
+
+    @staticmethod
+    def _stream_state(event: BusEnvelope[ReplyReadyPayload]) -> str:
+        event_type = str(event.event_type)
+        if event_type == str(EventType.OUTPUT_STREAM_OPEN):
+            return "open"
+        if event_type == str(EventType.OUTPUT_STREAM_DELTA):
+            return "delta"
+        if event_type == str(EventType.OUTPUT_STREAM_CLOSE):
+            return "close"
+        state = str(event.payload.reply.metadata.get("stream_state", "") or "").strip()
+        return "close" if state == "final" else state
 
     def _close_context_builder(self) -> None:
         close = getattr(self._context_builder, "close", None)

@@ -4,13 +4,38 @@ import asyncio
 
 from emoticorebot.brain.executive import ExecutiveBrain
 from emoticorebot.bus.pubsub import PriorityPubSubBus
+from emoticorebot.protocol.commands import LeftReplyRequestPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload, StableInputPayload, TaskSummaryPayload, TaskUpdatePayload
+from emoticorebot.protocol.events import ReplyReadyPayload, TaskSummaryPayload, TaskUpdatePayload, TurnInputPayload
 from emoticorebot.protocol.task_models import MessageRef, ProtocolModel, TaskRequestSpec
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.state_machine import TaskState
 from emoticorebot.runtime.task_store import RuntimeTaskRecord, TaskStore
 from emoticorebot.session.runtime import SessionRuntime
+
+
+def _left_reply_request(
+    *,
+    source: str,
+    session_id: str,
+    turn_id: str,
+    turn_input: TurnInputPayload,
+    correlation_id: str | None = None,
+    task_id: str | None = None,
+) -> BusEnvelope[LeftReplyRequestPayload]:
+    return build_envelope(
+        event_type=EventType.LEFT_COMMAND_REPLY_REQUESTED,
+        source=source,
+        target="brain",
+        session_id=session_id,
+        turn_id=turn_id,
+        task_id=task_id,
+        correlation_id=correlation_id or turn_id,
+        payload=LeftReplyRequestPayload(
+            request_id=f"left_req_{turn_id}",
+            turn_input=turn_input,
+        ),
+    )
 
 
 def _task_store() -> TaskStore:
@@ -45,20 +70,18 @@ async def _exercise_terminal_reflection() -> None:
 
     task = store.require("task_1")
     await bus.publish(
-        build_envelope(
-            event_type=EventType.INPUT_STABLE,
+        _left_reply_request(
             source="session",
-            target="broadcast",
             session_id="sess_1",
             turn_id="turn_1",
             task_id="task_1",
             correlation_id="task_1",
-            payload=StableInputPayload(
+            turn_input=TurnInputPayload(
                 input_id="task_front_1",
-                input_kind="text",
-                channel_kind="chat",
+                input_mode="turn",
+                session_mode="turn_chat",
                 message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_1"),
-                plain_text="已完成",
+                user_text="已完成",
                 metadata={
                     "front_origin": "task",
                     "task_event_type": EventType.TASK_END,
@@ -113,20 +136,18 @@ async def _exercise_task_ask_reflection() -> None:
     bus.subscribe(consumer="memory_governor", event_type=EventType.REFLECT_LIGHT, handler=_capture_turn)
 
     await bus.publish(
-        build_envelope(
-            event_type=EventType.INPUT_STABLE,
+        _left_reply_request(
             source="session",
-            target="broadcast",
             session_id="sess_waiting",
             turn_id="turn_waiting",
             task_id="task_waiting_1",
             correlation_id="task_waiting_1",
-            payload=StableInputPayload(
+            turn_input=TurnInputPayload(
                 input_id="task_front_waiting",
-                input_kind="text",
-                channel_kind="chat",
+                input_mode="turn",
+                session_mode="turn_chat",
                 message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_waiting"),
-                plain_text="需要你补充仓库地址",
+                user_text="需要你补充仓库地址",
                 metadata={
                     "front_origin": "task",
                     "task_event_type": EventType.TASK_ASK,
@@ -172,12 +193,12 @@ def test_task_create_context_injects_memory_bundle() -> None:
             }
 
     brain = ExecutiveBrain(bus=PriorityPubSubBus(), task_store=TaskStore(), context_builder=_ContextBuilder())
-    payload = StableInputPayload(
+    payload = TurnInputPayload(
         input_id="turn_1",
-        input_kind="text",
-        channel_kind="chat",
+        input_mode="turn",
+        session_mode="turn_chat",
         message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_1"),
-        plain_text="创建 add.py",
+        user_text="创建 add.py",
         metadata={},
     )
 
@@ -209,33 +230,31 @@ async def _exercise_task_origin_reply_guard_redacts_before_publish() -> None:
     brain = ExecutiveBrain(bus=bus, task_store=store)
     brain.register()
 
-    redacted: list[BusEnvelope[ReplyReadyPayload]] = []
-    ready: list[BusEnvelope[ReplyReadyPayload]] = []
+    pushed: list[BusEnvelope[ReplyReadyPayload]] = []
+    inline: list[BusEnvelope[ReplyReadyPayload]] = []
 
-    async def _capture_redacted(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        redacted.append(event)
+    async def _capture_push(event: BusEnvelope[ReplyReadyPayload]) -> None:
+        pushed.append(event)
 
-    async def _capture_ready(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        ready.append(event)
+    async def _capture_inline(event: BusEnvelope[ReplyReadyPayload]) -> None:
+        inline.append(event)
 
-    bus.subscribe(consumer="test:redacted", event_type=EventType.OUTPUT_REPLY_REDACTED, handler=_capture_redacted)
-    bus.subscribe(consumer="test:ready", event_type=EventType.OUTPUT_REPLY_READY, handler=_capture_ready)
+    bus.subscribe(consumer="test:push", event_type=EventType.OUTPUT_PUSH_READY, handler=_capture_push)
+    bus.subscribe(consumer="test:inline", event_type=EventType.OUTPUT_INLINE_READY, handler=_capture_inline)
 
     await bus.publish(
-        build_envelope(
-            event_type=EventType.INPUT_STABLE,
+        _left_reply_request(
             source="session",
-            target="broadcast",
             session_id="sess_2",
             turn_id="turn_2",
             task_id="task_2",
             correlation_id="task_2",
-            payload=StableInputPayload(
+            turn_input=TurnInputPayload(
                 input_id="task_front_2",
-                input_kind="text",
-                channel_kind="chat",
+                input_mode="turn",
+                session_mode="turn_chat",
                 message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_2"),
-                plain_text="任务结束",
+                user_text="任务结束",
                 metadata={
                     "front_origin": "task",
                     "task_event_type": EventType.TASK_END,
@@ -250,9 +269,9 @@ async def _exercise_task_origin_reply_guard_redacts_before_publish() -> None:
     )
     await bus.drain()
 
-    assert ready == []
-    assert len(redacted) == 1
-    assert redacted[0].payload.reply.plain_text == "完成任务 已完成。api_key=[REDACTED]"
+    assert inline == []
+    assert len(pushed) == 1
+    assert pushed[0].payload.reply.plain_text == "完成任务 已完成。api_key=[REDACTED]"
 
 
 def test_executive_brain_task_origin_reply_guard_redacts_before_publish() -> None:
@@ -270,32 +289,30 @@ async def _exercise_user_turn_blocked_reply_falls_back_synchronously() -> None:
     brain = ExecutiveBrain(bus=bus, task_store=store, brain_llm=_UnsafeReplyBrainLLM())
     brain.register()
 
-    approved: list[BusEnvelope[ReplyReadyPayload]] = []
-    ready: list[BusEnvelope[ReplyReadyPayload]] = []
+    inline: list[BusEnvelope[ReplyReadyPayload]] = []
+    pushed: list[BusEnvelope[ReplyReadyPayload]] = []
 
-    async def _capture_approved(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        approved.append(event)
+    async def _capture_inline(event: BusEnvelope[ReplyReadyPayload]) -> None:
+        inline.append(event)
 
-    async def _capture_ready(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        ready.append(event)
+    async def _capture_push(event: BusEnvelope[ReplyReadyPayload]) -> None:
+        pushed.append(event)
 
-    bus.subscribe(consumer="test:approved", event_type=EventType.OUTPUT_REPLY_APPROVED, handler=_capture_approved)
-    bus.subscribe(consumer="test:ready", event_type=EventType.OUTPUT_REPLY_READY, handler=_capture_ready)
+    bus.subscribe(consumer="test:inline", event_type=EventType.OUTPUT_INLINE_READY, handler=_capture_inline)
+    bus.subscribe(consumer="test:push", event_type=EventType.OUTPUT_PUSH_READY, handler=_capture_push)
 
     await bus.publish(
-        build_envelope(
-            event_type=EventType.INPUT_STABLE,
+        _left_reply_request(
             source="input_normalizer",
-            target="broadcast",
             session_id="sess_3",
             turn_id="turn_3",
             correlation_id="turn_3",
-            payload=StableInputPayload(
+            turn_input=TurnInputPayload(
                 input_id="turn_3",
-                input_kind="text",
-                channel_kind="chat",
+                input_mode="turn",
+                session_mode="turn_chat",
                 message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_3"),
-                plain_text="回复我",
+                user_text="回复我",
                 metadata={"channel_kind": "chat"},
             ),
         )
@@ -304,11 +321,11 @@ async def _exercise_user_turn_blocked_reply_falls_back_synchronously() -> None:
     await asyncio.sleep(0)
     await bus.drain()
 
-    assert ready == []
-    assert len(approved) == 1
-    assert approved[0].payload.reply.safe_fallback is True
-    assert approved[0].payload.reply.kind == "safety_fallback"
-    assert "不能直接发出" in str(approved[0].payload.reply.plain_text or "")
+    assert pushed == []
+    assert len(inline) == 1
+    assert inline[0].payload.reply.safe_fallback is True
+    assert inline[0].payload.reply.kind == "safety_fallback"
+    assert "不能直接发出" in str(inline[0].payload.reply.plain_text or "")
 
 
 def test_executive_brain_user_turn_blocked_reply_falls_back_synchronously() -> None:
@@ -380,19 +397,17 @@ async def _exercise_user_turn_consumes_unread_task_traces() -> None:
         )
         await bus.drain()
         await bus.publish(
-            build_envelope(
-                event_type=EventType.INPUT_STABLE,
+            _left_reply_request(
                 source="input_normalizer",
-                target="broadcast",
                 session_id="sess_trace",
                 turn_id="turn_trace_1",
                 correlation_id="turn_trace_1",
-                payload=StableInputPayload(
+                turn_input=TurnInputPayload(
                     input_id="turn_trace_1",
-                    input_kind="text",
-                    channel_kind="chat",
+                    input_mode="turn",
+                    session_mode="turn_chat",
                     message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_trace_1"),
-                    plain_text="现在进度怎样？",
+                    user_text="现在进度怎样？",
                     metadata={"channel_kind": "chat"},
                 ),
             )
@@ -433,19 +448,17 @@ async def _exercise_user_turn_consumes_unread_task_traces() -> None:
         )
         await bus.drain()
         await bus.publish(
-            build_envelope(
-                event_type=EventType.INPUT_STABLE,
+            _left_reply_request(
                 source="input_normalizer",
-                target="broadcast",
                 session_id="sess_trace",
                 turn_id="turn_trace_2",
                 correlation_id="turn_trace_2",
-                payload=StableInputPayload(
+                turn_input=TurnInputPayload(
                     input_id="turn_trace_2",
-                    input_kind="text",
-                    channel_kind="chat",
+                    input_mode="turn",
+                    session_mode="turn_chat",
                     message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_trace_2"),
-                    plain_text="再说一下最新进度",
+                    user_text="再说一下最新进度",
                     metadata={"channel_kind": "chat"},
                 ),
             )

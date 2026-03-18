@@ -348,7 +348,7 @@ def test_replied_for_terminal_task_emits_archive_command() -> None:
             payload=RepliedPayload(
                 reply_id="reply_1",
                 delivery_message=MessageRef(channel="cli", chat_id="direct", message_id="delivery_reply_1"),
-                delivery_mode="chat",
+                delivery_mode="inline",
                 delivered_at="2026-03-15T00:00:00Z",
             ),
         )

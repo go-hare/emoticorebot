@@ -10,9 +10,11 @@ import pytest
 from emoticorebot.execution.team import WorkerOutcome
 from emoticorebot.io.normalizer import InputNormalizer
 from emoticorebot.protocol.envelope import build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload
-from emoticorebot.protocol.task_models import ReplyDraft
+from emoticorebot.protocol.events import ReplyReadyPayload, TaskEndPayload
+from emoticorebot.protocol.task_models import MessageRef, ReplyDraft, TaskRequestSpec
 from emoticorebot.protocol.topics import EventType
+from emoticorebot.runtime.state_machine import TaskState
+from emoticorebot.runtime.task_store import RuntimeTaskRecord
 from emoticorebot.runtime.transport_bus import TransportBus
 from emoticorebot.runtime.kernel import RuntimeKernel
 
@@ -48,6 +50,20 @@ class _QueuedBrainLLM:
         if not self.responses:
             raise AssertionError("queued brain llm ran out of scripted responses")
         return self.responses.pop(0)
+
+
+class _BlockingBrainLLM:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.prompts: list[Any] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def ainvoke(self, prompt: Any):
+        self.prompts.append(prompt)
+        self.started.set()
+        await self.release.wait()
+        return self.response
 
 
 class _FakeContextBuilder:
@@ -631,7 +647,7 @@ async def _exercise_kernel_marks_new_input_as_barge_in_when_stream_is_active() -
             await kernel.start()
             await kernel._bus.publish(
                 build_envelope(
-                    event_type=EventType.OUTPUT_REPLY_APPROVED,
+                    event_type=EventType.OUTPUT_STREAM_OPEN,
                     source="guard",
                     target="broadcast",
                     session_id="cli:barge",
@@ -665,3 +681,78 @@ async def _exercise_kernel_marks_new_input_as_barge_in_when_stream_is_active() -
 
 def test_runtime_kernel_marks_new_input_as_barge_in_when_stream_is_active() -> None:
     asyncio.run(_exercise_kernel_marks_new_input_as_barge_in_when_stream_is_active())
+
+
+async def _exercise_kernel_task_origin_reply_does_not_preempt_active_user_turn() -> None:
+    transport = TransportBus()
+    brain_llm = _BlockingBrainLLM(
+        _brain_packet(
+            task_action="none",
+            final_decision="answer",
+            final_message="这是当前用户回合的回复。",
+        )
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(workspace=Path(tmp_dir), transport=transport, brain_llm=brain_llm)
+        task = RuntimeTaskRecord(
+            task_id="task_existing",
+            session_id="cli:task-sidepath",
+            turn_id="turn_existing",
+            request=TaskRequestSpec(request="旧任务", title="旧任务"),
+            origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_existing"),
+            title="旧任务",
+            state=TaskState.RUNNING,
+        )
+        kernel.task_store.add(task)
+
+        try:
+            pending_reply = asyncio.create_task(
+                kernel.handle_user_message(
+                    session_id="cli:task-sidepath",
+                    channel="cli",
+                    chat_id="direct",
+                    sender_id="user",
+                    message_id="msg_current",
+                    content="这是当前用户消息",
+                    timeout_s=2.0,
+                )
+            )
+
+            await asyncio.wait_for(brain_llm.started.wait(), timeout=1.0)
+            await kernel.event_bus.publish(
+                build_envelope(
+                    event_type=EventType.TASK_END,
+                    source="task",
+                    target="broadcast",
+                    session_id="cli:task-sidepath",
+                    turn_id="turn_existing",
+                    task_id="task_existing",
+                    correlation_id="task_existing",
+                    payload=TaskEndPayload(
+                        task_id="task_existing",
+                        result="success",
+                        summary="旧任务总结",
+                        output="旧任务产物",
+                    ),
+                )
+            )
+
+            await _wait_for(lambda: transport.outbound_size >= 1, timeout=2.0)
+            task_sidepath_reply = await transport.consume_outbound()
+            assert task_sidepath_reply.content == "旧任务 已完成。旧任务产物"
+            assert pending_reply.done() is False
+
+            brain_llm.release.set()
+            reply = await pending_reply
+            assert reply.content == "这是当前用户回合的回复。"
+
+            await _wait_for(lambda: transport.outbound_size >= 1, timeout=2.0)
+            user_turn_reply = await transport.consume_outbound()
+            assert user_turn_reply.content == "这是当前用户回合的回复。"
+        finally:
+            brain_llm.release.set()
+            await kernel.stop()
+
+
+def test_runtime_kernel_task_origin_reply_does_not_preempt_active_user_turn() -> None:
+    asyncio.run(_exercise_kernel_task_origin_reply_does_not_preempt_active_user_turn())

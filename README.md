@@ -4,15 +4,15 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-**emoticorebot** is a personal AI assistant built around a **brain + runtime + agent team** architecture.
+**emoticorebot** is a companion AI architecture built around a **single subject with Left Brain / Right Brain / Memory / Reflection** design.
 
-`brain` remains the only outward-facing subject. A typed runtime owns task state and routing, internal agents execute delegated work, and reflection keeps memory/persona evolving after the first reply.
+The system has one outward-facing self. `Left Brain` handles front-stage expression and companionship, `Right Brain` handles async reasoning and execution, and `Memory` plus `Reflection` keep the relationship continuous over time.
 
 Detailed architecture design:
 
-- [docs/final-brain-runtime-architecture.zh-CN.md](docs/final-brain-runtime-architecture.zh-CN.md)
-- [docs/companion-task-architecture.zh-CN.md](docs/companion-task-architecture.zh-CN.md)
-- [docs/dual-full-duplex-refactor.zh-CN.md](docs/dual-full-duplex-refactor.zh-CN.md)
+- [docs/companion-left-right-brain-architecture.zh-CN.md](docs/companion-left-right-brain-architecture.zh-CN.md)
+- [docs/companion-left-right-brain-module-contracts.zh-CN.md](docs/companion-left-right-brain-module-contracts.zh-CN.md)
+- [docs/companion-protocol-spec.zh-CN.md](docs/companion-protocol-spec.zh-CN.md)
 
 ---
 
@@ -74,77 +74,57 @@ emoticorebot agent
 emoticorebot gateway
 ```
 
+Current gateway integrations are WebSocket/polling based and do not require a local listening port. The `gateway.port` setting is reserved for future webhook-style channels.
+
 ---
 
 ## Architecture
 
-emoticorebot v3 is organized around a typed, bus-driven runtime:
+The authoritative architecture is:
 
 ```text
-Inbound Message
-  -> TransportBus
-  -> ConversationGateway
-  -> RuntimeKernel
-  -> PriorityPubSubBus
-  -> ExecutiveBrain
-  -> RuntimeService / TaskStore
-  -> Planner / Worker / Reviewer
-  -> SafetyGuard
-  -> DeliveryService
-  -> TransportBus
-  -> ReflectionCoordinator / MemoryGovernor (async)
+User / Channel
+  -> Session Supervisor
+  -> Intent Router
+  -> Left Brain
+  -> Delivery Plane
+
+Intent Router
+  -> Right Brain (async, on demand)
+Right Brain
+  -> Left Brain
+
+Left Brain / Right Brain
+  -> Memory
+Left Brain / Right Brain
+  -> Reflection
 ```
 
-Only `ExecutiveBrain` is allowed to decide the user-facing reply. Internal agents are execution roles, not separate personas.
+### Canonical Principles
 
-`TransportBus` is only the channel I/O bridge. The actual internal business event bus is still `PriorityPubSubBus`.
+- The system exposes one continuous subject to the user.
+- Inputs are modeled only as `turn` or `stream`.
+- Deliveries are modeled only as `inline`, `push`, or `stream`.
+- `Left Brain` owns front-stage expression and companionship.
+- `Right Brain` owns async reasoning, execution, tools, and long-running work.
+- `Memory` and `Reflection` keep long-term continuity.
 
-### Core Responsibilities
+### Canonical Interaction Modes
 
-| Component | Role |
-|------|------|
-| `ExecutiveBrain` | Interprets the turn, decides whether to reply directly or create/resume/cancel a task, and owns the final user-facing wording. |
-| `RuntimeKernel` | Owns task lifecycle, scheduling, assignment, recovery, and canonical state transitions. |
-| `PriorityPubSubBus` | Typed event bus with priority routing, fan-out, and interceptor support. |
-| `AgentTeam` | Registers `planner`, `worker`, and `reviewer` as internal execution roles. |
-| `SafetyGuard` | Reviews reply drafts and sensitive task results before delivery. |
-| `DeliveryService` | The only component that actually delivers replies to channels. |
-| `MemoryGovernor` | Consumes post-turn signals for reflection, persona updates, and durable memory writes. |
-| `ThreadStore` | Persists user-visible dialogue plus compact internal records. |
+| Input | Delivery | Typical Use |
+|------|------|------|
+| `turn` | `inline` | One-shot Q&A |
+| `turn` | `push` | One-shot request with async notification |
+| `turn` | `stream` | SSE text streaming for one turn |
+| `stream` | `stream` | Real-time full-duplex dialogue |
+| `stream` | `push` | Long-running background work after live conversation |
 
-### Turn Flow
+### Canonical Execution Rule
 
-1. Channel input first enters `TransportBus`; `ConversationGateway` then bridges it into internal `input.event.user_message`.
-2. `ExecutiveBrain` emits either `brain.command.reply`, `brain.command.ask_user`, or a task command such as `brain.command.create_task` / `brain.command.resume_task`.
-3. `RuntimeKernel` persists the task, updates state, and publishes `runtime.command.assign_agent` or `runtime.command.resume_agent`.
-4. `planner`, `worker`, and `reviewer` publish typed `task.report.*` events; runtime converts them into canonical `task.event.*` snapshots.
-5. `RuntimeService` converts `brain.command.reply` / `brain.command.ask_user` into `output.event.reply_ready`.
-6. `SafetyGuard` intercepts that draft and either approves, redacts, or blocks it before `DeliveryService` sends anything.
-7. After delivery, reflection and memory signals run asynchronously and update long-term state.
-
-### Agent Team
-
-- Simple tasks usually go straight to `worker`.
-- Higher-complexity tasks can go `planner -> worker`.
-- High-risk or high-value outputs can additionally go through `reviewer`.
-- The current `worker` implementation is backed by `DeepAgentExecutor`, but that is an execution detail. The outer contract is role-based and bus-driven.
-
-### Persistence
-
-| Layer | File / Store | Purpose |
-|-------|------|---------|
-| `dialogue` | `sessions/<session_key>/dialogue.jsonl` | User-visible conversation history |
-| `internal` | `sessions/<session_key>/internal.jsonl` | Compact turn decisions, task summaries, and runtime facts |
-| `checkpointer` | `sessions/_checkpoints/worker.pkl` | Worker execution resume state |
-| `memory` | `memory/memory.jsonl` | Unified long-term memory source of truth |
-| `vector mirror` | local vector index | Retrieval mirror of `memory.jsonl`, not the canonical source |
-| `skills` | `skills/<name>/SKILL.md` | Reusable workflow knowledge and execution guidance |
-
-### Current Constraints
-
-- `brain` is still the only long-term-memory retriever.
-- Internal agents do not speak directly to the user.
-- Safety currently focuses on reply/output filtering and leaves embodied actuation as a future layer.
+- `Right Brain` is the only background execution system.
+- `create_task` is interpreted as "submit a request to Right Brain for review and handling".
+- `Right Brain` may `accept`, `answer_only`, `clarify`, or `reject`.
+- User-visible wording still returns through `Left Brain`.
 
 ---
 
@@ -316,7 +296,7 @@ For production, restrict tool execution to the workspace:
 ```bash
 docker build -t emoticorebot .
 docker run -v ~/.emoticorebot:/root/.emoticorebot --rm emoticorebot onboard
-docker run -v ~/.emoticorebot:/root/.emoticorebot -p 18790:18790 emoticorebot gateway
+docker run -v ~/.emoticorebot:/root/.emoticorebot emoticorebot gateway
 ```
 
 Or with Docker Compose:

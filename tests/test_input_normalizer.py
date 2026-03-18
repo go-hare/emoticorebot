@@ -6,7 +6,7 @@ from emoticorebot.protocol.task_models import ContentBlock
 from emoticorebot.protocol.topics import EventType, Topic
 
 
-def test_input_normalizer_emits_input_stable_event() -> None:
+def test_input_normalizer_emits_turn_received_event() -> None:
     normalizer = InputNormalizer()
 
     event = normalizer.normalize_text_message(
@@ -20,11 +20,16 @@ def test_input_normalizer_emits_input_stable_event() -> None:
         metadata={"source": "test"},
     )
 
-    assert event.event_type == EventType.INPUT_STABLE
+    assert event.event_type == EventType.INPUT_TURN_RECEIVED
     assert event.topic == Topic.INPUT_EVENT
     assert event.priority == EventPriority.P1
+    assert event.payload.input_mode == "turn"
+    assert event.payload.session_mode == "turn_chat"
     assert event.payload.channel_kind == "chat"
-    assert event.payload.plain_text == "你好"
+    assert event.payload.input_kind == "text"
+    assert event.payload.user_text == "你好"
+    assert event.payload.input_slots.user == "你好"
+    assert event.payload.input_slots.task == ""
 
 
 def test_input_normalizer_preserves_barge_in_flag() -> None:
@@ -44,7 +49,7 @@ def test_input_normalizer_preserves_barge_in_flag() -> None:
     assert event.payload.barge_in is True
 
 
-def test_input_normalizer_emits_voice_stable_event() -> None:
+def test_input_normalizer_emits_voice_turn_received_event() -> None:
     normalizer = InputNormalizer()
 
     event = normalizer.normalize_voice_message(
@@ -59,12 +64,13 @@ def test_input_normalizer_emits_voice_stable_event() -> None:
         metadata={"source": "asr"},
     )
 
-    assert event.event_type == EventType.INPUT_STABLE
+    assert event.event_type == EventType.INPUT_TURN_RECEIVED
     assert event.topic == Topic.INPUT_EVENT
     assert event.priority == EventPriority.P1
-    assert event.payload.input_kind == "voice"
+    assert event.payload.session_mode == "realtime_chat"
     assert event.payload.channel_kind == "voice"
-    assert event.payload.plain_text == "我想补充一句"
+    assert event.payload.input_kind == "voice"
+    assert event.payload.user_text == "我想补充一句"
     assert event.payload.attachments[0].type == "audio"
 
 
@@ -86,8 +92,9 @@ def test_input_normalizer_emits_video_multimodal_turn() -> None:
         metadata={"source": "multimodal"},
     )
 
-    assert event.event_type == EventType.INPUT_STABLE
-    assert event.payload.input_kind == "multimodal"
+    assert event.event_type == EventType.INPUT_TURN_RECEIVED
+    assert event.payload.session_mode == "realtime_chat"
     assert event.payload.channel_kind == "video"
-    assert event.payload.plain_text == "看一下这个界面"
+    assert event.payload.input_kind == "multimodal"
+    assert event.payload.user_text == "看一下这个界面"
     assert len(event.payload.content_blocks) == 2

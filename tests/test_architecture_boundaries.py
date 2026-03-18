@@ -74,7 +74,7 @@ def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     assert "self._pending_turns" in kernel
     assert "self._pending_turn_by_session" in kernel
     assert "self._active_turn_by_session" in kernel
-    assert "EventType.OUTPUT_REPLY_APPROVED" in kernel
+    assert "EventType.OUTPUT_INLINE_READY" in kernel
     assert "InputNormalizer()" in kernel
     assert "TaskRuntime(" in kernel
     assert "FrontRuntime(" in kernel
@@ -91,7 +91,7 @@ def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     assert "self._reply_guard = reply_guard or SafetyGuard()" in executive
     assert "guard_reply_event" in executive
     assert "RuntimeService" not in task
-    assert "EventType.INPUT_STABLE" in executive
+    assert "EventType.LEFT_COMMAND_REPLY_REQUESTED" in executive
     assert "EventType.INPUT_INTERRUPT" not in executive
     assert "OUTPUT_REPLY_BLOCKED" not in _read("emoticorebot/protocol/topics.py")
     assert "SAFETY_BLOCKED" not in _read("emoticorebot/protocol/topics.py")

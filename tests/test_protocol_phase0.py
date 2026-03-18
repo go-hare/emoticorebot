@@ -4,23 +4,24 @@ import pytest
 
 from emoticorebot.protocol.commands import AssignAgentPayload, TaskCreatePayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload, StableInputPayload
+from emoticorebot.protocol.event_contracts import PAYLOAD_MODEL_BY_EVENT_TYPE
+from emoticorebot.protocol.events import ReplyReadyPayload, TurnInputPayload
 from emoticorebot.protocol.priorities import EventPriority, priority_for
 from emoticorebot.protocol.task_models import MessageRef, ReplyDraft, TaskStateSnapshot
 from emoticorebot.protocol.topics import EventType, Topic
 
 
 def test_build_envelope_derives_topic_and_default_priority() -> None:
-    payload = StableInputPayload(
+    payload = TurnInputPayload(
         input_id="turn_1",
-        input_kind="text",
-        channel_kind="chat",
+        input_mode="turn",
+        session_mode="turn_chat",
         message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
-        plain_text="done",
+        user_text="done",
     )
 
     event = build_envelope(
-        event_type=EventType.INPUT_STABLE,
+        event_type=EventType.INPUT_TURN_RECEIVED,
         source="input_normalizer",
         target="broadcast",
         session_id="sess_1",
@@ -109,3 +110,27 @@ def test_priority_mapping_matches_document_examples() -> None:
     assert priority_for(EventType.TASK_CANCEL) == EventPriority.P0
     assert priority_for(EventType.TASK_END) == EventPriority.P2
     assert priority_for(EventType.MEMORY_WRITE_REQUEST) == EventPriority.P4
+
+
+def test_every_known_event_type_has_payload_contract() -> None:
+    known_event_types = {str(event_type) for event_type in EventType}
+    assert known_event_types <= set(PAYLOAD_MODEL_BY_EVENT_TYPE)
+
+
+def test_build_envelope_rejects_event_payload_type_mismatch() -> None:
+    wrong_payload = TurnInputPayload(
+        input_id="turn_2",
+        input_mode="turn",
+        session_mode="turn_chat",
+        message=MessageRef(channel="cli", chat_id="direct", message_id="msg_2"),
+        user_text="hello",
+    )
+
+    with pytest.raises(ValueError, match="does not match expected"):
+        build_envelope(
+            event_type=EventType.TASK_CREATE,
+            source="brain",
+            target="runtime",
+            session_id="sess_2",
+            payload=wrong_payload,
+        )

@@ -6,6 +6,18 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
+from .contracts import (
+    ChannelKind,
+    DeliveryMode,
+    InputKind,
+    InputMode,
+    ReplyDeliveryMode,
+    RightBrainJobAction,
+    RightBrainStrategy,
+    SessionMode,
+    TaskCommandType,
+    TaskEventType,
+)
 from .task_models import (
     AgentRole,
     ContentBlock,
@@ -25,32 +37,125 @@ from .task_models import (
 
 PerceptionType = Literal["wake_word", "vision", "proximity", "localization"]
 SignalType = Literal["timeout", "backpressure", "health_warning", "warning"]
-TaskCommandType = Literal["create", "resume", "cancel"]
-TaskEventType = Literal["update", "summary", "ask", "end"]
 TaskEvent = dict[str, Any]
 
 
-class StableInputPayload(ProtocolModel):
+class InputSlots(ProtocolModel):
+    user: str = ""
+    task: str = ""
+
+
+class TurnInputPayload(ProtocolModel):
+    input_mode: Literal["turn"] = "turn"
+    session_mode: SessionMode = "turn_chat"
+    channel_kind: ChannelKind = "chat"
+    input_kind: InputKind = "text"
     message: MessageRef
-    plain_text: str | None = None
+    user_text: str | None = None
+    input_slots: InputSlots = Field(default_factory=InputSlots)
     content_blocks: list[ContentBlock] = Field(default_factory=list)
     attachments: list[ContentBlock] = Field(default_factory=list)
-    is_interrupt: bool | None = None
-    is_follow_up: bool | None = None
-    detected_language: str | None = None
+    barge_in: bool | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     input_id: str | None = None
-    input_kind: Literal["text", "voice", "video", "multimodal"] = "text"
-    channel_kind: Literal["chat", "voice", "video"] = "chat"
-    barge_in: bool | None = None
 
     @model_validator(mode="after")
-    def validate_content(self) -> "StableInputPayload":
-        if not self.plain_text and not self.content_blocks:
-            raise ValueError("stable inputs require plain_text or content_blocks")
+    def validate_content(self) -> "TurnInputPayload":
+        if not self.user_text and not self.content_blocks:
+            raise ValueError("turn inputs require user_text or content_blocks")
         if not self.message.channel or not self.message.chat_id or not self.message.message_id:
-            raise ValueError("stable inputs require channel, chat_id, and message_id")
+            raise ValueError("turn inputs require channel, chat_id, and message_id")
         return self
+
+
+class StreamStartPayload(ProtocolModel):
+    input_mode: Literal["stream"] = "stream"
+    session_mode: SessionMode = "realtime_chat"
+    stream_id: str
+    message: MessageRef
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StreamChunkPayload(ProtocolModel):
+    input_mode: Literal["stream"] = "stream"
+    stream_id: str
+    chunk_index: int
+    chunk_text: str
+    is_commit_point: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StreamCommitPayload(ProtocolModel):
+    input_mode: Literal["stream"] = "stream"
+    stream_id: str
+    committed_text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StreamInterruptedPayload(ProtocolModel):
+    input_mode: Literal["stream"] = "stream"
+    stream_id: str
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class IntentScoredPayload(ProtocolModel):
+    input_mode: InputMode = "turn"
+    session_mode: SessionMode = "turn_chat"
+    source_text: str
+    scores: dict[str, float] = Field(default_factory=dict)
+    intent_tags: list[str] = Field(default_factory=list)
+    emotion_tags: list[str] = Field(default_factory=list)
+    route_hint: str | None = None
+    input_slots: InputSlots = Field(default_factory=InputSlots)
+    right_brain_strategy: RightBrainStrategy = "skip"
+    invoke_right_brain: bool = False
+    reason: str | None = None
+
+
+class LeftReplyReadyPayload(ProtocolModel):
+    request_id: str | None = None
+    reply_text: str
+    reply_kind: Literal["answer", "ask_user", "status"] = "answer"
+    right_brain_strategy: RightBrainStrategy = "skip"
+    invoke_right_brain: bool = False
+    right_brain_request: dict[str, Any] = Field(default_factory=dict)
+    related_task_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RightBrainAcceptedPayload(ProtocolModel):
+    job_id: str
+    decision: Literal["accept"] = "accept"
+    stage: str | None = None
+    reason: str | None = None
+    estimated_duration_s: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RightBrainClarifyPayload(ProtocolModel):
+    job_id: str
+    decision: Literal["clarify"] = "clarify"
+    question: str
+    missing_fields: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RightBrainRejectedPayload(ProtocolModel):
+    job_id: str
+    decision: Literal["reject"] = "reject"
+    reason: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RightBrainResultPayload(ProtocolModel):
+    job_id: str
+    job_action: RightBrainJobAction
+    task_id: str | None = None
+    summary: str | None = None
+    result_text: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskStartedReportPayload(ProtocolModel):
@@ -188,7 +293,7 @@ class ReplyReadyPayload(ProtocolModel):
     related_event_id: str | None = None
     channel_override: str | None = None
     chat_id_override: str | None = None
-    delivery_mode: str | None = None
+    delivery_mode: DeliveryMode = "inline"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -203,7 +308,7 @@ class ReplyBlockedPayload(ProtocolModel):
 class RepliedPayload(ProtocolModel):
     reply_id: str
     delivery_message: MessageRef
-    delivery_mode: str | None = None
+    delivery_mode: ReplyDeliveryMode
     delivered_at: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -237,13 +342,26 @@ class SystemSignalPayload(ProtocolModel):
 
 __all__ = [
     "DeliveryFailedPayload",
+    "InputSlots",
+    "IntentScoredPayload",
+    "LeftReplyReadyPayload",
     "PerceptionEventPayload",
     "PerceptionType",
+    "RightBrainAcceptedPayload",
+    "RightBrainClarifyPayload",
+    "RightBrainJobAction",
+    "RightBrainRejectedPayload",
+    "RightBrainResultPayload",
+    "RightBrainStrategy",
     "ReplyBlockedPayload",
     "ReplyReadyPayload",
     "RepliedPayload",
+    "SessionMode",
     "SignalType",
-    "StableInputPayload",
+    "StreamChunkPayload",
+    "StreamCommitPayload",
+    "StreamInterruptedPayload",
+    "StreamStartPayload",
     "SystemSignalPayload",
     "TaskApprovedReportPayload",
     "TaskAskPayload",
@@ -262,4 +380,5 @@ __all__ = [
     "TaskStartedReportPayload",
     "TaskSummaryPayload",
     "TaskUpdatePayload",
+    "TurnInputPayload",
 ]

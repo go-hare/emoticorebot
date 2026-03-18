@@ -113,12 +113,27 @@ class RuntimeHost:
         self._pending_task_origin_replies: dict[str, BusEnvelope[ReplyReadyPayload]] = {}
         self.kernel.event_bus.subscribe(
             consumer="runtime_host",
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_INLINE_READY,
             handler=self._remember_task_origin_reply,
         )
         self.kernel.event_bus.subscribe(
             consumer="runtime_host",
-            event_type=EventType.OUTPUT_REPLY_REDACTED,
+            event_type=EventType.OUTPUT_PUSH_READY,
+            handler=self._remember_task_origin_reply,
+        )
+        self.kernel.event_bus.subscribe(
+            consumer="runtime_host",
+            event_type=EventType.OUTPUT_STREAM_OPEN,
+            handler=self._remember_task_origin_reply,
+        )
+        self.kernel.event_bus.subscribe(
+            consumer="runtime_host",
+            event_type=EventType.OUTPUT_STREAM_DELTA,
+            handler=self._remember_task_origin_reply,
+        )
+        self.kernel.event_bus.subscribe(
+            consumer="runtime_host",
+            event_type=EventType.OUTPUT_STREAM_CLOSE,
             handler=self._remember_task_origin_reply,
         )
         self.kernel.event_bus.subscribe(
@@ -780,7 +795,12 @@ class RuntimeHost:
         self.kernel.clear_session(session_id)
         self._reset_session_thread(session_id)
 
-    def initialize_subconscious(self, enable_reflection: bool = True, enable_heartbeat: bool = False) -> None:
+    def initialize_subconscious(
+        self,
+        enable_reflection: bool = True,
+        enable_heartbeat: bool = False,
+        heartbeat_interval_s: int | None = None,
+    ) -> None:
         """初始化潜意识守护进程和心跳服务"""
         if enable_reflection:
             from emoticorebot.background.subconscious import SubconsciousDaemon
@@ -822,7 +842,7 @@ class RuntimeHost:
                 runtime=self,
                 on_execute=execute_heartbeat_task,
                 on_notify=notify_heartbeat,
-                interval_s=30 * 60,
+                interval_s=heartbeat_interval_s or 30 * 60,
                 enabled=True,
             )
             logger.info("HeartbeatService initialized")

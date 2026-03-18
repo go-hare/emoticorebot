@@ -3,9 +3,11 @@ from __future__ import annotations
 from contextlib import nullcontext
 from types import SimpleNamespace
 import asyncio
+from pathlib import Path
 
 from emoticorebot.cli import commands
 from emoticorebot.cli.commands import _is_one_shot_task_settled, _pick_one_shot_task_id
+from emoticorebot.config.schema import Config
 from emoticorebot.protocol.task_models import TaskRequestSpec
 from emoticorebot.runtime.state_machine import TaskState
 from emoticorebot.runtime.task_store import RuntimeTaskRecord, TaskStore
@@ -185,3 +187,18 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
 
     assert streamed_chunks == ["好的，我来处理。", "<finish>"]
     assert printed_responses == ["任务已完成。"]
+
+
+def test_status_prints_brain_and_worker_models(monkeypatch, tmp_path) -> None:
+    printed: list[str] = []
+    config_path = Path(tmp_path) / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr("emoticorebot.config.loader.get_config_path", lambda: config_path)
+    monkeypatch.setattr("emoticorebot.config.loader.load_config", lambda: Config())
+    monkeypatch.setattr(commands.console, "print", lambda *args, **kwargs: printed.append(" ".join(str(arg) for arg in args)))
+
+    commands.status()
+
+    assert any("Brain Model: anthropic/claude-opus-4-5" in line for line in printed)
+    assert any("Worker Model: anthropic/claude-opus-4-5" in line for line in printed)

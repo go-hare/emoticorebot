@@ -1,19 +1,24 @@
-"""Input normalization helpers that emit stable input events."""
+"""Input normalization helpers that emit turn input events."""
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
+from emoticorebot.protocol.contracts import ChannelKind, InputKind, SessionMode
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import StableInputPayload
+from emoticorebot.protocol.events import InputSlots, TurnInputPayload
 from emoticorebot.protocol.task_models import ContentBlock, MessageRef
 from emoticorebot.protocol.topics import EventType
 
+_USER_SLOT_RE = re.compile(r"#+\s*user\s*#+", re.IGNORECASE)
+_TASK_SLOT_RE = re.compile(r"#+\s*task\s*#+", re.IGNORECASE)
+
 
 class InputNormalizer:
-    """Collapse channel-specific input into one stable business event."""
+    """Collapse channel-specific input into one turn business event."""
 
-    def normalize_stable_input(
+    def normalize_turn_input(
         self,
         *,
         session_id: str,
@@ -22,29 +27,30 @@ class InputNormalizer:
         chat_id: str,
         sender_id: str,
         message_id: str,
-        input_kind: str,
-        channel_kind: str,
+        input_kind: InputKind,
+        channel_kind: ChannelKind,
         plain_text: str | None = None,
         content_blocks: list[ContentBlock] | None = None,
         attachments: list[str | ContentBlock] | None = None,
         metadata: dict[str, Any] | None = None,
+        session_mode: SessionMode | None = None,
         barge_in: bool = False,
-    ) -> BusEnvelope[StableInputPayload]:
-        normalized_text = str(plain_text or "").strip() or None
+    ) -> BusEnvelope[TurnInputPayload]:
+        user_text, input_slots = self._parse_input_slots(plain_text)
         payload_metadata = dict(metadata or {})
-        payload_metadata.setdefault("channel_kind", channel_kind)
-        payload_metadata.setdefault("input_kind", input_kind)
         return build_envelope(
-            event_type=EventType.INPUT_STABLE,
+            event_type=EventType.INPUT_TURN_RECEIVED,
             source="input_normalizer",
             target="broadcast",
             session_id=session_id,
             turn_id=turn_id,
             correlation_id=turn_id,
-            payload=StableInputPayload(
+            payload=TurnInputPayload(
                 input_id=turn_id,
-                input_kind=input_kind,
+                input_mode="turn",
+                session_mode=session_mode or self._session_mode(channel_kind),
                 channel_kind=channel_kind,
+                input_kind=input_kind,
                 barge_in=barge_in,
                 message=MessageRef(
                     channel=channel,
@@ -52,7 +58,8 @@ class InputNormalizer:
                     sender_id=sender_id,
                     message_id=message_id,
                 ),
-                plain_text=normalized_text,
+                user_text=user_text,
+                input_slots=input_slots,
                 content_blocks=list(content_blocks or []),
                 attachments=self._attachment_blocks(attachments),
                 metadata=payload_metadata,
@@ -71,10 +78,10 @@ class InputNormalizer:
         content: str,
         attachments: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
-        channel_kind: str = "chat",
+        channel_kind: ChannelKind = "chat",
         barge_in: bool = False,
-    ) -> BusEnvelope[StableInputPayload]:
-        return self.normalize_stable_input(
+    ) -> BusEnvelope[TurnInputPayload]:
+        return self.normalize_turn_input(
             session_id=session_id,
             turn_id=turn_id,
             channel=channel,
@@ -102,10 +109,10 @@ class InputNormalizer:
         content_blocks: list[ContentBlock] | None = None,
         attachments: list[str | ContentBlock] | None = None,
         metadata: dict[str, Any] | None = None,
-        channel_kind: str = "voice",
+        channel_kind: ChannelKind = "voice",
         barge_in: bool = False,
-    ) -> BusEnvelope[StableInputPayload]:
-        return self.normalize_stable_input(
+    ) -> BusEnvelope[TurnInputPayload]:
+        return self.normalize_turn_input(
             session_id=session_id,
             turn_id=turn_id,
             channel=channel,
@@ -134,11 +141,11 @@ class InputNormalizer:
         content_blocks: list[ContentBlock] | None = None,
         attachments: list[str | ContentBlock] | None = None,
         metadata: dict[str, Any] | None = None,
-        channel_kind: str = "video",
-        input_kind: str = "multimodal",
+        channel_kind: ChannelKind = "video",
+        input_kind: InputKind = "multimodal",
         barge_in: bool = False,
-    ) -> BusEnvelope[StableInputPayload]:
-        return self.normalize_stable_input(
+    ) -> BusEnvelope[TurnInputPayload]:
+        return self.normalize_turn_input(
             session_id=session_id,
             turn_id=turn_id,
             channel=channel,
@@ -153,6 +160,35 @@ class InputNormalizer:
             metadata=metadata,
             barge_in=barge_in,
         )
+
+    @staticmethod
+    def _session_mode(channel_kind: ChannelKind) -> SessionMode:
+        return "turn_chat" if str(channel_kind or "").strip() == "chat" else "realtime_chat"
+
+    @staticmethod
+    def _parse_input_slots(plain_text: str | None) -> tuple[str | None, InputSlots]:
+        text = str(plain_text or "").strip()
+        if not text:
+            return None, InputSlots()
+
+        user_match = _USER_SLOT_RE.search(text)
+        task_match = _TASK_SLOT_RE.search(text)
+        user_slot = ""
+        task_slot = ""
+
+        if user_match and task_match and user_match.start() < task_match.start():
+            user_slot = text[user_match.end() : task_match.start()].strip()
+            task_slot = text[task_match.end() :].strip()
+        elif task_match and not user_match:
+            user_slot = text[: task_match.start()].strip()
+            task_slot = text[task_match.end() :].strip()
+        elif user_match:
+            user_slot = text[user_match.end() :].strip()
+        else:
+            user_slot = text
+
+        normalized_user_text = user_slot or None
+        return normalized_user_text, InputSlots(user=user_slot, task=task_slot)
 
     @staticmethod
     def _attachment_blocks(attachments: list[str | ContentBlock] | None) -> list[ContentBlock]:

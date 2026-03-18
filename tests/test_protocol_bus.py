@@ -7,14 +7,14 @@ import pytest
 from emoticorebot.bus import BackpressureController, BackpressureError, PriorityPubSubBus, block, redact
 from emoticorebot.protocol.commands import TaskCancelPayload
 from emoticorebot.protocol.envelope import build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload, StableInputPayload, SystemSignalPayload
+from emoticorebot.protocol.events import ReplyReadyPayload, SystemSignalPayload, TurnInputPayload
 from emoticorebot.protocol.task_models import MessageRef, ReplyDraft
 from emoticorebot.protocol.topics import EventType, Topic
 
 
 def _reply_event(*, reply_id: str, target: str = "broadcast", dedupe_key: str | None = None, text: str = "hi"):
     return build_envelope(
-        event_type=EventType.OUTPUT_REPLY_READY,
+        event_type=EventType.OUTPUT_INLINE_READY,
         source="runtime",
         target=target,
         session_id="sess_1",
@@ -35,15 +35,15 @@ def test_priority_bus_dispatches_higher_priority_first() -> None:
         bus.subscribe(consumer="runtime", handler=handler, topic=Topic.TASK_COMMAND)
 
         low = build_envelope(
-            event_type=EventType.INPUT_STABLE,
+            event_type=EventType.INPUT_TURN_RECEIVED,
             source="input_normalizer",
             target="broadcast",
-            payload=StableInputPayload(
+            payload=TurnInputPayload(
                 input_id="turn_1",
-                input_kind="text",
-                channel_kind="chat",
+                input_mode="turn",
+                session_mode="turn_chat",
                 message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
-                plain_text="hello",
+                user_text="hello",
                 metadata={"channel_kind": "chat"},
             ),
         )
@@ -59,7 +59,7 @@ def test_priority_bus_dispatches_higher_priority_first() -> None:
         await bus.publish(high)
         await bus.drain()
 
-        assert seen == [EventType.TASK_CANCEL, EventType.INPUT_STABLE]
+        assert seen == [EventType.TASK_CANCEL, EventType.INPUT_TURN_RECEIVED]
 
     asyncio.run(_run())
 
@@ -226,15 +226,15 @@ def test_subscriber_failure_emits_warning_and_bus_keeps_running() -> None:
         try:
             for message_id in ("msg_1", "msg_2"):
                 event = build_envelope(
-                    event_type=EventType.INPUT_STABLE,
+                    event_type=EventType.INPUT_TURN_RECEIVED,
                     source="input_normalizer",
                     target="broadcast",
-                    payload=StableInputPayload(
+                    payload=TurnInputPayload(
                         input_id=message_id,
-                        input_kind="text",
-                        channel_kind="chat",
+                        input_mode="turn",
+                        session_mode="turn_chat",
                         message=MessageRef(channel="cli", chat_id="direct", message_id=message_id),
-                        plain_text="hello",
+                        user_text="hello",
                         metadata={"channel_kind": "chat"},
                     ),
                 )

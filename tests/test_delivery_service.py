@@ -26,7 +26,7 @@ async def _exercise_delivery_success() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_INLINE_READY,
             source="safety",
             target="broadcast",
             session_id="sess_1",
@@ -75,7 +75,7 @@ async def _exercise_delivery_without_transport() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_INLINE_READY,
             source="safety",
             target="broadcast",
             session_id="sess_1",
@@ -115,7 +115,7 @@ async def _exercise_delivery_drops_stale_reply() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_INLINE_READY,
             source="safety",
             target="broadcast",
             session_id="sess_1",
@@ -152,7 +152,7 @@ async def _exercise_delivery_suppressed_reply_emits_replied_without_transport() 
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_INLINE_READY,
             source="safety",
             target="broadcast",
             session_id="sess_1",
@@ -198,7 +198,7 @@ async def _exercise_delivery_stream_delta_skips_replied_event() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_STREAM_OPEN,
             source="safety",
             target="broadcast",
             session_id="sess_1",
@@ -237,7 +237,7 @@ async def _exercise_delivery_stream_stale_reply_emits_superseded() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_STREAM_DELTA,
             source="safety",
             target="broadcast",
             session_id="sess_1",

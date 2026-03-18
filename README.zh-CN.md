@@ -75,6 +75,8 @@ emoticorebot agent
 emoticorebot gateway
 ```
 
+当前 gateway 接入的渠道都使用 WebSocket 或轮询模式，不需要本地监听端口。`gateway.port` 目前保留给未来的 webhook 型渠道。
+
 ---
 
 ## 架构

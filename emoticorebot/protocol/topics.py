@@ -1,4 +1,4 @@
-"""Stable topic and event type constants for the v3 runtime protocol."""
+"""Topic and event type constants for the v3 runtime protocol."""
 
 from __future__ import annotations
 
@@ -7,6 +7,11 @@ from enum import StrEnum
 
 class Topic(StrEnum):
     INPUT_EVENT = "input.event"
+    INTENT_EVENT = "intent.event"
+    LEFT_COMMAND = "left.command"
+    LEFT_EVENT = "left.event"
+    RIGHT_COMMAND = "right.command"
+    RIGHT_EVENT = "right.event"
     REFLECTION_EVENT = "reflection.event"
     RUNTIME_COMMAND = "runtime.command"
     TASK_COMMAND = "task.command"
@@ -20,7 +25,24 @@ class Topic(StrEnum):
 
 
 class EventType(StrEnum):
-    INPUT_STABLE = "input.event.stable"
+    INPUT_TURN_RECEIVED = "input.event.turn_received"
+    INPUT_STREAM_STARTED = "input.event.stream_started"
+    INPUT_STREAM_CHUNK = "input.event.stream_chunk"
+    INPUT_STREAM_COMMITTED = "input.event.stream_committed"
+    INPUT_STREAM_INTERRUPTED = "input.event.stream_interrupted"
+
+    INTENT_SCORED = "intent.event.scored"
+
+    LEFT_COMMAND_REPLY_REQUESTED = "left.command.reply_requested"
+    LEFT_EVENT_REPLY_READY = "left.event.reply_ready"
+    LEFT_EVENT_STREAM_DELTA_READY = "left.event.stream_delta_ready"
+    LEFT_EVENT_FOLLOWUP_READY = "left.event.followup_ready"
+
+    RIGHT_COMMAND_JOB_REQUESTED = "right.command.job_requested"
+    RIGHT_EVENT_JOB_ACCEPTED = "right.event.job_accepted"
+    RIGHT_EVENT_JOB_CLARIFY = "right.event.job_clarify"
+    RIGHT_EVENT_JOB_REJECTED = "right.event.job_rejected"
+    RIGHT_EVENT_RESULT_READY = "right.event.result_ready"
 
     TASK_CREATE = "task.command.create"
     TASK_RESUME = "task.command.resume"
@@ -49,9 +71,11 @@ class EventType(StrEnum):
     REFLECT_LIGHT = "reflection.event.light"
     REFLECT_DEEP = "reflection.event.deep"
 
-    OUTPUT_REPLY_READY = "output.event.reply_ready"
-    OUTPUT_REPLY_APPROVED = "output.event.reply_approved"
-    OUTPUT_REPLY_REDACTED = "output.event.reply_redacted"
+    OUTPUT_INLINE_READY = "output.event.inline_ready"
+    OUTPUT_PUSH_READY = "output.event.push_ready"
+    OUTPUT_STREAM_OPEN = "output.event.stream_open"
+    OUTPUT_STREAM_DELTA = "output.event.stream_delta"
+    OUTPUT_STREAM_CLOSE = "output.event.stream_close"
     OUTPUT_REPLIED = "output.event.replied"
     OUTPUT_DELIVERY_FAILED = "output.event.delivery_failed"
 

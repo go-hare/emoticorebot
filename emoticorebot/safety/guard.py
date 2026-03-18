@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
+from emoticorebot.protocol.envelope import BusEnvelope
 from emoticorebot.protocol.events import ReplyBlockedPayload, ReplyReadyPayload, TaskEndPayload
 from emoticorebot.protocol.task_models import ContentBlock, ReplyDraft
 from emoticorebot.protocol.topics import EventType
@@ -22,6 +22,14 @@ class ReplyGuardResult:
 class SafetyGuard:
     """Applies a small set of secret-leak rules on user-visible output."""
 
+    _READY_EVENT_TYPES = {
+        str(EventType.OUTPUT_INLINE_READY),
+        str(EventType.OUTPUT_PUSH_READY),
+        str(EventType.OUTPUT_STREAM_OPEN),
+        str(EventType.OUTPUT_STREAM_DELTA),
+        str(EventType.OUTPUT_STREAM_CLOSE),
+    }
+
     _BLOCK_PATTERNS = [
         re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     ]
@@ -33,7 +41,7 @@ class SafetyGuard:
     ]
 
     def guard_reply_event(self, event: BusEnvelope[ReplyReadyPayload]) -> ReplyGuardResult:
-        if event.event_type != EventType.OUTPUT_REPLY_READY:
+        if str(event.event_type) not in self._READY_EVENT_TYPES:
             return ReplyGuardResult(decision="allow", event=event)
 
         reply = event.payload.reply
@@ -49,10 +57,7 @@ class SafetyGuard:
                         redaction_hint="请移除密钥、密码或私钥后再试。",
                     ),
                 )
-            return ReplyGuardResult(
-                decision="allow",
-                event=self._rewrite_reply_event(event, EventType.OUTPUT_REPLY_APPROVED),
-            )
+            return ReplyGuardResult(decision="allow", event=event)
 
         if self._matches_block(text):
             return ReplyGuardResult(
@@ -69,17 +74,10 @@ class SafetyGuard:
             reply = self._redact_reply(reply)
             return ReplyGuardResult(
                 decision="redact",
-                event=self._rewrite_reply_event(
-                    event,
-                    EventType.OUTPUT_REPLY_REDACTED,
-                    payload=event.payload.model_copy(update={"reply": reply}),
-                ),
+                event=event.model_copy(update={"payload": event.payload.model_copy(update={"reply": reply})}),
             )
 
-        return ReplyGuardResult(
-            decision="allow",
-            event=self._rewrite_reply_event(event, EventType.OUTPUT_REPLY_APPROVED),
-        )
+        return ReplyGuardResult(decision="allow", event=event)
 
     def guard_task_event(self, event: BusEnvelope[TaskEndPayload]) -> BusEnvelope[TaskEndPayload]:
         if event.event_type != EventType.TASK_END:
@@ -93,25 +91,6 @@ class SafetyGuard:
 
         updated_payload = self._redact_task_payload(payload)
         return event.model_copy(update={"payload": updated_payload})
-
-    @staticmethod
-    def _rewrite_reply_event(
-        event: BusEnvelope[ReplyReadyPayload],
-        event_type: str,
-        *,
-        payload: ReplyReadyPayload | None = None,
-    ) -> BusEnvelope[ReplyReadyPayload]:
-        return build_envelope(
-            event_type=event_type,
-            source=event.source,
-            target="broadcast",
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            task_id=event.task_id,
-            correlation_id=event.correlation_id,
-            causation_id=event.event_id,
-            payload=payload or event.payload,
-        )
 
     def _matches_block(self, text: str) -> bool:
         return any(pattern.search(text) for pattern in self._BLOCK_PATTERNS)

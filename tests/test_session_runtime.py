@@ -6,10 +6,10 @@ from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.protocol.envelope import build_envelope
 from emoticorebot.protocol.events import (
     ReplyReadyPayload,
-    StableInputPayload,
     TaskAskPayload,
     TaskEndPayload,
     TaskUpdatePayload,
+    TurnInputPayload,
 )
 from emoticorebot.protocol.task_models import InputRequest, MessageRef, ReplyDraft, TaskRequestSpec
 from emoticorebot.protocol.topics import EventType
@@ -38,18 +38,18 @@ async def _exercise_session_runtime_tracks_task_views() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.INPUT_STABLE,
+            event_type=EventType.INPUT_TURN_RECEIVED,
             source="input_normalizer",
             target="broadcast",
             session_id="sess_1",
             turn_id="turn_1",
             correlation_id="turn_1",
-            payload=StableInputPayload(
+            payload=TurnInputPayload(
                 input_id="turn_1",
-                input_kind="text",
-                channel_kind="chat",
+                input_mode="turn",
+                session_mode="turn_chat",
                 message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_1"),
-                plain_text="帮我创建 add.py",
+                user_text="帮我创建 add.py",
                 metadata={"channel_kind": "chat"},
             ),
         )
@@ -114,7 +114,7 @@ async def _exercise_session_runtime_tracks_task_views() -> None:
     )
     await bus.publish(
         build_envelope(
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_INLINE_READY,
             source="guard",
             target="broadcast",
             session_id="sess_1",
@@ -194,25 +194,25 @@ async def _exercise_session_runtime_tracks_stable_input_fields() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.INPUT_STABLE,
+            event_type=EventType.INPUT_TURN_RECEIVED,
             source="input_normalizer",
             target="broadcast",
             session_id="sess_2",
             turn_id="turn_2",
             correlation_id="turn_2",
-            payload=StableInputPayload(
+            payload=TurnInputPayload(
                 input_id="turn_2",
-                input_kind="text",
-                channel_kind="chat",
+                input_mode="turn",
+                session_mode="turn_chat",
                 message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_2"),
-                plain_text="继续",
+                user_text="继续",
                 metadata={"channel_kind": "chat"},
             ),
         )
     )
     await bus.publish(
         build_envelope(
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_STREAM_CLOSE,
             source="guard",
             target="broadcast",
             session_id="sess_2",
@@ -250,7 +250,7 @@ async def _exercise_session_runtime_supersedes_active_reply_on_new_stable_input(
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.OUTPUT_REPLY_APPROVED,
+            event_type=EventType.OUTPUT_STREAM_OPEN,
             source="guard",
             target="broadcast",
             session_id="sess_stream",
@@ -269,19 +269,19 @@ async def _exercise_session_runtime_supersedes_active_reply_on_new_stable_input(
     await bus.drain()
     await bus.publish(
         build_envelope(
-            event_type=EventType.INPUT_STABLE,
+            event_type=EventType.INPUT_TURN_RECEIVED,
             source="input_normalizer",
             target="broadcast",
             session_id="sess_stream",
             turn_id="turn_next",
             correlation_id="turn_next",
-            payload=StableInputPayload(
+            payload=TurnInputPayload(
                 input_id="turn_next",
-                input_kind="text",
-                channel_kind="chat",
+                input_mode="turn",
+                session_mode="turn_chat",
                 barge_in=True,
                 message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_next"),
-                plain_text="我插一句",
+                user_text="我插一句",
                 metadata={"channel_kind": "chat"},
             ),
         )
@@ -303,13 +303,13 @@ async def _exercise_session_runtime_emits_task_front_trigger() -> None:
     store = TaskStore()
     session = SessionRuntime(bus=bus, task_store=store)
     session.register()
-    triggers: list[BusEnvelope[StableInputPayload]] = []
+    triggers: list[BusEnvelope[TurnInputPayload]] = []
 
-    async def _capture(event: BusEnvelope[StableInputPayload]) -> None:
+    async def _capture(event: BusEnvelope[TurnInputPayload]) -> None:
         if isinstance(event.payload.metadata, dict) and event.payload.metadata.get("front_origin") == "task":
             triggers.append(event)
 
-    bus.subscribe(consumer="test", event_type=EventType.INPUT_STABLE, handler=_capture)
+    bus.subscribe(consumer="test", event_type=EventType.INPUT_TURN_RECEIVED, handler=_capture)
 
     task = store.add(
         RuntimeTaskRecord(
@@ -325,18 +325,18 @@ async def _exercise_session_runtime_emits_task_front_trigger() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.INPUT_STABLE,
+            event_type=EventType.INPUT_TURN_RECEIVED,
             source="input_normalizer",
             target="broadcast",
             session_id="sess_3",
             turn_id="turn_3",
             correlation_id="turn_3",
-            payload=StableInputPayload(
+            payload=TurnInputPayload(
                 input_id="turn_3",
-                input_kind="text",
-                channel_kind="chat",
+                input_mode="turn",
+                session_mode="turn_chat",
                 message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_3"),
-                plain_text="帮我继续",
+                user_text="帮我继续",
                 metadata={"channel_kind": "chat"},
             ),
         )
@@ -366,7 +366,7 @@ async def _exercise_session_runtime_emits_task_front_trigger() -> None:
     assert trigger.payload.metadata["front_origin"] == "task"
     assert trigger.payload.metadata["task_event_type"] == EventType.TASK_ASK
     assert trigger.payload.metadata["task_id"] == "task_2"
-    assert trigger.turn_id == "turn_3"
+    assert str(trigger.turn_id or "").startswith("turn_task_task_2_")
     assert trigger.payload.message.message_id == "msg_3"
 
 

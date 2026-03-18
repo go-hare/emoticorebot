@@ -9,6 +9,7 @@ from emoticorebot.protocol.envelope import build_envelope
 from emoticorebot.protocol.events import RepliedPayload, ReplyReadyPayload
 from emoticorebot.protocol.task_models import MessageRef, ReplyDraft, TaskRequestSpec
 from emoticorebot.protocol.topics import EventType
+from emoticorebot.runtime.transport_bus import TransportBus
 from emoticorebot.session.thread_store import ThreadStore
 
 
@@ -51,7 +52,7 @@ async def _exercise_task_origin_internal_persistence(tmp_path: Path) -> None:
     host._pending_task_origin_replies = {}
 
     ready = build_envelope(
-        event_type=EventType.OUTPUT_REPLY_APPROVED,
+        event_type=EventType.OUTPUT_PUSH_READY,
         source="brain",
         target="broadcast",
         session_id="sess_1",
@@ -89,7 +90,7 @@ async def _exercise_task_origin_internal_persistence(tmp_path: Path) -> None:
                 message_id="delivery_reply_task_1",
                 reply_to_message_id="msg_1",
             ),
-            delivery_mode="chat",
+            delivery_mode="inline",
             delivered_at="2026-03-18T12:00:00",
         ),
     )
@@ -108,3 +109,21 @@ async def _exercise_task_origin_internal_persistence(tmp_path: Path) -> None:
 
 def test_runtime_host_persists_task_origin_replies_only_to_internal_history(tmp_path) -> None:
     asyncio.run(_exercise_task_origin_internal_persistence(tmp_path))
+
+
+def test_runtime_host_uses_configured_heartbeat_interval(tmp_path) -> None:
+    host = RuntimeHost.__new__(RuntimeHost)
+    host.workspace = Path(tmp_path)
+    host.tool_manager = SimpleNamespace(cron_service=None)
+    host.bus = TransportBus()
+    host.subconscious = None
+    host.heartbeat = None
+
+    host.initialize_subconscious(
+        enable_reflection=False,
+        enable_heartbeat=True,
+        heartbeat_interval_s=123,
+    )
+
+    assert host.heartbeat is not None
+    assert host.heartbeat.interval_s == 123

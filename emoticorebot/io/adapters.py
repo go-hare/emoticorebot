@@ -1,31 +1,35 @@
-"""Small helpers for IO adapter integration during the refactor transition."""
+"""Small helpers for IO adapter integration."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from emoticorebot.io.models import NormalizedInput
+from emoticorebot.io.models import InputSlots, NormalizedInput
+from emoticorebot.protocol.contracts import ChannelKind, InputKind
 from emoticorebot.protocol.task_models import ContentBlock
 
 
-def build_stable_input(
+def build_turn_input(
     *,
     session_id: str,
     turn_id: str,
-    input_kind: str,
-    channel_kind: str,
+    input_kind: InputKind,
+    channel_kind: ChannelKind,
     plain_text: str | None = None,
     content_blocks: list[ContentBlock] | None = None,
     attachments: list[ContentBlock] | None = None,
     metadata: dict[str, Any] | None = None,
     barge_in: bool = False,
 ) -> NormalizedInput:
+    user_text = str(plain_text).strip() if plain_text is not None else None
+    slots = InputSlots(user=user_text or "", task="")
     return NormalizedInput(
         session_id=session_id,
         turn_id=turn_id,
+        user_text=user_text,
+        input_slots=slots,
         channel_kind=channel_kind,
         input_kind=input_kind,
-        plain_text=str(plain_text).strip() if plain_text is not None else None,
         content_blocks=list(content_blocks or []),
         attachments=list(attachments or []),
         barge_in=barge_in,
@@ -40,10 +44,10 @@ def build_text_input(
     plain_text: str | None = None,
     attachments: list[ContentBlock] | None = None,
     metadata: dict[str, Any] | None = None,
-    channel_kind: str = "chat",
+    channel_kind: ChannelKind = "chat",
     barge_in: bool = False,
 ) -> NormalizedInput:
-    return build_stable_input(
+    return build_turn_input(
         session_id=session_id,
         turn_id=turn_id,
         plain_text=plain_text,
@@ -63,10 +67,10 @@ def build_voice_input(
     content_blocks: list[ContentBlock] | None = None,
     attachments: list[ContentBlock] | None = None,
     metadata: dict[str, Any] | None = None,
-    channel_kind: str = "voice",
+    channel_kind: ChannelKind = "voice",
     barge_in: bool = False,
 ) -> NormalizedInput:
-    return build_stable_input(
+    return build_turn_input(
         session_id=session_id,
         turn_id=turn_id,
         input_kind="voice",
@@ -87,11 +91,11 @@ def build_video_input(
     content_blocks: list[ContentBlock] | None = None,
     attachments: list[ContentBlock] | None = None,
     metadata: dict[str, Any] | None = None,
-    channel_kind: str = "video",
-    input_kind: str = "multimodal",
+    channel_kind: ChannelKind = "video",
+    input_kind: InputKind = "multimodal",
     barge_in: bool = False,
 ) -> NormalizedInput:
-    return build_stable_input(
+    return build_turn_input(
         session_id=session_id,
         turn_id=turn_id,
         input_kind=input_kind,
@@ -104,4 +108,4 @@ def build_video_input(
     )
 
 
-__all__ = ["build_stable_input", "build_text_input", "build_voice_input", "build_video_input"]
+__all__ = ["build_turn_input", "build_text_input", "build_voice_input", "build_video_input"]

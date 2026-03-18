@@ -10,7 +10,7 @@ from emoticorebot.safety.guard import SafetyGuard
 def test_safety_guard_redacts_sensitive_reply() -> None:
     guard = SafetyGuard()
     event = build_envelope(
-        event_type=EventType.OUTPUT_REPLY_READY,
+        event_type=EventType.OUTPUT_INLINE_READY,
         source="brain",
         target="broadcast",
         session_id="sess_1",
@@ -27,14 +27,14 @@ def test_safety_guard_redacts_sensitive_reply() -> None:
     assert result.decision == "redact"
     assert result.blocked is None
     assert result.event is not None
-    assert result.event.event_type == EventType.OUTPUT_REPLY_REDACTED
+    assert result.event.event_type == EventType.OUTPUT_INLINE_READY
     assert result.event.payload.reply.plain_text == "api_key=[REDACTED]"
 
 
 def test_safety_guard_redacts_sensitive_reply_blocks() -> None:
     guard = SafetyGuard()
     event = build_envelope(
-        event_type=EventType.OUTPUT_REPLY_READY,
+        event_type=EventType.OUTPUT_INLINE_READY,
         source="brain",
         target="broadcast",
         session_id="sess_1",
@@ -60,7 +60,7 @@ def test_safety_guard_redacts_sensitive_reply_blocks() -> None:
 def test_safety_guard_blocks_private_key_reply() -> None:
     guard = SafetyGuard()
     event = build_envelope(
-        event_type=EventType.OUTPUT_REPLY_READY,
+        event_type=EventType.OUTPUT_INLINE_READY,
         source="brain",
         target="broadcast",
         session_id="sess_1",
