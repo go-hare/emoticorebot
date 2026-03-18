@@ -8,10 +8,10 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from emoticorebot.execution import backend as executor_backend
-from emoticorebot.execution import stream as executor_stream
-from emoticorebot.execution.executor_context import ExecutorContext
-from emoticorebot.execution.tool_runtime import DetailedProgressReporter, ExecutionToolRuntime
+from emoticorebot.right import deep_agent_backend as executor_backend
+from emoticorebot.right import stream as executor_stream
+from emoticorebot.right.executor_context import ExecutorContext
+from emoticorebot.right.tool_runtime import AuditInterrupt, DetailedProgressReporter, ExecutionToolRuntime
 from emoticorebot.protocol.task_result import TaskExecutionResult
 from emoticorebot.utils.llm_utils import blocks_to_llm_content
 
@@ -43,6 +43,7 @@ class DeepAgentExecutor:
         *,
         task_id: str,
         progress_reporter: DetailedProgressReporter | None = None,
+        trace_reporter: DetailedProgressReporter | None = None,
     ) -> TaskExecutionResult:
         if not executor_backend.deep_agents_available():
             return self._build_result(
@@ -97,6 +98,7 @@ class DeepAgentExecutor:
                     media=media,
                     task_context=task_context,
                     task_profile=task_profile,
+                    trace_reporter=trace_reporter,
                 ),
                 name=f"deep-agent:{task_id}",
             )
@@ -114,6 +116,8 @@ class DeepAgentExecutor:
                     confidence=0.0,
                 )
             return self._normalize_task_result(self._extract_structured_result(agent_result))
+        except AuditInterrupt:
+            raise
         except asyncio.CancelledError:
             if agent_task is not None and not agent_task.done():
                 agent_task.cancel()
@@ -161,6 +165,7 @@ class DeepAgentExecutor:
         media: list[str] | None = None,
         task_context: dict[str, Any] | None = None,
         task_profile: executor_backend.WorkerTaskProfile | None = None,
+        trace_reporter: DetailedProgressReporter | None = None,
     ) -> Any:
         messages: list[dict[str, Any]] = []
         for turn in (history or [])[-10:]:
@@ -242,14 +247,21 @@ class DeepAgentExecutor:
         }
 
         if hasattr(agent, "astream"):
-            return await self._stream_invoke(agent, payload, config)
+            return await self._stream_invoke(agent, payload, config, trace_reporter=trace_reporter)
         if hasattr(agent, "ainvoke"):
             return await agent.ainvoke(payload, config=config)
         if hasattr(agent, "invoke"):
             return agent.invoke(payload, config=config)
         raise RuntimeError("Deep Agent does not expose invoke/ainvoke/astream")
 
-    async def _stream_invoke(self, agent: Any, payload: dict[str, Any], config: dict[str, Any]) -> Any:
+    async def _stream_invoke(
+        self,
+        agent: Any,
+        payload: dict[str, Any],
+        config: dict[str, Any],
+        *,
+        trace_reporter: DetailedProgressReporter | None = None,
+    ) -> Any:
         last_values: Any = None
         async for item in agent.astream(
             payload,
@@ -263,9 +275,69 @@ class DeepAgentExecutor:
                 continue
             for record in executor_stream.build_trace_records(mode=mode, namespace=namespace, data=data):
                 self._trace_log.append(record)
+                if trace_reporter is None:
+                    continue
+                message = self._trace_message(record)
+                if not message:
+                    continue
+                await trace_reporter(
+                    message,
+                    {
+                        "event": "task.trace",
+                        "producer": str(record.get("role", "") or "worker").strip() or "worker",
+                        "phase": "trace",
+                        "payload": dict(record),
+                    },
+                )
         if last_values is None:
             raise RuntimeError("Deep Agent stream did not produce final state")
         return last_values
+
+    @staticmethod
+    def _trace_message(record: dict[str, Any]) -> str:
+        role = str(record.get("role", "") or "").strip()
+        tool_calls = list(record.get("tool_calls", []) or [])
+        if tool_calls:
+            names = [
+                str(item.get("name", "") or "").strip()
+                for item in tool_calls
+                if isinstance(item, dict) and str(item.get("name", "") or "").strip()
+            ]
+            if names:
+                return f"准备调用工具：{', '.join(names[:3])}"
+        if role == "tool":
+            name = str(record.get("name", "") or "tool").strip()
+            content = DeepAgentExecutor._content_to_text(record.get("content"))
+            if content:
+                return f"{name} 返回：{content[:160]}"
+            return f"{name} 已返回结果"
+        if role == "assistant":
+            content = DeepAgentExecutor._content_to_text(record.get("content"))
+            if content:
+                return content[:160]
+        return ""
+
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = str(item.get("text", "") or item.get("content", "") or "").strip()
+                    if text:
+                        parts.append(text)
+                        continue
+                text = str(item or "").strip()
+                if text:
+                    parts.append(text)
+            return "\n".join(parts).strip()
+        if isinstance(content, dict):
+            text = str(content.get("text", "") or content.get("content", "") or "").strip()
+            if text:
+                return text
+        return str(content or "").strip()
 
     def _extract_structured_result(self, result: Any) -> dict[str, Any]:
         if hasattr(result, "model_dump"):

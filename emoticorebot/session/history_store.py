@@ -1,4 +1,4 @@
-"""Low-level JSONL persistence for thread histories."""
+"""Low-level JSONL persistence for raw session history streams."""
 
 from __future__ import annotations
 
@@ -16,6 +16,10 @@ from emoticorebot.utils.llm_utils import normalize_content_blocks
 
 def _new_message_id() -> str:
     return f"msg_{uuid4().hex[:16]}"
+
+
+def _new_record_id() -> str:
+    return f"rec_{uuid4().hex[:16]}"
 
 
 def _normalize_tool_calls(value: Any) -> list[dict[str, Any]]:
@@ -50,18 +54,49 @@ def _normalize_tool_calls(value: Any) -> list[dict[str, Any]]:
     return calls
 
 
+def _content_text(content: Any, content_blocks: list[dict[str, Any]]) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = [
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and str(block.get("type", "") or "").strip() == "text"
+        ]
+        return "\n".join(part for part in text_parts if part)
+    if isinstance(content, dict):
+        text = str(content.get("text", "") or content.get("content", "") or "")
+        if text:
+            return text
+    text_parts = [
+        str(block.get("text", ""))
+        for block in content_blocks
+        if isinstance(block, dict) and str(block.get("type", "") or "").strip() == "text"
+    ]
+    return "\n".join(part for part in text_parts if part)
+
+
 def normalize_message_payload(message: dict[str, Any], *, default_message_id: str | None = None) -> dict[str, Any]:
     message_id = str(message.get("message_id", "") or default_message_id or _new_message_id()).strip()
-    role = str(message.get("role", "user") or "user").strip() or "user"
+    record_id = str(message.get("record_id", "") or _new_record_id()).strip()
+    role = str(message.get("role", "") or "").strip() or "user"
+    content_blocks = normalize_content_blocks(message.get("content_blocks", message.get("content", [])))
     payload: dict[str, Any] = {
+        "record_id": record_id,
         "message_id": message_id,
         "role": role,
-        "content": normalize_content_blocks(message.get("content", [])),
+        "content": _content_text(message.get("content"), content_blocks),
+        "content_blocks": content_blocks,
     }
 
-    timestamp = str(message.get("timestamp", "") or "").strip()
-    if timestamp:
-        payload["timestamp"] = timestamp
+    created_at = str(message.get("created_at", "") or message.get("timestamp", "") or "").strip()
+    if created_at:
+        payload["created_at"] = created_at
+
+    for key in ("session_id", "user_id", "turn_id", "job_id"):
+        value = str(message.get(key, "") or "").strip()
+        if value:
+            payload[key] = value
 
     model_name = str(message.get("model_name", "") or "").strip()
     if model_name:
@@ -83,11 +118,19 @@ def normalize_message_payload(message: dict[str, Any], *, default_message_id: st
     if tool_call_id:
         payload["tool_call_id"] = tool_call_id
 
+    reply_to_message_id = str(message.get("reply_to_message_id", "") or "").strip()
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+
     task = message.get("task")
     if isinstance(task, dict):
         payload["task"] = task
 
-    for key in ("phase", "event", "source", "node"):
+    event_type = str(message.get("event_type", "") or message.get("event", "") or "").strip()
+    if event_type:
+        payload["event_type"] = event_type
+
+    for key in ("source", "node"):
         value = str(message.get(key, "") or "").strip()
         if value:
             payload[key] = value
@@ -100,9 +143,11 @@ def normalize_message_payload(message: dict[str, Any], *, default_message_id: st
     if isinstance(brain, dict) and brain:
         payload["brain"] = brain
 
-    meta = message.get("meta")
-    if isinstance(meta, dict) and meta:
-        payload["meta"] = meta
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = message.get("meta")
+    if isinstance(metadata, dict) and metadata:
+        payload["metadata"] = metadata
 
     return payload
 
@@ -135,7 +180,7 @@ class HistoryStore:
         with open(path, "a", encoding="utf-8") as file_obj:
             for message in messages:
                 payload = normalize_message_payload(message)
-                payload.setdefault("timestamp", datetime.now().isoformat())
+                payload.setdefault("created_at", datetime.now().isoformat())
                 file_obj.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def clear_messages(self, thread_id: str) -> None:

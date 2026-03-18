@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from emoticorebot.session.models import SessionTaskView, SessionTraceRecord
-from emoticorebot.utils.task_projection import (
+from emoticorebot.utils.right_brain_projection import (
     normalize_task_result,
     normalize_task_state,
     project_task_from_runtime_snapshot,
@@ -11,23 +11,21 @@ from emoticorebot.utils.task_projection import (
 
 def test_task_projection_maps_runtime_state_to_three_state_view() -> None:
     assert normalize_task_state("running") == "running"
-    assert normalize_task_state("waiting") == "waiting"
     assert normalize_task_state("done") == "done"
     assert normalize_task_result("done", "success") == "success"
     assert normalize_task_result("done", "cancelled") == "cancelled"
     assert normalize_task_result("running", "success") == "none"
 
 
-def test_project_task_from_runtime_snapshot_uses_new_fields() -> None:
+def test_project_task_from_runtime_snapshot_uses_compact_right_brain_fields() -> None:
     projected = project_task_from_runtime_snapshot(
         {
             "task_id": "task_1",
             "title": "创建 add.py",
-            "state": "waiting",
+            "state": "running",
             "result": "none",
-            "summary": "等待路径",
-            "last_progress": "需要用户输入",
-            "input_request": {"field": "path", "question": "文件放哪里？"},
+            "summary": "正在执行",
+            "last_progress": "已完成扫描",
         },
         params={"request": "创建 add.py"},
     )
@@ -36,11 +34,10 @@ def test_project_task_from_runtime_snapshot_uses_new_fields() -> None:
         "invoked": True,
         "task_id": "task_1",
         "title": "创建 add.py",
-        "state": "waiting",
+        "state": "running",
         "result": "none",
-        "summary": "等待路径",
-        "stage": "需要用户输入",
-        "input_request": {"field": "path", "question": "文件放哪里？"},
+        "summary": "正在执行",
+        "stage": "已完成扫描",
         "params": {"request": "创建 add.py"},
     }
 
@@ -54,7 +51,7 @@ def test_project_task_from_session_view_keeps_trace_and_result() -> None:
         summary="已完成",
         trace=[
             SessionTraceRecord(trace_id="trace_1", task_id="task_1", kind="progress", message="正在写文件", ts="1"),
-            SessionTraceRecord(trace_id="trace_2", task_id="task_1", kind="result", message="写入完成", ts="2"),
+            SessionTraceRecord(trace_id="trace_2", task_id="task_1", kind="summary", message="写入完成", ts="2"),
         ],
     )
 

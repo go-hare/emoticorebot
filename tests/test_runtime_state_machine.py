@@ -2,56 +2,29 @@ from __future__ import annotations
 
 import pytest
 
-from emoticorebot.runtime.state_machine import IllegalTransitionError, TaskState, TaskStateMachine
+from emoticorebot.right.state_machine import IllegalTransitionError, RightBrainState, RightBrainStateMachine
 
 
-def test_simple_task_completes_without_review() -> None:
-    state = TaskState.RUNNING
-    state = TaskStateMachine.report_started(state)
-    state = TaskStateMachine.report_progress(state)
-    state = TaskStateMachine.report_result(state, review_required=False)
-    state = TaskStateMachine.archive_task(state)
+def test_right_brain_run_completes_to_done() -> None:
+    state = RightBrainState.RUNNING
+    state = RightBrainStateMachine.report_started(state)
+    state = RightBrainStateMachine.report_progress(state)
+    state = RightBrainStateMachine.report_result(state)
+    state = RightBrainStateMachine.archive_task(state)
 
-    assert state is TaskState.DONE
-
-
-def test_review_flow_stays_running_until_reviewer_finishes() -> None:
-    state = TaskState.RUNNING
-    state = TaskStateMachine.report_started(state)
-    state = TaskStateMachine.report_result(state, review_required=True)
-
-    assert state is TaskState.RUNNING
-
-    state = TaskStateMachine.report_rejected(state)
-    assert state is TaskState.RUNNING
-
-
-def test_waiting_resumes_to_running_per_document() -> None:
-    state = TaskState.RUNNING
-    state = TaskStateMachine.report_started(state)
-    state = TaskStateMachine.report_need_input(state)
-
-    assert state is TaskState.WAITING
-    assert TaskStateMachine.resume_task(state) is TaskState.RUNNING
+    assert state is RightBrainState.DONE
 
 
 def test_cancel_from_running_is_allowed() -> None:
-    assert TaskStateMachine.cancel_task(TaskState.RUNNING) is TaskState.DONE
+    assert RightBrainStateMachine.cancel_task(RightBrainState.RUNNING) is RightBrainState.DONE
 
 
-def test_legacy_intermediate_and_result_states_are_not_task_states() -> None:
-    values = {member.value for member in TaskState}
+def test_state_machine_only_exposes_running_and_done() -> None:
+    values = {member.value for member in RightBrainState}
 
-    assert "blocked_input" not in values
-    assert "idle" not in values
-    assert "assigned" not in values
-    assert "planned" not in values
-    assert "reviewing" not in values
-    assert "failed" not in values
-    assert "cancelled" not in values
-    assert "archived" not in values
+    assert values == {"running", "done"}
 
 
 def test_illegal_transition_raises() -> None:
     with pytest.raises(IllegalTransitionError):
-        TaskStateMachine.report_need_input(TaskState.DONE)
+        RightBrainStateMachine.report_progress(RightBrainState.DONE)

@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from emoticorebot.execution.backend import GENERAL_TASK_PROFILE, build_agent_instructions, build_task_profile
-from emoticorebot.execution.deep_agent_executor import DeepAgentExecutor
+from emoticorebot.right.deep_agent_backend import GENERAL_TASK_PROFILE, build_agent_instructions, build_task_profile
+from emoticorebot.right.deep_agent_executor import DeepAgentExecutor
 
 
 def _build_executor() -> DeepAgentExecutor:

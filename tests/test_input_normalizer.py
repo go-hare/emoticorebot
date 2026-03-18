@@ -98,3 +98,64 @@ def test_input_normalizer_emits_video_multimodal_turn() -> None:
     assert event.payload.input_kind == "multimodal"
     assert event.payload.user_text == "看一下这个界面"
     assert len(event.payload.content_blocks) == 2
+
+
+def test_input_normalizer_emits_stream_events() -> None:
+    normalizer = InputNormalizer()
+
+    started = normalizer.normalize_stream_start(
+        session_id="sess_stream",
+        stream_id="stream_1",
+        channel="rtc",
+        chat_id="call_1",
+        sender_id="user",
+        message_id="msg_stream_1",
+        channel_kind="voice",
+        input_kind="voice",
+        metadata={"barge_in": True},
+    )
+    chunk = normalizer.normalize_stream_chunk(
+        session_id="sess_stream",
+        stream_id="stream_1",
+        chunk_index=0,
+        chunk_text="你好",
+    )
+    committed = normalizer.normalize_stream_commit(
+        session_id="sess_stream",
+        turn_id="turn_stream_1",
+        stream_id="stream_1",
+        committed_text="你好呀",
+        metadata={"history_context": "recent"},
+    )
+    interrupted = normalizer.normalize_stream_interrupted(
+        session_id="sess_stream",
+        stream_id="stream_1",
+        reason="barge_in",
+    )
+
+    assert started.event_type == EventType.INPUT_STREAM_STARTED
+    assert started.topic == Topic.INPUT_EVENT
+    assert started.priority == EventPriority.P1
+    assert started.payload.input_mode == "stream"
+    assert started.payload.session_mode == "realtime_chat"
+    assert started.payload.metadata["channel_kind"] == "voice"
+    assert started.payload.metadata["input_kind"] == "voice"
+    assert started.payload.metadata["barge_in"] is True
+
+    assert chunk.event_type == EventType.INPUT_STREAM_CHUNK
+    assert chunk.topic == Topic.INPUT_EVENT
+    assert chunk.priority == EventPriority.P1
+    assert chunk.payload.chunk_index == 0
+    assert chunk.payload.chunk_text == "你好"
+
+    assert committed.event_type == EventType.INPUT_STREAM_COMMITTED
+    assert committed.topic == Topic.INPUT_EVENT
+    assert committed.priority == EventPriority.P1
+    assert committed.turn_id == "turn_stream_1"
+    assert committed.payload.committed_text == "你好呀"
+    assert committed.payload.metadata["history_context"] == "recent"
+
+    assert interrupted.event_type == EventType.INPUT_STREAM_INTERRUPTED
+    assert interrupted.topic == Topic.INPUT_EVENT
+    assert interrupted.priority == EventPriority.P0
+    assert interrupted.payload.reason == "barge_in"

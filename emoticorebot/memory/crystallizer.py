@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from emoticorebot.execution.skills import BUILTIN_SKILLS_DIR
+from emoticorebot.right.skills import BUILTIN_SKILLS_DIR
 
 from .store import MemoryStore
 
@@ -24,7 +24,7 @@ class SkillMaterializationResult:
 class SkillMaterializer:
     """Turn repeated procedural hints into lightweight `SKILL.md` files."""
 
-    _SKILL_MEMORY_TYPES = {"skill_hint", "skill"}
+    _SKILL_MEMORY_SUBTYPES = {"skill_hint", "skill"}
     _MIN_CLUSTER_SIMILARITY = 0.40
 
     def __init__(self, workspace: Path, memory_store: MemoryStore, *, min_support: int = 2):
@@ -84,7 +84,7 @@ class SkillMaterializer:
         return [
             record
             for record in records
-            if str(record.get("type", "") or "") in self._SKILL_MEMORY_TYPES
+            if str(((record.get("metadata") or {}).get("subtype", "") or "")) in self._SKILL_MEMORY_SUBTYPES
             and str(record.get("status", "active") or "active") == "active"
         ]
 
@@ -135,11 +135,11 @@ class SkillMaterializer:
 
     @classmethod
     def _slug_candidate(cls, record: dict[str, Any]) -> tuple[str, int]:
-        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-        skill_name = cls._normalize_slug(str(payload.get("skill_name", "") or ""))
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        skill_name = cls._normalize_slug(str(metadata.get("skill_name", "") or ""))
         if skill_name:
             return skill_name, 2
-        skill_id = cls._normalize_slug(str(payload.get("skill_id", "") or ""))
+        skill_id = cls._normalize_slug(str(metadata.get("skill_id", "") or ""))
         if skill_id:
             return skill_id, 1
         return cls._normalize_slug(str(record.get("summary", "") or "")), 0
@@ -174,14 +174,14 @@ class SkillMaterializer:
 
     @classmethod
     def _signature_tokens(cls, record: dict[str, Any]) -> set[str]:
-        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
         combined = " ".join(
             [
                 str(record.get("summary", "") or ""),
-                str(record.get("content", "") or ""),
-                str(payload.get("skill_name", "") or ""),
-                str(payload.get("trigger", "") or ""),
-                str(payload.get("hint", "") or ""),
+                str(record.get("detail", "") or ""),
+                str(metadata.get("skill_name", "") or ""),
+                str(metadata.get("trigger", "") or ""),
+                str(metadata.get("hint", "") or ""),
             ]
         )
         return cls._tokenize_text(combined)
@@ -230,9 +230,9 @@ class SkillMaterializer:
         return (BUILTIN_SKILLS_DIR / slug / "SKILL.md").exists()
 
     def _render_skill(self, *, slug: str, records: list[dict[str, Any]]) -> str:
-        payloads = [record.get("payload") if isinstance(record.get("payload"), dict) else {} for record in records]
+        payloads = [record.get("metadata") if isinstance(record.get("metadata"), dict) else {} for record in records]
         summaries = self._dedupe_strings([str(record.get("summary", "") or "") for record in records])
-        contents = self._dedupe_strings([str(record.get("content", "") or "") for record in records])
+        contents = self._dedupe_strings([str(record.get("detail", "") or "") for record in records])
         triggers = self._dedupe_strings([str(payload.get("trigger", "") or "") for payload in payloads])
         hints = self._dedupe_strings([str(payload.get("hint", "") or "") for payload in payloads])
         tools = self._dedupe_strings(
@@ -242,7 +242,11 @@ class SkillMaterializer:
                 for tool in list(payload.get("applies_to_tools", []) or [])
             ]
         )
-        memory_ids = [str(record.get("id", "") or "") for record in records if str(record.get("id", "") or "")]
+        memory_ids = [
+            str(record.get("memory_id", "") or "")
+            for record in records
+            if str(record.get("memory_id", "") or "")
+        ]
         skill_name = next(
             (
                 str(payload.get("skill_name", "") or "").strip()

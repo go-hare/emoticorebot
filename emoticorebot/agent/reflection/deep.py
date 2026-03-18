@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from emoticorebot.agent.reflection.memory_candidates import (
+    build_skill_hint_candidate,
+    compact_text,
+    normalize_memory_candidates,
+)
 from emoticorebot.types import DeepReflectionOutput
 
 
@@ -44,7 +48,7 @@ class DeepReflectionService:
 1. 阅读最近的 `cognitive_event`。
 2. 只提炼真正稳定的长期价值。
 3. 为统一长期记忆存储产出 `memory_candidates`。
-4. 只有在重复执行模式明显可复用时，才产出 `skill_hint` 候选。
+4. 如果存在可复用执行模式，直接把它写成正式长期记忆候选，不要再单独输出其他中间结构。
 
 规则：
 - 不要复制原始日志或大段文本。
@@ -64,29 +68,20 @@ class DeepReflectionService:
   "summary": "",
   "memory_candidates": [
     {{
-      "audience": "brain|task|shared",
-      "kind": "episodic|durable|procedural",
-      "type": "insight|user|preference|workflow|skill",
+      "memory_type": "relationship|fact|working|execution|reflection",
       "summary": "",
-      "content": "",
-      "importance": 1,
+      "detail": "",
       "confidence": 0.0,
       "stability": 0.0,
       "tags": [""],
-      "payload": {{}}
+      "metadata": {{
+        "subtype": "",
+        "importance": 1
+      }}
     }}
   ],
   "user_updates": [""],
-  "soul_updates": [""],
-  "skill_hints": [
-    {{
-      "summary": "",
-      "content": "",
-      "trigger": "",
-      "hint": "",
-      "skill_name": ""
-    }}
-  ]
+  "soul_updates": [""]
 }}
 
 字段说明：
@@ -94,30 +89,22 @@ class DeepReflectionService:
 - `memory_candidates`：真正值得进入统一长期记忆的候选列表，没有就返回空数组。
 - `user_updates`：对用户整体画像的更新候选，没有就返回空数组；每一项都应像 `用户更喜欢先讨论架构，再进入实现细节。` 这样可直接落盘。
 - `soul_updates`：对主脑稳定风格的更新候选，没有就返回空数组；每一项都应像 `复杂任务中先收敛判断，再交给 task 执行。` 这样可直接落盘。
-- `skill_hints`：只有在重复模式明显可复用时才填写，没有就返回空数组。
-
-`skill_hints` 字段说明：
-- `summary`：一句话概括这个技能提示。
-- `content`：更完整的说明。
-- `trigger`：什么情况下应触发。
-- `hint`：给 task 的紧凑提示。
-- `skill_name`：未来沉淀为技能时的名称。
+- 如果需要表达可复用执行技能，请直接输出 `memory_type="execution"` 的候选，并在 `metadata.subtype` 里写 `skill_hint`，相关 `skill_name / trigger / hint` 也放进 `metadata`。
 
 示例：
 {{
   "summary": "近期多轮任务显示，复杂问题更适合由 task 内部收敛后再交回主脑。",
   "memory_candidates": [
     {{
-      "audience": "task",
-      "kind": "procedural",
-      "type": "workflow",
+      "memory_type": "execution",
       "summary": "复杂任务适合走最终结果式执行链路",
-      "content": "当任务需要多步分析和工具配合时，task 应优先在内部收敛，再把最终结果返回给 brain。",
-      "importance": 8,
+      "detail": "当任务需要多步分析和工具配合时，task 应优先在内部收敛，再把最终结果返回给 brain。",
       "confidence": 0.88,
       "stability": 0.81,
       "tags": ["workflow", "task"],
-      "payload": {{
+      "metadata": {{
+        "subtype": "workflow",
+        "importance": 8,
         "goal_cluster": "complex_execution",
         "tool_sequence": ["analysis", "tool", "summary"],
         "preconditions": ["需要多步执行"],
@@ -125,19 +112,27 @@ class DeepReflectionService:
         "sample_size": 4,
         "success_rate": 0.8
       }}
+    }},
+    {{
+      "memory_type": "execution",
+      "summary": "复杂任务优先走最终结果式执行",
+      "detail": "对于复杂任务，优先让 task 在单次执行中收敛到最终结果。",
+      "confidence": 0.8,
+      "stability": 0.85,
+      "tags": ["skill", "hint"],
+      "metadata": {{
+        "subtype": "skill_hint",
+        "importance": 7,
+        "skill_name": "final-result-execution",
+        "skill_id": "skill_final_result_execution",
+        "trigger": "需要多步执行或工具组合时",
+        "hint": "减少中间汇报，优先给最终结果。",
+        "applies_to_tools": []
+      }}
     }}
   ],
   "user_updates": [],
-  "soul_updates": [],
-  "skill_hints": [
-    {{
-      "summary": "复杂任务优先走最终结果式执行",
-      "content": "对于复杂任务，优先让 task 在单次执行中收敛到最终结果。",
-      "trigger": "需要多步执行或工具组合时",
-      "hint": "减少中间汇报，优先给最终结果。",
-      "skill_name": "final-result-execution"
-    }}
-  ]
+  "soul_updates": []
 }}
 """.strip()
 
@@ -168,43 +163,42 @@ class DeepReflectionService:
     def _proposal_from_payload(payload: dict[str, Any]) -> DeepReflectionProposal:
         return DeepReflectionProposal(
             summary=str(payload.get("summary", "") or "").strip(),
-            memory_candidates=[
-                *list(payload.get("memory_candidates", []) or []),
-                *DeepReflectionService._normalize_skill_hints(payload.get("skill_hints")),
-            ],
+            memory_candidates=list(payload.get("memory_candidates", []) or []),
             user_updates=DeepReflectionService._normalize_str_list(payload.get("user_updates")),
             soul_updates=DeepReflectionService._normalize_str_list(payload.get("soul_updates")),
         )
 
-
     def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        candidates = self._normalize_candidates(payload.get("memory_candidates"))
-        skill_hints = self._normalize_skill_hints(payload.get("skill_hints"))
         return {
             "summary": str(payload.get("summary", "") or "").strip(),
-            "memory_candidates": [*candidates, *skill_hints],
+            "memory_candidates": normalize_memory_candidates(
+                payload.get("memory_candidates"),
+                default_memory_type="fact",
+                default_confidence=0.78,
+                default_stability=0.72,
+                default_importance=6,
+                limit=8,
+            ),
             "user_updates": self._normalize_str_list(payload.get("user_updates")),
             "soul_updates": self._normalize_str_list(payload.get("soul_updates")),
         }
 
     def _fallback_payload(self, events: list[dict[str, Any]]) -> dict[str, Any]:
         candidates: list[dict[str, Any]] = []
-        skill_hints: list[dict[str, Any]] = []
 
         tool_events = [event for event in events if (event.get("task") or {}).get("used")]
         if len(tool_events) >= 2:
             candidates.append(
                 {
-                    "audience": "task",
-                    "kind": "procedural",
-                    "type": "workflow",
+                    "memory_type": "execution",
                     "summary": "近期多轮任务中持续使用执行链路解决问题。",
-                    "content": "最近多轮任务都依赖 task 执行并由 brain 统一收口，适合继续保持最终结果式返回。",
-                    "importance": 7,
+                    "detail": "最近多轮任务都依赖 task 执行并由 brain 统一收口，适合继续保持最终结果式返回。",
                     "confidence": 0.76,
                     "stability": 0.68,
                     "tags": ["workflow", "task"],
-                    "payload": {
+                    "metadata": {
+                        "subtype": "workflow",
+                        "importance": 7,
                         "goal_cluster": "general_execution",
                         "tool_sequence": [],
                         "preconditions": ["需要外部工具或多步执行"],
@@ -214,14 +208,14 @@ class DeepReflectionService:
                     },
                 }
             )
-            skill_hints.append(
-                {
-                    "summary": "复杂任务默认走最终结果式执行链路",
-                    "content": "遇到复杂任务时，task 优先在单次执行内完成收敛，再把最终结果交回 brain。",
-                    "trigger": "需要多步执行或工具组合时",
-                    "hint": "减少中间态汇报，优先收敛到最终结果。",
-                    "skill_name": "final-result-execution",
-                }
+            candidates.append(
+                build_skill_hint_candidate(
+                    summary="复杂任务默认走最终结果式执行链路",
+                    detail="遇到复杂任务时，task 优先在单次执行内完成收敛，再把最终结果交回 brain。",
+                    trigger="需要多步执行或工具组合时",
+                    hint="减少中间态汇报，优先收敛到最终结果。",
+                    skill_name="final-result-execution",
+                )
             )
 
         return {
@@ -229,7 +223,6 @@ class DeepReflectionService:
             "memory_candidates": candidates,
             "user_updates": [],
             "soul_updates": [],
-            "skill_hints": skill_hints,
         }
 
     @staticmethod
@@ -272,98 +265,6 @@ class DeepReflectionService:
         return "\n".join(lines)
 
     @staticmethod
-    def _normalize_candidates(value: Any) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        records: list[dict[str, Any]] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            summary = str(item.get("summary", "") or "").strip()
-            content = str(item.get("content", "") or "").strip()
-            if not summary and not content:
-                continue
-            records.append(
-                {
-                    "audience": str(item.get("audience", "shared") or "shared").strip(),
-                    "kind": str(item.get("kind", "durable") or "durable").strip(),
-                    "type": str(item.get("type", "insight") or "insight").strip(),
-                    "summary": summary or DeepReflectionService._compact(content, 120),
-                    "content": content or summary,
-                    "importance": int(item.get("importance", 6) or 6),
-                    "confidence": float(item.get("confidence", 0.78) or 0.78),
-                    "stability": float(item.get("stability", 0.72) or 0.72),
-                    "tags": DeepReflectionService._normalize_str_list(item.get("tags")),
-                    "payload": dict(item.get("payload", {}) or {}),
-                }
-            )
-        return records[:8]
-
-    @staticmethod
-    def _normalize_skill_hints(value: Any) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        records: list[dict[str, Any]] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            summary = str(item.get("summary", "") or "").strip()
-            content = str(item.get("content", "") or "").strip()
-            hint = str(item.get("hint", "") or "").strip()
-            trigger = str(item.get("trigger", "") or "").strip()
-            if not any((summary, content, hint, trigger)):
-                continue
-            skill_name = DeepReflectionService._derive_skill_name(
-                str(item.get("skill_name", "") or "").strip(),
-                summary=summary,
-                content=content,
-                hint=hint,
-                trigger=trigger,
-            )
-            if not skill_name:
-                continue
-            records.append(
-                {
-                    "audience": "task",
-                    "kind": "procedural",
-                    "type": "skill_hint",
-                    "summary": summary or DeepReflectionService._compact(content or hint, 120),
-                    "content": content or hint or summary,
-                    "importance": 7,
-                    "confidence": 0.8,
-                    "stability": 0.85,
-                    "tags": ["skill", "hint"],
-                    "payload": {
-                        "skill_id": f"skill_{re.sub(r'[^a-z0-9\u4e00-\u9fff]+', '_', skill_name.lower()).strip('_') or 'hint'}",
-                        "skill_name": skill_name,
-                        "trigger": trigger,
-                        "hint": hint or content or summary,
-                        "applies_to_tools": [],
-                    },
-                }
-            )
-        return records[:4]
-
-    @staticmethod
-    def _derive_skill_name(
-        raw_name: str,
-        *,
-        summary: str,
-        content: str,
-        hint: str,
-        trigger: str,
-    ) -> str:
-        provided = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", str(raw_name or "").strip().lower()).strip("-")
-        if provided:
-            return provided[:64]
-
-        seed = summary or hint or trigger or content
-        compact = re.sub(r"\s+", "-", str(seed or "").strip().lower())
-        derived = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", compact).strip("-")
-        derived = re.sub(r"-+", "-", derived)
-        return derived[:64]
-
-    @staticmethod
     def _normalize_str_list(value: Any) -> list[str]:
         if not isinstance(value, list):
             return []
@@ -376,9 +277,6 @@ class DeepReflectionService:
 
     @staticmethod
     def _compact(text: str, limit: int) -> str:
-        compact = " ".join(str(text or "").split())
-        if len(compact) <= limit:
-            return compact
-        return compact[: limit - 1] + "…"
+        return compact_text(text, limit=limit)
 
 __all__ = ["DeepReflectionProposal", "DeepReflectionResult", "DeepReflectionService"]

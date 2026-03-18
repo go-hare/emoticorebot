@@ -37,17 +37,16 @@ class DeliveryService:
     async def _deliver(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
         payload = event.payload
         reply_metadata = dict(payload.reply.metadata or {})
-        stream_state = self._stream_state(event.event_type, reply_metadata)
+        stream_state = self._stream_state(payload)
         origin = payload.origin_message or MessageRef()
         channel = payload.channel_override or origin.channel
         chat_id = payload.chat_id_override or origin.chat_id
         if self._should_deliver is not None and not self._should_deliver(event):
-            if self._is_stream(event.event_type, reply_metadata):
+            if self._is_stream(payload):
                 await self._publish_superseded(
                     event,
                     channel=channel,
                     chat_id=chat_id,
-                    reply_metadata=reply_metadata,
                 )
                 return
             await self._publish_failed(event, reason="stale_reply_dropped")
@@ -81,15 +80,17 @@ class DeliveryService:
             content=content,
             message_id=delivery_message_id,
             reply_to=payload.reply.reply_to_message_id or origin.message_id,
+            media=self._render_media(payload),
+            content_blocks=self._render_blocks(payload),
             metadata={
                 "reply_id": payload.reply.reply_id,
                 "reply_kind": payload.reply.kind,
                 "session_id": event.session_id,
                 "task_id": event.task_id,
-                "_stream": bool(reply_metadata.get("stream_id")) or stream_state in {"open", "delta", "close"},
-                "_stream_id": str(reply_metadata.get("stream_id", "") or "").strip(),
+                "_stream": bool(str(payload.stream_id or "").strip()) or stream_state in {"open", "delta", "close"},
+                "_stream_id": str(payload.stream_id or "").strip(),
                 "_stream_state": stream_state,
-                "_stream_index": reply_metadata.get("stream_index"),
+                "_stream_index": payload.stream_index,
             },
         )
         try:
@@ -180,6 +181,21 @@ class DeliveryService:
         return "\n".join(parts).strip()
 
     @staticmethod
+    def _render_media(payload: ReplyReadyPayload) -> list[str]:
+        media: list[str] = []
+        for block in payload.reply.content_blocks:
+            if block.type == "text":
+                continue
+            path = str(block.path or "").strip()
+            if path:
+                media.append(path)
+        return media
+
+    @staticmethod
+    def _render_blocks(payload: ReplyReadyPayload) -> list[dict[str, object]]:
+        return [block.model_dump(exclude_none=True) for block in payload.reply.content_blocks]
+
+    @staticmethod
     def _delivery_message_id(reply_id: str) -> str:
         return f"delivery_{reply_id}"
 
@@ -192,27 +208,16 @@ class DeliveryService:
         return bool(reply_metadata.get("suppress_delivery"))
 
     @staticmethod
-    def _is_stream(event_type: str, reply_metadata: dict[str, object]) -> bool:
-        if str(event_type) in {
-            str(EventType.OUTPUT_STREAM_OPEN),
-            str(EventType.OUTPUT_STREAM_DELTA),
-            str(EventType.OUTPUT_STREAM_CLOSE),
-        }:
+    def _is_stream(payload: ReplyReadyPayload) -> bool:
+        if payload.stream_state is not None:
             return True
-        return bool(str(reply_metadata.get("stream_id", "") or "").strip())
+        if payload.delivery_mode == "stream":
+            return True
+        return bool(str(payload.stream_id or "").strip())
 
     @staticmethod
-    def _stream_state(event_type: str, reply_metadata: dict[str, object]) -> str:
-        if str(event_type) == str(EventType.OUTPUT_STREAM_OPEN):
-            return "open"
-        if str(event_type) == str(EventType.OUTPUT_STREAM_DELTA):
-            return "delta"
-        if str(event_type) == str(EventType.OUTPUT_STREAM_CLOSE):
-            return "close"
-        stream_state = str(reply_metadata.get("stream_state", "") or "").strip()
-        if stream_state == "final":
-            return "close"
-        return stream_state
+    def _stream_state(payload: ReplyReadyPayload) -> str:
+        return str(payload.stream_state or "").strip()
 
     async def _publish_superseded(
         self,
@@ -220,11 +225,10 @@ class DeliveryService:
         *,
         channel: str | None,
         chat_id: str | None,
-        reply_metadata: dict[str, object],
     ) -> None:
         if self._transport is None or not channel or not chat_id:
             return
-        stream_id = str(reply_metadata.get("stream_id", "") or "").strip()
+        stream_id = str(event.payload.stream_id or "").strip()
         if not stream_id:
             return
         await self._transport.publish_outbound(
@@ -242,7 +246,7 @@ class DeliveryService:
                     "_stream": True,
                     "_stream_id": stream_id,
                     "_stream_state": "superseded",
-                    "_stream_index": reply_metadata.get("stream_index"),
+                    "_stream_index": event.payload.stream_index,
                 },
             )
         )

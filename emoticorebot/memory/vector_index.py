@@ -50,7 +50,7 @@ class EmbeddingFactory:
 
 
 class ChromaPersistentIndex:
-    """A tiny Chroma PersistentClient wrapper used as the vector mirror of memory.jsonl."""
+    """A tiny Chroma PersistentClient wrapper used as the vector mirror of long-term memory."""
 
     _FAILED_PATHS: ClassVar[set[str]] = set()
 
@@ -68,7 +68,7 @@ class ChromaPersistentIndex:
 
     @property
     def index_dir(self) -> Path:
-        path = self.workspace / "memory" / "chroma"
+        path = self.workspace / "memory" / "vector"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -88,7 +88,9 @@ class ChromaPersistentIndex:
         if client is None:
             return
         try:
-            client.close()
+            close_method = getattr(client, "close", None)
+            if callable(close_method):
+                close_method()
         except Exception as exc:
             logger.warning("Chroma client close failed for {}: {}", self.index_dir, exc)
         finally:
@@ -148,13 +150,13 @@ class ChromaPersistentIndex:
         if client is None or self.embedding_function is None:
             return False
 
-        normalized_records = [record for record in records if str(record.get("id", "") or "").strip()]
+        normalized_records = [record for record in records if str(record.get("memory_id", "") or "").strip()]
         try:
             self._reset_collection(client)
             collection = self._get_collection(client)
             if normalized_records:
                 self._upsert_records(collection, normalized_records)
-            self._prune_access_stats({str(record.get("id", "") or "").strip() for record in normalized_records})
+            self._prune_access_stats({str(record.get("memory_id", "") or "").strip() for record in normalized_records})
             self._write_sync_state(source_signature)
             return True
         except Exception as exc:
@@ -166,7 +168,7 @@ class ChromaPersistentIndex:
         if client is None or self.embedding_function is None:
             return False
 
-        normalized_records = [record for record in records if str(record.get("id", "") or "").strip()]
+        normalized_records = [record for record in records if str(record.get("memory_id", "") or "").strip()]
         if not normalized_records:
             if source_signature is not None:
                 self._write_sync_state(source_signature)
@@ -237,7 +239,7 @@ class ChromaPersistentIndex:
             pass
 
     def _upsert_records(self, collection: Any, records: list[dict[str, Any]]) -> None:
-        ids = [str(record.get("id", "") or "").strip() for record in records]
+        ids = [str(record.get("memory_id", "") or "").strip() for record in records]
         documents = [self._record_text(record) for record in records]
         metadatas = [self._metadata(record) for record in records]
         collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
@@ -245,28 +247,30 @@ class ChromaPersistentIndex:
     @staticmethod
     def _metadata(record: dict[str, Any]) -> dict[str, str | int | float | bool]:
         tags = [str(item).strip() for item in list(record.get("tags", []) or []) if str(item).strip()]
-        expires_at = record.get("expires_at")
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
         return {
-            "memory_id": str(record.get("id", "") or "").strip(),
-            "audience": str(record.get("audience", "") or "").strip(),
-            "kind": str(record.get("kind", "") or "").strip(),
-            "type": str(record.get("type", "") or "").strip(),
+            "memory_id": str(record.get("memory_id", "") or "").strip(),
+            "memory_type": str(record.get("memory_type", "") or "").strip(),
+            "subtype": str(metadata.get("subtype", "") or "").strip(),
             "status": str(record.get("status", "") or "").strip(),
             "tags_text": " ".join(tags),
-            "importance": int(record.get("importance", 5) or 5),
+            "importance": int(metadata.get("importance", 5) or 5),
             "confidence": float(record.get("confidence", 0.0) or 0.0),
             "stability": float(record.get("stability", 0.0) or 0.0),
             "created_at": str(record.get("created_at", "") or "").strip(),
-            "expires_at": str(expires_at or "").strip(),
+            "updated_at": str(record.get("updated_at", "") or "").strip(),
         }
 
     @staticmethod
     def _record_text(record: dict[str, Any]) -> str:
         tags = [str(item).strip() for item in list(record.get("tags", []) or []) if str(item).strip()]
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
         parts = [
             str(record.get("summary", "") or "").strip(),
-            str(record.get("content", "") or "").strip(),
+            str(record.get("detail", "") or "").strip(),
             " ".join(tags),
+            str(metadata.get("hint", "") or "").strip(),
+            str(metadata.get("trigger", "") or "").strip(),
         ]
         return "\n".join(part for part in parts if part)
 

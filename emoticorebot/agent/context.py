@@ -10,7 +10,7 @@ from typing import Any
 
 from emoticorebot.agent.cognitive import CognitiveEvent
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
-from emoticorebot.execution.skills import SkillsLoader
+from emoticorebot.right.skills import SkillsLoader
 from emoticorebot.memory.retrieval import MemoryRetrieval
 
 

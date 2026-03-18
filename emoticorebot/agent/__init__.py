@@ -13,7 +13,7 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     if name == "DeepAgentExecutor":
-        from emoticorebot.execution.deep_agent_executor import DeepAgentExecutor
+        from emoticorebot.right.deep_agent_executor import DeepAgentExecutor
 
         return DeepAgentExecutor
     if name == "ExecutiveBrain":

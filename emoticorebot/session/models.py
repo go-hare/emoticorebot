@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from emoticorebot.protocol.task_models import MessageRef
+
 TaskViewState = Literal["running", "waiting", "done"]
 TaskViewResult = Literal["none", "success", "failed", "cancelled"]
 
@@ -41,6 +43,12 @@ class SessionContext:
     session_summary: str = ""
     last_turn_id: str | None = None
     last_front_instance_id: str | None = None
+    active_input_stream_id: str | None = None
+    active_input_stream_message: MessageRef | None = None
+    active_input_stream_metadata: dict[str, Any] = field(default_factory=dict)
+    active_input_stream_text: str = ""
+    input_stream_commit_count: int = 0
+    interrupted_input_stream_ids: set[str] = field(default_factory=set)
     active_reply_stream_id: str | None = None
     last_user_input: str = ""
     last_assistant_output: str = ""
@@ -57,7 +65,12 @@ class SessionContext:
         self.active_task_ids = [item.task_id for item in ordered if item.state == "running"]
         self.waiting_task_ids = [item.task_id for item in ordered if item.state == "waiting"]
         self.done_task_ids = [item.task_id for item in ordered if item.state == "done"]
-        self.archived = not self.active_task_ids and not self.waiting_task_ids and not self.active_reply_stream_id
+        self.archived = (
+            not self.active_task_ids
+            and not self.waiting_task_ids
+            and not self.active_reply_stream_id
+            and not self.active_input_stream_id
+        )
 
 
 __all__ = [

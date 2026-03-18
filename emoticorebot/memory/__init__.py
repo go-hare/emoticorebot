@@ -1,7 +1,7 @@
-"""Unified long-term memory helpers."""
+"""Formal memory module exports."""
 
-from emoticorebot.memory.facade import MemoryFacade
-from emoticorebot.memory.service import ProcessMemoryService
+from emoticorebot.memory.retrieval import MemoryRetrieval
+from emoticorebot.memory.short_term import ShortTermMemoryStore
 from emoticorebot.memory.store import MemoryStore
 
-__all__ = ["MemoryFacade", "MemoryStore", "ProcessMemoryService"]
+__all__ = ["MemoryRetrieval", "MemoryStore", "ShortTermMemoryStore"]

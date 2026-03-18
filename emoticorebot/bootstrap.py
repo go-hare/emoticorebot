@@ -3,7 +3,7 @@
 这个模块负责装配系统主通路：
 1. 消息调度（接收消息、分发处理）
 2. 协调 transport、线程历史与新的 bus-driven runtime kernel
-3. 线程历史管理（加载/保存 `dialogue` 与 `internal`）
+3. 线程历史管理（加载/保存 `front` 与 `right` 原始记录）
 4. 反思与后台服务调度
 """
 
@@ -24,14 +24,14 @@ from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersC
 from emoticorebot.agent.context import ContextBuilder
 from emoticorebot.agent.model import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
+from emoticorebot.memory.short_term import ShortTermMemoryStore
 from emoticorebot.protocol.envelope import BusEnvelope
-from emoticorebot.protocol.events import DeliveryFailedPayload, RepliedPayload, ReplyReadyPayload
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import InboundMessage, OutboundMessage, TransportBus
 from emoticorebot.runtime.kernel import RuntimeKernel, TurnReply
 from emoticorebot.session.thread_store import ThreadStore
 from emoticorebot.utils.llm_utils import extract_message_text
-from emoticorebot.utils.task_projection import project_task_from_runtime_snapshot, project_task_from_session_view
+from emoticorebot.utils.right_brain_projection import project_task_from_runtime_snapshot, project_task_from_session_view
 
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
@@ -67,6 +67,7 @@ class RuntimeHost:
         self.channels_config = channels_config
 
         self.thread_store = thread_store or ThreadStore(workspace)
+        self.short_term_store = ShortTermMemoryStore(workspace)
         self.emotion_mgr = EmotionStateManager(workspace)
         self.context = ContextBuilder(
             workspace,
@@ -109,42 +110,6 @@ class RuntimeHost:
         self.conversation_gateway = ConversationGateway(
             bus=self.bus,
             message_processor=self._process_message,
-        )
-        self._pending_task_origin_replies: dict[str, BusEnvelope[ReplyReadyPayload]] = {}
-        self.kernel.event_bus.subscribe(
-            consumer="runtime_host",
-            event_type=EventType.OUTPUT_INLINE_READY,
-            handler=self._remember_task_origin_reply,
-        )
-        self.kernel.event_bus.subscribe(
-            consumer="runtime_host",
-            event_type=EventType.OUTPUT_PUSH_READY,
-            handler=self._remember_task_origin_reply,
-        )
-        self.kernel.event_bus.subscribe(
-            consumer="runtime_host",
-            event_type=EventType.OUTPUT_STREAM_OPEN,
-            handler=self._remember_task_origin_reply,
-        )
-        self.kernel.event_bus.subscribe(
-            consumer="runtime_host",
-            event_type=EventType.OUTPUT_STREAM_DELTA,
-            handler=self._remember_task_origin_reply,
-        )
-        self.kernel.event_bus.subscribe(
-            consumer="runtime_host",
-            event_type=EventType.OUTPUT_STREAM_CLOSE,
-            handler=self._remember_task_origin_reply,
-        )
-        self.kernel.event_bus.subscribe(
-            consumer="runtime_host",
-            event_type=EventType.OUTPUT_REPLIED,
-            handler=self._persist_task_origin_internal_reply,
-        )
-        self.kernel.event_bus.subscribe(
-            consumer="runtime_host",
-            event_type=EventType.OUTPUT_DELIVERY_FAILED,
-            handler=self._discard_task_origin_reply,
         )
 
         self._running = False
@@ -201,18 +166,12 @@ class RuntimeHost:
             key,
         )
 
-        dialogue_history, internal_history = self._snapshot_turn_input(key)
-        self._persist_user_message(
-            session_key=key,
-            content=msg.content,
-            media=msg.media,
-            message_id=message_id,
-            timestamp=msg.timestamp.isoformat(),
-        )
+        dialogue_history, right_history = self._snapshot_turn_input(key)
+        user_content = self._build_user_message_content(msg.content, msg.media)
         content, final_state = await self._run_user_message(
             user_input=msg.content,
             dialogue_history=dialogue_history,
-            internal_history=internal_history,
+            internal_history=right_history,
             message_id=message_id,
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -224,15 +183,27 @@ class RuntimeHost:
         if turn_id and not self.kernel.is_current_turn(session_id=key, turn_id=turn_id):
             return None
 
+        self._persist_user_message(
+            session_key=key,
+            user_id=msg.sender_id,
+            turn_id=turn_id,
+            content=user_content,
+            message_id=message_id,
+            created_at=msg.timestamp.isoformat(),
+        )
+
         assistant_timestamp = datetime.now().isoformat()
-        self.thread_store.append_internal_messages(
+        right_messages = self._build_right_turn_records(
+            final_state,
+            session_id=key,
+            user_id=msg.sender_id,
+            turn_id=turn_id,
+            assistant_timestamp=assistant_timestamp,
+            message_id=message_id,
+        )
+        self.thread_store.append_right_messages(
             key,
-            self._build_internal_turn_records(
-                final_state,
-                assistant_timestamp=assistant_timestamp,
-                message_id=message_id,
-                existing_internal_count=len(internal_history),
-            ),
+            right_messages,
         )
 
         thread = self.thread_store.get_or_create(key)
@@ -240,11 +211,28 @@ class RuntimeHost:
         thread.add_message(
             "assistant",
             [{"type": "text", "text": content}],
+            session_id=key,
+            user_id=msg.sender_id,
+            turn_id=turn_id,
             message_id=message_id,
-            timestamp=assistant_timestamp,
+            created_at=assistant_timestamp,
+            event_type="left_reply",
             **assistant_fields,
         )
         self.thread_store.save(thread)
+        self._persist_short_term_turn(
+            session_id=key,
+            turn_id=turn_id,
+            message_id=message_id,
+            user_content=user_content,
+            user_created_at=msg.timestamp.isoformat(),
+            assistant_content=[{"type": "text", "text": content}],
+            assistant_created_at=assistant_timestamp,
+            right_messages=right_messages,
+            final_state=final_state,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+        )
         self._save_proactive_target(msg.channel, msg.chat_id)
         return OutboundMessage(
             channel=msg.channel,
@@ -394,91 +382,92 @@ class RuntimeHost:
 
         return message, final_state
 
-    def _build_internal_turn_records(
+    def _build_right_turn_records(
         self,
         final_state: dict[str, Any],
         *,
+        session_id: str,
+        user_id: str,
+        turn_id: str,
         assistant_timestamp: str,
         message_id: str,
-        existing_internal_count: int = 0,
         source: str = "runtime",
     ) -> list[dict[str, Any]]:
-        """构建内部历史记录，包含完整的执行上下文"""
+        """构建右脑原始记录，仅在当前轮发生右脑参与时落盘。"""
         records: list[dict[str, Any]] = []
 
-        # 基础记录
         base_record = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "turn_id": turn_id,
             "message_id": message_id,
             "role": "assistant",
-            "timestamp": assistant_timestamp,
+            "created_at": assistant_timestamp,
             "source": source,
         }
 
-        # Brain 决策记录
         brain_info = final_state.get("brain", {})
         execution_summary = final_state.get("execution_summary", "")
-        if brain_info or execution_summary:
+        task_action = str(brain_info.get("task_action", "none") or "none").strip() or "none"
+        if task_action != "none":
             summary = str(execution_summary or final_state.get("output", "") or "").strip()
             brain_record = {
                 **base_record,
-                "phase": "brain",
-                "event": "brain.decision",
+                "job_id": str(((final_state.get("task") or {}).get("task_id", "") if isinstance(final_state.get("task"), dict) else "") or "").strip(),
+                "event_type": "job_requested",
                 "content": summary,
-                "brain": {
-                    "task_action": brain_info.get("task_action", "none"),
-                    "final_decision": brain_info.get("final_decision", "answer"),
-                    "reply_event_type": brain_info.get("reply_event_type", ""),
-                    "turn_id": brain_info.get("turn_id", ""),
-                    "execution_summary": execution_summary,
+                "metadata": {
+                    "brain": {
+                        "task_action": task_action,
+                        "final_decision": brain_info.get("final_decision", "answer"),
+                        "reply_event_type": brain_info.get("reply_event_type", ""),
+                        "turn_id": brain_info.get("turn_id", ""),
+                        "execution_summary": execution_summary,
+                    }
                 },
             }
             records.append(brain_record)
 
-        # Task 记录（如果有）
         task_info = final_state.get("task")
         if task_info:
             summary = str(task_info.get("summary", "") or final_state.get("output", "") or "").strip()
+            task_result = str(task_info.get("result", "") or "").strip()
+            event_type = "result_ready"
+            if task_result == "cancelled":
+                event_type = "cancelled"
+            elif task_result == "rejected":
+                event_type = "job_rejected"
             task_record = {
                 **base_record,
-                "phase": "task",
-                "event": "task.executed",
+                "job_id": str(task_info.get("task_id", "") or "").strip(),
+                "event_type": event_type,
                 "content": summary,
-                "task": {
-                    "task_id": task_info.get("task_id", ""),
-                    "state": task_info.get("state", ""),
-                    "result": task_info.get("result", ""),
-                    "summary": task_info.get("summary", ""),
-                    "missing": task_info.get("missing", []),
+                "metadata": {
+                    "task": {
+                        "task_id": task_info.get("task_id", ""),
+                        "state": task_info.get("state", ""),
+                        "result": task_info.get("result", ""),
+                        "summary": task_info.get("summary", ""),
+                        "missing": task_info.get("missing", []),
+                    }
                 },
             }
             records.append(task_record)
 
-        # Task trace 记录（如果有）
         task_trace = list((task_info or {}).get("task_trace", []) or [])
         if task_trace:
             trace_summary = self._summarize_trace(task_trace)
             trace_record = {
                 **base_record,
-                "phase": "execution",
-                "event": "execution.trace",
+                "job_id": str(task_info.get("task_id", "") or "").strip(),
+                "event_type": "progress",
                 "content": trace_summary,
-                "meta": {
+                "metadata": {
                     "trace_count": len(task_trace),
                     "trace_summary": trace_summary,
                 },
             }
             records.append(trace_record)
-
-        # 如果没有任何特殊记录，至少保留一个占位符
-        if not records:
-            output = str(final_state.get("output", "") or "").strip()
-            records.append({
-                **base_record,
-                "phase": "brain",
-                "event": "brain.turn.summary",
-                "content": output,
-                "meta": {"summary": output, "output": output},
-            })
 
         return records
 
@@ -612,137 +601,36 @@ class RuntimeHost:
             compact["params"] = compact_params
         return compact
 
-    async def _remember_task_origin_reply(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
-        if not self._is_task_origin_reply(event):
-            return
-        stream_state = self._reply_stream_state(event.payload.reply.metadata)
-        if stream_state in {"open", "delta", "superseded"}:
-            return
-        reply_id = str(event.payload.reply.reply_id or "").strip()
-        if not reply_id:
-            return
-        self._pending_task_origin_replies[reply_id] = event
-
-    async def _discard_task_origin_reply(self, event: BusEnvelope[DeliveryFailedPayload]) -> None:
-        reply_id = str(event.payload.reply_id or "").strip()
-        if reply_id:
-            self._pending_task_origin_replies.pop(reply_id, None)
-
-    async def _persist_task_origin_internal_reply(self, event: BusEnvelope[RepliedPayload]) -> None:
-        reply_id = str(event.payload.reply_id or "").strip()
-        if not reply_id:
-            return
-        pending = self._pending_task_origin_replies.pop(reply_id, None)
-        if pending is None or not self._is_task_origin_reply(pending):
-            return
-        session_id = str(event.session_id or "").strip()
-        if not session_id:
-            return
-        delivery_message = event.payload.delivery_message
-        assistant_timestamp = str(
-            event.payload.delivered_at
-            or delivery_message.timestamp
-            or datetime.now().isoformat()
-        )
-        self.thread_store.append_internal_messages(
-            session_id,
-            self._build_internal_turn_records(
-                self._task_origin_final_state(pending),
-                assistant_timestamp=assistant_timestamp,
-                message_id=str(delivery_message.message_id or reply_id),
-                source="task",
-            ),
-        )
-
-    def _task_origin_final_state(self, event: BusEnvelope[ReplyReadyPayload]) -> dict[str, Any]:
-        reply_metadata = dict(event.payload.reply.metadata or {})
-        task_event_type = str(reply_metadata.get("task_event_type", "") or "").strip()
-        task_id = str(event.payload.related_task_id or event.task_id or "").strip()
-        reply_text = self._reply_text(event.payload)
-        execution_summary = {
-            str(EventType.TASK_ASK): "任务副路需要用户补充信息。",
-            str(EventType.TASK_END): "任务副路已经结束，并回传结果。",
-        }.get(task_event_type, "任务副路产出了新的内部结果。")
-        return {
-            "turn_id": event.turn_id or "",
-            "output": reply_text,
-            "execution_summary": execution_summary,
-            "brain": {
-                "task_action": "none",
-                "final_decision": "ask_user" if event.payload.reply.kind == "ask_user" else "continue",
-                "execution_summary": execution_summary,
-                "reply_event_type": task_event_type or "task_origin",
-                "turn_id": event.turn_id or "",
-            },
-            "task": self._resolve_session_task_state(
-                session_id=str(event.session_id or "").strip(),
-                task_id=task_id,
-            ),
-        }
-
     @staticmethod
-    def _reply_text(payload: ReplyReadyPayload) -> str:
-        if payload.reply.plain_text:
-            return str(payload.reply.plain_text).strip()
-        parts = [block.text for block in payload.reply.content_blocks if block.type == "text" and block.text]
-        return "\n".join(str(part).strip() for part in parts if str(part).strip()).strip()
-
-    @staticmethod
-    def _is_task_origin_reply(event: BusEnvelope[ReplyReadyPayload]) -> bool:
-        metadata = dict(event.payload.reply.metadata or {})
-        return str(metadata.get("front_origin", "") or "").strip() == "task"
-
-    @staticmethod
-    def _reply_stream_state(metadata: dict[str, Any] | None) -> str:
-        stream_state = str((metadata or {}).get("stream_state", "") or "").strip()
-        if stream_state == "final":
-            return "close"
-        return stream_state
-
-    @staticmethod
-    def _internal_summary_text(record: dict[str, Any]) -> str:
+    def _right_summary_text(record: dict[str, Any]) -> str:
         content = record.get("content", "")
-        if isinstance(content, list):
-            text_parts = [
-                str(block.get("text", "") or "").strip()
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            ]
-            summary = " ".join(part for part in text_parts if part).strip()
-            if summary:
-                return summary
-        elif isinstance(content, dict):
-            summary = str(content.get("summary", "") or "").strip()
-            if summary:
-                return summary
-        else:
-            summary = str(content or "").strip()
+        summary = str(content or "").strip()
+        if summary:
+            return summary
+
+        metadata = record.get("metadata", {})
+        if isinstance(metadata, dict):
+            summary = str(metadata.get("summary", "") or metadata.get("trace_summary", "") or "").strip()
             if summary:
                 return summary
 
-        meta = record.get("meta", {})
-        if isinstance(meta, dict):
-            summary = str(meta.get("summary", "") or meta.get("trace_summary", "") or "").strip()
-            if summary:
-                return summary
+            task = metadata.get("task", {})
+            if isinstance(task, dict):
+                summary = str(task.get("summary", "") or "").strip()
+                if summary:
+                    return summary
 
-        task = record.get("task", {})
-        if isinstance(task, dict):
-            summary = str(task.get("summary", "") or "").strip()
-            if summary:
-                return summary
-
-        brain = record.get("brain", {})
-        if isinstance(brain, dict):
-            return str(brain.get("execution_summary", "") or "").strip()
+            brain = metadata.get("brain", {})
+            if isinstance(brain, dict):
+                return str(brain.get("execution_summary", "") or "").strip()
 
         return ""
 
     def _snapshot_turn_input(self, session_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         thread = self.thread_store.get_or_create(session_id)
         dialogue_history = thread.get_history(max_messages=self.memory_window, include_task_context=False)
-        internal_history = self.thread_store.get_internal_messages(session_id, max_messages=self.memory_window)
-        return dialogue_history, internal_history
+        right_history = self.thread_store.get_right_messages(session_id, max_messages=self.memory_window)
+        return dialogue_history, right_history
 
     def _build_history_context(
         self,
@@ -765,29 +653,96 @@ class RuntimeHost:
             if role and text:
                 lines.append(f"{role}: {text}")
         for record in internal_history[-3:]:
-            summary = self._internal_summary_text(record)
+            summary = self._right_summary_text(record)
             if summary:
-                lines.append(f"internal: {summary}")
+                lines.append(f"right: {summary}")
         return "\n".join(lines[-8:])
 
     def _persist_user_message(
         self,
         *,
         session_key: str,
-        content: str,
-        media: list[str] | None,
+        user_id: str,
+        turn_id: str,
+        content: list[dict[str, Any]],
         message_id: str,
-        timestamp: str,
+        created_at: str,
     ) -> None:
         thread = self.thread_store.get_or_create(session_key)
-        user_content = self._build_user_message_content(content, media)
-        thread.add_message("user", user_content, message_id=message_id, timestamp=timestamp)
+        thread.add_message(
+            "user",
+            content,
+            session_id=session_key,
+            user_id=user_id,
+            turn_id=turn_id,
+            message_id=message_id,
+            created_at=created_at,
+            event_type="user_message",
+        )
         self.thread_store.save(thread)
+
+    def _persist_short_term_turn(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        message_id: str,
+        user_content: list[dict[str, Any]],
+        user_created_at: str,
+        assistant_content: list[dict[str, Any]],
+        assistant_created_at: str,
+        right_messages: list[dict[str, Any]],
+        final_state: dict[str, Any],
+        channel: str,
+        chat_id: str,
+    ) -> None:
+        summary = str(final_state.get("output", "") or "").strip()
+        task = final_state.get("task") if isinstance(final_state.get("task"), dict) else {}
+        detail = str(task.get("summary", "") or summary).strip() or summary
+        raw_messages = [
+            {
+                "role": "user",
+                "content": user_content,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "message_id": message_id,
+                "created_at": user_created_at,
+            },
+            {
+                "role": "assistant",
+                "content": assistant_content,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "message_id": message_id,
+                "created_at": assistant_created_at,
+            },
+            *right_messages,
+        ]
+        self.short_term_store.append_entries(
+            session_id,
+            [
+                {
+                    "turn_id": turn_id,
+                    "memory_type": "turn_summary",
+                    "summary": summary,
+                    "detail": detail,
+                    "raw_messages": raw_messages,
+                    "source_event_ids": [turn_id] if turn_id else [],
+                    "ttl_seconds": 24 * 3600,
+                    "metadata": {
+                        "channel": channel,
+                        "chat_id": chat_id,
+                        "task": task,
+                    },
+                }
+            ],
+        )
 
     def _reset_session_thread(self, session_id: str) -> None:
         thread = self.thread_store.get_or_create(session_id)
         thread.clear()
-        self.thread_store.clear_internal_messages(thread.thread_id)
+        self.thread_store.clear_right_messages(thread.thread_id)
+        self.short_term_store.clear(thread.thread_id)
         self.thread_store.save(thread)
         self.thread_store.invalidate(thread.thread_id)
 

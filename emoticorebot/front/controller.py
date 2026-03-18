@@ -6,8 +6,7 @@ from typing import Any
 
 from emoticorebot.brain.executive import ExecutiveBrain
 from emoticorebot.bus.pubsub import PriorityPubSubBus
-from emoticorebot.runtime.task_store import TaskStore
-from emoticorebot.safety.guard import SafetyGuard
+from emoticorebot.right.store import RightBrainStore
 
 
 class FrontRuntime:
@@ -17,20 +16,17 @@ class FrontRuntime:
         self,
         *,
         bus: PriorityPubSubBus,
-        task_store: TaskStore,
+        task_store: RightBrainStore,
         brain_llm: Any | None = None,
         context_builder: Any | None = None,
         session_runtime: Any | None = None,
-        reply_guard: Any | None = None,
     ) -> None:
-        self._reply_guard = reply_guard or SafetyGuard()
         self._brain = ExecutiveBrain(
             bus=bus,
             task_store=task_store,
             brain_llm=brain_llm,
             context_builder=context_builder,
             session_runtime=session_runtime,
-            reply_guard=self._reply_guard,
         )
 
     def register(self) -> None:

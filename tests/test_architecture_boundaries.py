@@ -20,10 +20,18 @@ def test_legacy_runtime_modules_are_removed() -> None:
     assert not (PACKAGE_ROOT / "session" / "manager.py").exists()
     assert (PACKAGE_ROOT / "session" / "runtime.py").exists()
     assert (PACKAGE_ROOT / "front" / "controller.py").exists()
-    assert (PACKAGE_ROOT / "task" / "runtime.py").exists()
-    assert (PACKAGE_ROOT / "task" / "coordinator.py").exists()
+    assert not (PACKAGE_ROOT / "task" / "runtime.py").exists()
+    assert not (PACKAGE_ROOT / "task" / "coordinator.py").exists()
+    assert (PACKAGE_ROOT / "right" / "runtime.py").exists()
+    assert not (PACKAGE_ROOT / "right" / "coordinator.py").exists()
+    assert not (PACKAGE_ROOT / "right" / "team.py").exists()
+    assert not (PACKAGE_ROOT / "right" / "assignment.py").exists()
+    assert not (PACKAGE_ROOT / "right" / "recovery.py").exists()
     assert (PACKAGE_ROOT / "reflection" / "runtime.py").exists()
     assert (PACKAGE_ROOT / "io" / "normalizer.py").exists()
+    assert (PACKAGE_ROOT / "output" / "__init__.py").exists()
+    assert (PACKAGE_ROOT / "output" / "builder.py").exists()
+    assert (PACKAGE_ROOT / "output" / "runtime.py").exists()
     assert (PACKAGE_ROOT / "delivery" / "runtime.py").exists()
     assert not (PACKAGE_ROOT / "runtime" / "service.py").exists()
     assert not (PACKAGE_ROOT / "runtime" / "scheduler.py").exists()
@@ -32,6 +40,7 @@ def test_legacy_runtime_modules_are_removed() -> None:
     assert not (PACKAGE_ROOT / "runtime" / "runtime.py").exists()
     assert not (PACKAGE_ROOT / "brain" / "companion_brain.py").exists()
     assert not (PACKAGE_ROOT / "brain" / "event_narrator.py").exists()
+    assert not (PACKAGE_ROOT / "brain" / "reply_builder.py").exists()
     assert not (PACKAGE_ROOT / "runtime" / "session_runtime.py").exists()
     assert not (PACKAGE_ROOT / "runtime" / "event_loop.py").exists()
     assert not (PACKAGE_ROOT / "runtime" / "manager.py").exists()
@@ -64,7 +73,8 @@ def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     kernel = _read("emoticorebot/runtime/kernel.py")
     executive = _read("emoticorebot/brain/executive.py")
     front = _read("emoticorebot/front/controller.py")
-    task = _read("emoticorebot/task/runtime.py")
+    output = _read("emoticorebot/output/runtime.py")
+    task = _read("emoticorebot/right/runtime.py")
 
     assert "_turn_locks" not in bootstrap
     assert "_state_locks" not in bootstrap
@@ -76,9 +86,11 @@ def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     assert "self._active_turn_by_session" in kernel
     assert "EventType.OUTPUT_INLINE_READY" in kernel
     assert "InputNormalizer()" in kernel
-    assert "TaskRuntime(" in kernel
+    assert "RightBrainRuntime(" in kernel
     assert "FrontRuntime(" in kernel
     assert "ReflectionRuntime(" in kernel
+    assert "OutputRuntime(" in kernel
+    assert "self._output_runtime = OutputRuntime(" in kernel
     assert "DeliveryRuntime(" in kernel
     assert "self._guard =" not in kernel
     assert "reply_guard=self._guard" not in kernel
@@ -87,11 +99,27 @@ def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     assert "self._brain =" not in kernel
     assert "self._memory =" not in kernel
     assert "self._delivery =" not in kernel
-    assert "self._reply_guard = reply_guard or SafetyGuard()" in front
-    assert "self._reply_guard = reply_guard or SafetyGuard()" in executive
-    assert "guard_reply_event" in executive
-    assert "RuntimeService" not in task
+    assert "reply_guard" not in front
+    assert "SafetyGuard" not in front
+    assert "SafetyGuard" not in executive
+    assert "guard_reply_event" not in executive
+    assert "OUTPUT_INLINE_READY" not in executive
+    assert "OUTPUT_PUSH_READY" not in executive
+    assert "OUTPUT_STREAM_" not in executive
     assert "EventType.LEFT_COMMAND_REPLY_REQUESTED" in executive
+    assert "EventType.LEFT_EVENT_REPLY_READY" in executive
+    assert "EventType.LEFT_EVENT_STREAM_DELTA_READY" in executive
+    assert "EventType.LEFT_EVENT_FOLLOWUP_READY" in executive
+    assert "guard_reply_event" in output
+    assert "self._reply_guard = reply_guard or SafetyGuard()" in output
+    assert "RuntimeService" not in task
+    assert "RIGHT_COMMAND_JOB_REQUESTED" in task
+    assert "RIGHT_EVENT_JOB_ACCEPTED" in task
+    assert "RIGHT_EVENT_PROGRESS" in task
+    assert "RIGHT_EVENT_RESULT_READY" in task
+    assert "DeepAgentExecutor" in task
+    assert "self._active_runs" in task
+    assert "audit_tool" in _read("emoticorebot/right/deep_agent_backend.py")
     assert "EventType.INPUT_INTERRUPT" not in executive
     assert "OUTPUT_REPLY_BLOCKED" not in _read("emoticorebot/protocol/topics.py")
     assert "SAFETY_BLOCKED" not in _read("emoticorebot/protocol/topics.py")
@@ -100,7 +128,7 @@ def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
 
 def test_runtime_wrappers_no_longer_describe_themselves_as_compatibility_layers() -> None:
     front = _read("emoticorebot/front/controller.py")
-    task = _read("emoticorebot/task/runtime.py")
+    task = _read("emoticorebot/right/runtime.py")
     delivery = _read("emoticorebot/delivery/runtime.py")
     reflection = _read("emoticorebot/reflection/runtime.py")
     session = _read("emoticorebot/session/runtime.py")
@@ -158,6 +186,8 @@ def test_memory_phase6_is_split_into_governor_persona_and_reflection_modules() -
     assert (PACKAGE_ROOT / "memory" / "reflection.py").exists()
     assert (PACKAGE_ROOT / "memory" / "retrieval.py").exists()
     assert (PACKAGE_ROOT / "memory" / "crystallizer.py").exists()
+    assert not (PACKAGE_ROOT / "memory" / "facade.py").exists()
+    assert not (PACKAGE_ROOT / "memory" / "service.py").exists()
     assert "reflect_turn(" not in governor
     assert "DeepReflectionService" in governor
     assert "CognitiveEvent" not in governor
@@ -187,11 +217,13 @@ def test_source_tree_has_no_legacy_brain_or_task_system_imports() -> None:
         assert "from emoticorebot.runtime.event_loop import" not in source, str(path)
 
 
-def test_worker_team_no_longer_imports_legacy_executor_wrapper() -> None:
-    team = _read("emoticorebot/execution/team.py")
+def test_right_runtime_uses_deep_agent_directly_without_legacy_team_wrapper() -> None:
+    task = _read("emoticorebot/right/runtime.py")
     kernel = _read("emoticorebot/runtime/kernel.py")
 
     assert not (PACKAGE_ROOT / "execution" / "central_executor.py").exists()
-    assert "from emoticorebot.execution.central_executor import CentralExecutor" not in team
-    assert "DeepAgentExecutor" in team
+    assert not (PACKAGE_ROOT / "right" / "team.py").exists()
+    assert "DeepAgentExecutor" in task
+    assert "coordinator" not in task
+    assert "team" not in task
     assert "central_executor" not in kernel

@@ -10,11 +10,12 @@ from .contracts import (
     ChannelKind,
     DeliveryMode,
     InputKind,
-    InputMode,
     ReplyDeliveryMode,
+    RightBrainDecision,
     RightBrainJobAction,
     RightBrainStrategy,
     SessionMode,
+    StreamState,
     TaskCommandType,
     TaskEventType,
 )
@@ -38,6 +39,13 @@ from .task_models import (
 PerceptionType = Literal["wake_word", "vision", "proximity", "localization"]
 SignalType = Literal["timeout", "backpressure", "health_warning", "warning"]
 TaskEvent = dict[str, Any]
+
+FollowupSourceEvent = Literal[
+    "right.event.job_accepted",
+    "right.event.progress",
+    "right.event.result_ready",
+    "right.event.job_rejected",
+]
 
 
 class InputSlots(ProtocolModel):
@@ -99,28 +107,58 @@ class StreamInterruptedPayload(ProtocolModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class IntentScoredPayload(ProtocolModel):
-    input_mode: InputMode = "turn"
-    session_mode: SessionMode = "turn_chat"
-    source_text: str
-    scores: dict[str, float] = Field(default_factory=dict)
-    intent_tags: list[str] = Field(default_factory=list)
-    emotion_tags: list[str] = Field(default_factory=list)
-    route_hint: str | None = None
-    input_slots: InputSlots = Field(default_factory=InputSlots)
-    right_brain_strategy: RightBrainStrategy = "skip"
-    invoke_right_brain: bool = False
-    reason: str | None = None
+class DeliveryTargetPayload(ProtocolModel):
+    delivery_mode: DeliveryMode
+    channel: str | None = None
+    chat_id: str | None = None
+
+
+class MemoryCandidatePayload(ProtocolModel):
+    kind: str
+    summary: str
 
 
 class LeftReplyReadyPayload(ProtocolModel):
     request_id: str | None = None
     reply_text: str
     reply_kind: Literal["answer", "ask_user", "status"] = "answer"
+    delivery_target: DeliveryTargetPayload | None = None
+    origin_message: MessageRef | None = None
     right_brain_strategy: RightBrainStrategy = "skip"
     invoke_right_brain: bool = False
     right_brain_request: dict[str, Any] = Field(default_factory=dict)
     related_task_id: str | None = None
+    stream_id: str | None = None
+    stream_state: StreamState | None = None
+    stream_index: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_stream_fields(self) -> "LeftReplyReadyPayload":
+        if self.stream_state is not None and not self.stream_id:
+            raise ValueError("left replies with stream_state require stream_id")
+        return self
+
+
+class LeftStreamDeltaPayload(ProtocolModel):
+    stream_id: str
+    delta_text: str
+    stream_state: StreamState = "delta"
+    stream_index: int | None = None
+    origin_message: MessageRef | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LeftFollowupReadyPayload(ProtocolModel):
+    job_id: str
+    source_event: FollowupSourceEvent
+    source_decision: RightBrainDecision
+    reply_text: str
+    reply_kind: Literal["answer", "ask_user", "status"] = "status"
+    delivery_target: DeliveryTargetPayload
+    origin_message: MessageRef | None = None
+    related_task_id: str | None = None
+    memory_candidate: MemoryCandidatePayload | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -133,12 +171,13 @@ class RightBrainAcceptedPayload(ProtocolModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class RightBrainClarifyPayload(ProtocolModel):
+class RightBrainProgressPayload(ProtocolModel):
     job_id: str
-    decision: Literal["clarify"] = "clarify"
-    question: str
-    missing_fields: list[str] = Field(default_factory=list)
-    reason: str | None = None
+    decision: Literal["accept"] = "accept"
+    stage: str | None = None
+    summary: str
+    progress: float | None = None
+    next_step: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -151,10 +190,12 @@ class RightBrainRejectedPayload(ProtocolModel):
 
 class RightBrainResultPayload(ProtocolModel):
     job_id: str
-    job_action: RightBrainJobAction
-    task_id: str | None = None
+    decision: Literal["accept", "answer_only"] = "accept"
     summary: str | None = None
     result_text: str | None = None
+    artifacts: list[ContentBlock] = Field(default_factory=list)
+    delivery_target: DeliveryTargetPayload | None = None
+    memory_candidate: MemoryCandidatePayload | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -294,7 +335,18 @@ class ReplyReadyPayload(ProtocolModel):
     channel_override: str | None = None
     chat_id_override: str | None = None
     delivery_mode: DeliveryMode = "inline"
+    stream_id: str | None = None
+    stream_state: StreamState | None = None
+    stream_index: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_stream_fields(self) -> "ReplyReadyPayload":
+        if self.delivery_mode == "stream" and self.stream_state is None:
+            raise ValueError("stream replies require stream_state")
+        if self.stream_state is not None and not self.stream_id:
+            raise ValueError("stream replies with stream_state require stream_id")
+        return self
 
 
 class ReplyBlockedPayload(ProtocolModel):
@@ -342,13 +394,17 @@ class SystemSignalPayload(ProtocolModel):
 
 __all__ = [
     "DeliveryFailedPayload",
+    "DeliveryTargetPayload",
+    "FollowupSourceEvent",
     "InputSlots",
-    "IntentScoredPayload",
+    "LeftFollowupReadyPayload",
     "LeftReplyReadyPayload",
+    "LeftStreamDeltaPayload",
+    "MemoryCandidatePayload",
     "PerceptionEventPayload",
     "PerceptionType",
     "RightBrainAcceptedPayload",
-    "RightBrainClarifyPayload",
+    "RightBrainProgressPayload",
     "RightBrainJobAction",
     "RightBrainRejectedPayload",
     "RightBrainResultPayload",

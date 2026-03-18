@@ -149,9 +149,9 @@ def _is_one_shot_task_settled(agent_loop: object, task_id: str | None) -> bool:
     task = kernel.get_task(task_id)
     if task is None:
         return False
-    from emoticorebot.runtime.state_machine import TERMINAL_STATES, TaskState
+    from emoticorebot.right.state_machine import TERMINAL_STATES, RightBrainState
 
-    return task.state in TERMINAL_STATES or task.state is TaskState.WAITING
+    return task.state in TERMINAL_STATES or task.state is RightBrainState.DONE
 
 
 async def _await_one_shot_task_id(

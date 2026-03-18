@@ -93,7 +93,6 @@
 |------|------|
 | `accept` | 接受并执行 |
 | `answer_only` | 不执行，只给左脑答案素材 |
-| `clarify` | 需要补充信息 |
 | `reject` | 不应处理或不能处理 |
 
 ### 3.6 输出流状态
@@ -256,11 +255,12 @@
 
 ### 6.3 输出
 
-#### 输出事件
+#### 输出方式
 
-- `intent.scored`
+- 不单独对外发布事件
+- 仅作为左脑内部辅助结果直接消费
 
-#### 输出载荷
+#### 输出结构
 
 ```json
 {
@@ -303,7 +303,7 @@
 
 入口调度规则：
 
-- `intent.scored` 若存在，先交由左脑作为参考
+- 评分结果若存在，先交由左脑作为参考
 - `left.event.reply_ready` 才是 `Session Supervisor` 的正式调度依据
 - `invoke_right_brain=true` 时，发出 `right.command.job_requested`
 - 若左脑后续需要补充升级右脑策略，仍通过 `Session Supervisor` 二次发出右脑命令
@@ -358,8 +358,9 @@
 - `input.turn.received`
 - `input.stream.chunk`
 - `input.stream.committed`
+- `right.job.accepted`
+- `right.progress`
 - `right.result.ready`
-- `right.job.clarify`
 - `right.job.rejected`
 - `session.interrupt`
 
@@ -586,6 +587,27 @@ r任务相关
 - 执行受理
 - 工具和长耗时逻辑
 
+`RightBrainRuntime` 常驻存在，但不自己做外层裁决流。
+
+它负责：
+
+- 接收左脑提交的 `job`
+- 立即启动一次 `DeepAgent` run
+- 持有并控制 run 生命周期
+- 把关键进展持续回流给左脑
+
+`audit_tool` 只是 `DeepAgent` 内部的审核钩子，用来决定：
+
+- `accept`
+- `answer_only`
+- `reject`
+
+其中：
+
+- `accept` 的语义就是“任务可以开始”
+- `reject / answer_only` 由 `audit_tool` 直接发出终止信号
+- `RightBrainRuntime` 收到终止信号后，先回左脑，再关停当前 run
+
 ### 8.2 输入
 
 #### 输入事件
@@ -618,11 +640,32 @@ r任务相关
     "chat_id": "123456"
   },
   "context": {
-    "history_summary": "用户本周在整理课程资料",
-    "memory_refs": ["mem_1", "mem_2"]
+    "recent_turns": [
+      {
+        "role": "user",
+        "content": "你能帮我整理一下这份笔记吗？"
+      },
+      {
+        "role": "assistant",
+        "content": "可以，我先处理，过程中会继续告诉你进展。"
+      }
+    ],
+    "short_term_memory": ["用户本周在整理课程资料"],
+    "long_term_memory": ["用户偏好简洁提纲"],
+    "tool_context": {
+      "available_tools": ["read_note", "write_outline"],
+      "tool_constraints": ["不要直接面向用户输出"]
+    }
   }
 }
 ```
+
+补充约束：
+
+- `recent_turns` 建议最多只带最近 `10` 轮
+- 不要把整段历史原样灌给 `DeepAgent`
+- 工具信息只传当前 run 真正相关的工具摘要与约束
+- 短期记忆和长期记忆只传摘要或引用，不要求传全量原始内容
 
 ### 8.3 右脑处理阶段
 
@@ -630,10 +673,8 @@ r任务相关
 
 | 阶段 | 含义 |
 |------|------|
-| `review` | 受理审查 |
-| `plan` | 执行规划 |
+| `audit` | 审核钩子执行 |
 | `execute` | 执行 |
-| `clarify` | 等待补充 |
 | `done` | 完成 |
 | `rejected` | 拒绝 |
 
@@ -642,7 +683,6 @@ r任务相关
 #### 事件
 
 - `right.job.accepted`
-- `right.job.clarify`
 - `right.job.rejected`
 
 #### `accepted` 载荷
@@ -652,23 +692,10 @@ r任务相关
   "job_id": "job_1",
   "session_id": "sess_1",
   "decision": "accept",
-  "reason": "这是一个明确且可执行的整理请求。",
-  "stage": "plan",
+  "reason": "audit_tool 返回任务可以开始。",
+  "stage": "execute",
   "estimated_cost": "low",
   "estimated_duration_s": 12
-}
-```
-
-#### `clarify` 载荷
-
-```json
-{
-  "job_id": "job_1",
-  "session_id": "sess_1",
-  "decision": "clarify",
-  "question": "你想让我整理成提纲、摘要，还是按章节重写？",
-  "missing_fields": ["output_format"],
-  "reason": "输出格式不明确。"
 }
 ```
 
@@ -684,7 +711,27 @@ r任务相关
 }
 ```
 
-### 8.5 右脑第二层输出：最终结果
+### 8.5 右脑第二层输出：过程进展
+
+#### 事件
+
+- `right.progress`
+
+#### `progress` 载荷
+
+```json
+{
+  "job_id": "job_1",
+  "session_id": "sess_1",
+  "decision": "accept",
+  "stage": "execute",
+  "summary": "已完成资料扫描，开始整理提纲。",
+  "progress": 0.35,
+  "next_step": "归类知识点"
+}
+```
+
+### 8.6 右脑第三层输出：最终结果
 
 #### 事件
 
@@ -721,22 +768,23 @@ r任务相关
 }
 ```
 
-### 8.6 右脑核心字段
+### 8.7 右脑核心字段
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `job_id` | `string` | 后台作业 ID |
 | `job_kind` | `string` | 作业类型 |
-| `decision` | `string` | `accept/answer_only/clarify/reject` |
+| `decision` | `string` | `accept/answer_only/reject` |
 | `stage` | `string` | 当前处理阶段 |
 | `summary` | `string` | 对内部与左脑可读的摘要 |
+| `progress` | `float` | 进度百分比（0-1） |
+| `next_step` | `string` | 下一步计划 |
 | `result_text` | `string` | 最终结果文字 |
 | `artifacts` | `array` | 产物列表 |
-| `missing_fields` | `array` | 缺失字段 |
 | `delivery_target` | `object` | 建议投递目标 |
 | `memory_candidate` | `object` | 候选记忆 |
 
-### 8.7 右脑状态字段
+### 8.8 右脑状态字段
 
 | 字段 | 说明 |
 |------|------|
@@ -746,7 +794,7 @@ r任务相关
 | `last_job_completed_at` | 最近一次完成时间 |
 | `per_session_job_counts` | 每个 session 的后台作业数 |
 
-### 8.8 右脑边界
+### 8.9 右脑边界
 
 右脑可以：
 
@@ -759,8 +807,11 @@ r任务相关
 
 - 自己直接对用户说话
 - 绕过左脑发送最终回复
+- 维护“等待用户补充信息”的中间态
+- 把 `audit_tool` 变成外层流程系统
+- 在收到 `reject / answer_only` 终止信号后直接静默结束，不通知左脑
 
-### 8.9 `turn` 模式下右脑的正式行为
+### 8.10 `turn` 模式下右脑的正式行为
 
 #### 当 `right_brain_strategy = skip`
 
@@ -769,15 +820,26 @@ r任务相关
 
 #### 当 `right_brain_strategy = sync`
 
-- 右脑启动一个轻量作业
+- 右脑启动一次 `DeepAgent` run
 - 左脑在当前轮等待该结果
+- 右脑的 `accepted / progress / rejected / result.ready` 都必须先回到左脑
 - 当前轮结果仍以 `inline` 或 `turn + stream` 返回
 
 #### 当 `right_brain_strategy = async`
 
-- 右脑启动后台作业
+- 右脑启动同一种后台 `DeepAgent` run
 - 左脑当前轮先结束
-- 右脑完成后再生成 `push` 结果
+- 右脑继续把受理、进展、结果回流给左脑
+- 用户可基于这些状态随时停止当前 run
+
+### 8.11 DeepAgent 上下文与反思触发
+
+- `RightBrainRuntime` 构建 `DeepAgent` 时，只传最近 `10` 轮上下文、相关工具信息、短期记忆摘要、长期记忆摘要
+- 每次关键工具往返或阶段推进，都应回流左脑，让用户实时感知
+- `accept` 只是“任务可以开始”；runtime 不需要为它进入终止逻辑
+- `reject / answer_only` 是 `audit_tool` 直接发出的终止信号；runtime 必须先通知左脑，再关停 run
+- 任务完成或取消时，右脑只负责记录上下文摘要并触发反思
+- 反思模块异步自行拉取更多上下文，不要求右脑同步打包全部反思材料
 
 ---
 
@@ -871,7 +933,25 @@ r任务相关
 
 `Memory` 保存对陪伴主体有价值的长期和工作态信息。
 
-### 10.2 读取接口
+### 10.2 正式目录结构
+
+```text
+memory/
+  short_term/
+    <session_id>.jsonl
+  long_term/
+    memory.jsonl
+  vector/
+```
+
+字段语义：
+
+- `memory/short_term/`：会话级短期记忆，保存最近几轮摘要、工作态上下文、当前活跃任务上下文
+- `memory/long_term/`：长期记忆正式事实源
+- `memory/vector/`：向量索引区，不是事实源，可由长期记忆重建
+- `USER.md` / `SOUL.md`：只应视为投影视图，不应视为正式记忆事实源
+
+### 10.3 读取接口
 
 建议定义统一查询接口，不让左脑和右脑直接碰底层存储细节。
 
@@ -882,6 +962,7 @@ r任务相关
   "session_id": "sess_1",
   "user_id": "user_1",
   "query_text": "用户当前为什么会情绪低落",
+  "memory_layers": ["short_term", "long_term"],
   "memory_types": ["relationship", "fact"],
   "limit": 5
 }
@@ -894,7 +975,8 @@ r任务相关
   "items": [
     {
       "memory_id": "mem_1",
-      "type": "relationship",
+      "memory_layer": "long_term",
+      "memory_type": "relationship",
       "summary": "用户最近两周工作压力偏高。",
       "confidence": 0.86
     }
@@ -902,7 +984,7 @@ r任务相关
 }
 ```
 
-### 10.3 写入接口
+### 10.4 写入接口
 
 #### 写入请求
 
@@ -911,36 +993,119 @@ r任务相关
   "memory_id": "mem_new_1",
   "session_id": "sess_1",
   "user_id": "user_1",
-  "type": "relationship",
+  "memory_layer": "long_term",
+  "memory_type": "relationship",
   "summary": "用户疲惫时更偏好被先安抚。",
-  "source": "reflection",
+  "detail": "用户在高疲劳状态下，更希望先被安抚和承接，再讨论行动方案。",
+  "source_module": "reflection",
   "confidence": 0.81,
   "tags": ["comfort_preference", "stress"]
 }
 ```
 
-### 10.4 记忆条目字段
+### 10.5 短期记忆条目字段
+
+短期记忆用于保存当前会话工作态，不等于长期事实沉淀。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `memory_id` | `string` | 记忆 ID |
-| `type` | `string` | 记忆类型 |
-| `summary` | `string` | 摘要 |
-| `detail` | `string` | 详细内容 |
-| `source` | `string` | 来源模块 |
-| `confidence` | `float` | 可信度 |
-| `tags` | `array` | 标签 |
+| `memory_id` | `string` | 短期记忆 ID |
+| `session_id` | `string` | 所属会话 |
+| `user_id` | `string` | 用户标识 |
+| `turn_id` | `string` | 关联轮次 |
+| `memory_type` | `string` | `turn_summary / working_context / active_job_context` |
+| `summary` | `string` | 一句话摘要 |
+| `detail` | `string` | 更完整上下文 |
+| `raw_messages` | `array` | 原始证据消息列表 |
+| `source_event_ids` | `array` | 来源事件 ID |
+| `ttl_seconds` | `int` | 建议存活时间 |
+| `expires_at` | `string` | 过期时间 |
 | `created_at` | `string` | 创建时间 |
 | `updated_at` | `string` | 更新时间 |
+| `metadata` | `object` | 额外元数据 |
 
-### 10.5 记忆状态字段
+#### `raw_messages` 子项字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `role` | `string` | 原始角色，必须按源消息原样保留，如 `user / assistant / tool / system` |
+| `content` | `string` | 原始纯文本主内容；纯文本场景必须原样保存 |
+| `content_blocks` | `array` | 原始多模态内容块；多模态场景必须保留 |
+| `message_id` | `string` | 原始消息 ID |
+| `turn_id` | `string` | 原始轮次 ID |
+| `job_id` | `string` | 若来自右脑链路则可填写 |
+| `created_at` | `string` | 原始记录时间 |
+
+### 10.6 长期记忆条目字段
+
+长期记忆保存稳定结论，不应退化为第二份会话流水。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `memory_id` | `string` | 长期记忆 ID |
+| `user_id` | `string` | 用户标识 |
+| `session_id` | `string` | 来源会话，可为空 |
+| `memory_type` | `string` | `relationship / fact / working / execution / reflection` |
+| `summary` | `string` | 一句话稳定结论 |
+| `detail` | `string` | 更完整提炼内容 |
+| `evidence_messages` | `array` | 原始证据片段 |
+| `source_module` | `string` | 产生该记忆的模块 |
+| `source_event_ids` | `array` | 来源事件 ID |
+| `confidence` | `float` | 可信度 |
+| `stability` | `float` | 稳定度 |
+| `tags` | `array` | 标签 |
+| `status` | `string` | `active / superseded / invalid` |
+| `created_at` | `string` | 创建时间 |
+| `updated_at` | `string` | 更新时间 |
+| `metadata` | `object` | 额外元数据 |
+
+#### `evidence_messages` 子项字段
+
+长期记忆中的原始证据至少必须保留原始 `role`，并按场景保留原始 `content` / `content_blocks`。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `role` | `string` | 原始角色 |
+| `content` | `string` | 原始纯文本主内容；有文本时应原样保存 |
+| `content_blocks` | `array` | 原始多模态内容块；多模态场景必须保留 |
+| `session_id` | `string` | 来源会话 ID |
+| `turn_id` | `string` | 来源轮次 ID |
+| `message_id` | `string` | 来源消息 ID |
+| `job_id` | `string` | 若来自右脑链路则可填写 |
+| `created_at` | `string` | 原始记录时间 |
+
+### 10.7 向量索引字段
+
+`memory/vector/` 只保存索引，不保存正式事实。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `vector_id` | `string` | 向量文档 ID |
+| `memory_id` | `string` | 对应记忆 ID |
+| `memory_layer` | `string` | `short_term / long_term` |
+| `text` | `string` | 用于嵌入的文本 |
+| `content_hash` | `string` | 内容哈希 |
+| `metadata` | `object` | 检索辅助元数据 |
+| `indexed_at` | `string` | 建索引时间 |
+
+补充约束：
+
+- `memory/vector/` 不是正式事实源
+- 向量索引应优先从 `memory/long_term/` 重建
+- 若确有需要，可为 `short_term` 建临时索引，但其生命周期不得反向定义正式记忆
+
+### 10.8 记忆状态字段
 
 | 字段 | 说明 |
 |------|------|
 | `relationship_memory_count` | 关系记忆数量 |
 | `fact_memory_count` | 事实记忆数量 |
-| `working_memory_count` | 工作态条目数量 |
-| `last_compaction_at` | 最近整理时间 |
+| `working_memory_count` | 工作态记忆数量 |
+| `execution_memory_count` | 执行记忆数量 |
+| `reflection_memory_count` | 反思记忆数量 |
+| `short_term_entry_count` | 短期记忆条目数量 |
+| `vector_doc_count` | 向量文档数量 |
+| `last_vector_rebuild_at` | 最近一次向量重建时间 |
 
 ---
 
@@ -952,7 +1117,57 @@ r任务相关
 
 它不负责“想什么”，只负责“谁先做、什么时候做、怎么投递”。
 
-### 11.2 核心状态字段
+### 11.2 原始记录目录
+
+```text
+session/
+  <session_id>/
+    front.jsonl
+    right.jsonl
+```
+
+字段语义：
+
+- `front.jsonl`：保存 `用户 <-> 左脑` 原始记录
+- `right.jsonl`：保存 `左脑 <-> 右脑` 原始记录
+- `session/` 只保存原始流水，不负责做记忆提炼
+- 原始记录必须保留原始 `role`
+- 原始记录必须支持多模态：`content` 作为纯文本主内容，`content_blocks` 作为原始多模态载荷
+
+### 11.3 前台原始记录字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `record_id` | `string` | 原始记录 ID |
+| `session_id` | `string` | 会话 ID |
+| `user_id` | `string` | 用户 ID |
+| `turn_id` | `string` | 单轮 ID |
+| `message_id` | `string` | 消息 ID |
+| `role` | `string` | 原始角色，必须按源消息原样保留，如 `user / assistant / tool / system` |
+| `event_type` | `string` | `user_message / left_reply / stream_open / stream_delta / stream_close` |
+| `content` | `string` | 原始纯文本主内容 |
+| `content_blocks` | `array` | 原始多模态载荷 |
+| `reply_to_message_id` | `string` | 回复目标消息 |
+| `created_at` | `string` | 创建时间 |
+| `metadata` | `object` | 额外元数据 |
+
+### 11.4 后台原始记录字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `record_id` | `string` | 原始记录 ID |
+| `session_id` | `string` | 会话 ID |
+| `user_id` | `string` | 用户 ID |
+| `turn_id` | `string` | 单轮 ID |
+| `job_id` | `string` | 右脑作业 ID |
+| `role` | `string` | 原始角色，必须按源消息原样保留，如 `assistant / tool / system` |
+| `event_type` | `string` | `job_requested / job_accepted / progress / job_rejected / result_ready / cancelled` |
+| `content` | `string` | 原始纯文本主内容 |
+| `content_blocks` | `array` | 原始多模态载荷 |
+| `created_at` | `string` | 创建时间 |
+| `metadata` | `object` | 额外元数据 |
+
+### 11.5 核心状态字段
 
 ```json
 {
@@ -982,7 +1197,7 @@ r任务相关
 | `pending_push_count` | 待推送数 |
 | `archived` | 是否已归档 |
 
-### 11.3 输入
+### 11.6 输入
 
 #### 会话监督器接收的事件
 
@@ -990,21 +1205,23 @@ r任务相关
 - `input.stream.started`
 - `input.stream.chunk`
 - `session.interrupt`
+- `right.job.accepted`
+- `right.progress`
+- `right.job.rejected`
 - `right.result.ready`
 - `output.stream.close`
 
-### 11.4 输出
+### 11.7 输出
 
 #### 会话监督器发出的事件
 
-- `intent.score.requested`
 - `left.reply.requested`
 - `right.job.requested`
 - `output.inline.ready`
 - `output.push.ready`
 - `output.stream.open/delta/close`
 
-### 11.5 监督器边界
+### 11.8 监督器边界
 
 监督器可以：
 
@@ -1124,11 +1341,10 @@ r任务相关
 }
 ```
 
-### 13.3 `intent.scored`（可选）
+### 13.3 `scoring.result`（左脑内建，不对外发事件）
 
 ```json
 {
-  "event_type": "intent.scored",
   "session_id": "sess_1",
   "turn_id": "turn_1",
   "scores": {},
@@ -1152,7 +1368,21 @@ r任务相关
 }
 ```
 
-### 13.5 `right.result.ready`
+### 13.5 `right.progress`
+
+```json
+{
+  "event_type": "right.progress",
+  "job_id": "job_1",
+  "session_id": "sess_1",
+  "stage": "execute",
+  "summary": "已完成资料扫描，开始整理提纲。",
+  "progress": 0.35,
+  "next_step": "归类知识点"
+}
+```
+
+### 13.6 `right.result.ready`
 
 ```json
 {
@@ -1165,7 +1395,7 @@ r任务相关
 }
 ```
 
-### 13.6 `output.push.ready`
+### 13.7 `output.push.ready`
 
 ```json
 {
@@ -1351,4 +1581,3 @@ r任务相关
 5. 小模型若使用，只做辅助评分与提示
 6. 反思不阻塞当前轮
 7. `turn / stream` 与 `inline / push / stream` 作为一级协议概念长期保留
-

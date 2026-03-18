@@ -97,7 +97,7 @@ async def _exercise_turn_reflection_persistence(workspace: Path) -> None:
 
     assert len(committed) == 1
     cognitive = (workspace / "memory" / "cognitive_events.jsonl").read_text(encoding="utf-8")
-    memories = (workspace / "memory" / "memory.jsonl").read_text(encoding="utf-8")
+    memories = (workspace / "memory" / "long_term" / "memory.jsonl").read_text(encoding="utf-8")
     assert "帮我分析一下这个问题" in cognitive
     assert "我先帮你拆一下结构" in cognitive
     assert "执行已完成" in memories
@@ -106,6 +106,87 @@ async def _exercise_turn_reflection_persistence(workspace: Path) -> None:
 def test_memory_governor_persists_turn_reflection_after_delivery() -> None:
     with TemporaryDirectory() as tmp_dir:
         asyncio.run(_exercise_turn_reflection_persistence(Path(tmp_dir)))
+
+
+async def _exercise_right_brain_reflection_without_delivery_gate(workspace: Path) -> None:
+    bus = PriorityPubSubBus()
+    governor = MemoryGovernor(bus=bus, workspace=workspace)
+    governor.register()
+
+    committed = _collect(bus, EventType.MEMORY_WRITE_COMMITTED)
+    warnings = _collect(bus, EventType.SYSTEM_WARNING)
+
+    await bus.publish(
+        build_envelope(
+            event_type=EventType.REFLECT_LIGHT,
+            source="right_runtime",
+            target="memory_governor",
+            session_id="sess_right_1",
+            turn_id="turn_right_1",
+            task_id="task_right_1",
+            correlation_id="task_right_1",
+            payload=ReflectSignalPayload(
+                trigger_id="reflect_right_1",
+                reason="right_brain_result",
+                source_event_id="evt_right_1",
+                task_id="task_right_1",
+                metadata={
+                    "right_brain_summary": {
+                        "session_id": "sess_right_1",
+                        "turn_id": "turn_right_1",
+                        "origin_message": {
+                            "channel": "cli",
+                            "chat_id": "direct",
+                            "message_id": "msg_right_1",
+                        },
+                        "request_text": "整理一下反思链路",
+                        "summary": "反思链路已整理完成",
+                        "result_text": "已经按模块梳理了反思入口和职责。",
+                        "result": "success",
+                        "decision": "accept",
+                        "task": {
+                            "task_id": "task_right_1",
+                            "state": "done",
+                            "result": "success",
+                            "summary": "反思链路已整理完成",
+                        },
+                        "task_trace": [
+                            {
+                                "kind": "tool",
+                                "message": "读取 governor.py",
+                                "data": {"tool_name": "read_file", "event": "task.tool", "phase": "tool"},
+                            }
+                        ],
+                        "tool_usage_summary": [
+                            {"tool_name": "read_file", "message": "读取 governor.py", "phase": "tool"}
+                        ],
+                        "recent_turns": [
+                            {"role": "user", "content": "看一下反思"},
+                            {"role": "assistant", "content": "我先核对右脑和 MemoryGovernor 的链路。"},
+                        ],
+                        "short_term_memory": ["用户要求严格按模块实现"],
+                        "long_term_memory": ["用户不需要兼容旧架构"],
+                        "memory_refs": ["反思模块按异步触发处理"],
+                        "tool_context": {"available_tools": ["read_file"], "tool_constraints": []},
+                    }
+                },
+            ),
+        )
+    )
+    await bus.drain()
+
+    assert len(committed) == 1
+    assert warnings == []
+    cognitive = (workspace / "memory" / "cognitive_events.jsonl").read_text(encoding="utf-8")
+    memories = (workspace / "memory" / "long_term" / "memory.jsonl").read_text(encoding="utf-8")
+    assert "整理一下反思链路" in cognitive
+    assert "已经按模块梳理了反思入口和职责" in cognitive
+    assert "read_file" in memories
+
+
+def test_memory_governor_persists_right_brain_reflection_without_delivery_gate() -> None:
+    with TemporaryDirectory() as tmp_dir:
+        asyncio.run(_exercise_right_brain_reflection_without_delivery_gate(Path(tmp_dir)))
 
 
 async def _exercise_periodic_deep_reflection(workspace: Path) -> None:
@@ -117,16 +198,15 @@ async def _exercise_periodic_deep_reflection(workspace: Path) -> None:
     governor._memory_store.append_many(
         [
             {
-                "audience": "task",
-                "kind": "procedural",
-                "type": "skill_hint",
+                "memory_type": "execution",
                 "summary": "复杂任务优先走最终结果式执行",
-                "content": "复杂任务应尽量在单次执行里先收敛，再把最终结果交回 brain。",
-                "importance": 7,
+                "detail": "复杂任务应尽量在单次执行里先收敛，再把最终结果交回 brain。",
                 "confidence": 0.8,
                 "stability": 0.85,
                 "tags": ["skill", "hint"],
-                "payload": {
+                "metadata": {
+                    "subtype": "skill_hint",
+                    "importance": 7,
                     "skill_id": "skill_final_result_execution_seed",
                     "skill_name": "final-result-execution",
                     "trigger": "需要多步执行或工具组合时",

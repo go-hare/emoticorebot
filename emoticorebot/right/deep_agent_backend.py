@@ -9,7 +9,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import Field
 
-from emoticorebot.execution.skills import BUILTIN_SKILLS_DIR
+from emoticorebot.right.skills import BUILTIN_SKILLS_DIR
 from emoticorebot.protocol.task_models import ProtocolModel
 from emoticorebot.protocol.task_result import TaskExecutionResult
 from emoticorebot.utils.helpers import ensure_dir
@@ -261,6 +261,12 @@ def build_agent_instructions(
         "1. 如果任务上下文里带有 `skill_hints`，优先按这些提示执行。\n"
         "2. 如果提示里给出了技能名，可以按需查看 `/skills/workspace/<skill>/SKILL.md` 或 `/skills/builtin/<skill>/SKILL.md`。\n"
         "3. 只有在技能确实匹配当前任务时才复用，不要机械套模板。\n\n"
+        "## 审核钩子\n"
+        "1. 在真正开始执行前，必须先调用一次 `audit_tool`。\n"
+        "2. 当你判断“任务可以开始”时，调用 `audit_tool(decision=\"accept\", ...)`。\n"
+        "3. 当你判断“不应执行”时，调用 `audit_tool(decision=\"reject\", ...)`。\n"
+        "4. 当你判断“不需要执行，只需要给左脑理性答案素材”时，调用 `audit_tool(decision=\"answer_only\", ...)`。\n"
+        "5. `reject / answer_only` 会直接终止本次 run，所以要把理由或答案素材写清楚。\n\n"
         "## 阶段通知\n"
         "1. 当你完成关键里程碑时，必须调用 `report_stage` 汇报一次。\n"
         "2. 尤其是创建文件、修改文件、完成主要验证之后，要立刻汇报。\n"
@@ -334,6 +340,9 @@ def build_tools(
     profile: WorkerTaskProfile | None = None,
 ) -> list[Any]:
     tools: list[Any] = []
+    audit_tool = build_audit_tool(service)
+    if audit_tool is not None:
+        tools.append(audit_tool)
     stage_tool = build_stage_report_tool(service)
     if stage_tool is not None:
         tools.append(stage_tool)
@@ -344,6 +353,42 @@ def build_tools(
             tool_names = [name for name in tool_names if name != "exec"]
         tools.extend(build_registry_tools(service, tool_names))
     return tools
+
+
+def build_audit_tool(service: ExecutionAgentService) -> Any | None:
+    """构建右脑审核钩子，决定本次 run 是否继续执行。"""
+    try:
+        from langchain_core.tools import StructuredTool
+        from pydantic import BaseModel, Field
+    except Exception:
+        return None
+
+    class AuditArgs(BaseModel):
+        decision: Literal["accept", "answer_only", "reject"] = Field(description="本次审核裁决。")
+        reason: str = Field(default="", description="裁决理由。")
+        summary: str = Field(default="", description="给左脑看的紧凑摘要，可选。")
+        result_text: str = Field(default="", description="decision=answer_only 时返回给左脑的答案素材。")
+
+    async def audit_tool(decision: str, reason: str = "", summary: str = "", result_text: str = "") -> str:
+        return await service.tool_runtime.audit(
+            decision=str(decision or "").strip(),  # type: ignore[arg-type]
+            reason=reason,
+            summary=summary,
+            result_text=result_text,
+            event="task.audit",
+            producer=str(getattr(service, "assistant_role", "worker") or "worker").strip(),
+        )
+
+    return StructuredTool.from_function(
+        coroutine=audit_tool,
+        name="audit_tool",
+        description=(
+            "右脑审核钩子。必须在真正开始执行前先调用一次。"
+            "`accept` 表示任务可以开始；`reject` 表示不应执行；"
+            "`answer_only` 表示不需要执行，只返回理性答案素材给左脑。"
+        ),
+        args_schema=AuditArgs,
+    )
 
 
 def build_stage_report_tool(service: ExecutionAgentService) -> Any | None:

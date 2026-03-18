@@ -9,18 +9,18 @@ from emoticorebot.cli import commands
 from emoticorebot.cli.commands import _is_one_shot_task_settled, _pick_one_shot_task_id
 from emoticorebot.config.schema import Config
 from emoticorebot.protocol.task_models import TaskRequestSpec
-from emoticorebot.runtime.state_machine import TaskState
-from emoticorebot.runtime.task_store import RuntimeTaskRecord, TaskStore
+from emoticorebot.right.state_machine import RightBrainState
+from emoticorebot.right.store import RightBrainRecord, RightBrainStore
 from emoticorebot.runtime.transport_bus import OutboundMessage
 
 
-def _task(task_id: str, *, state: TaskState, updated_at: str = "2026-03-16T00:00:00Z", state_version: int = 1):
-    return RuntimeTaskRecord(
+def _task(task_id: str, *, state: RightBrainState, updated_at: str = "2026-03-16T00:00:00Z", state_version: int = 1):
+    return RightBrainRecord(
         task_id=task_id,
         session_id="cli:direct",
         turn_id="turn_1",
+        job_id=f"job_{task_id}",
         request=TaskRequestSpec(request="test"),
-        origin_message=None,
         title=task_id,
         state=state,
         updated_at=updated_at,
@@ -29,41 +29,38 @@ def _task(task_id: str, *, state: TaskState, updated_at: str = "2026-03-16T00:00
 
 
 def test_pick_one_shot_task_id_prefers_fallback() -> None:
-    store = TaskStore()
-    store.add(_task("task_new", state=TaskState.RUNNING))
+    store = RightBrainStore()
+    store.add(_task("task_new", state=RightBrainState.RUNNING))
     agent_loop = SimpleNamespace(kernel=SimpleNamespace(task_store=store))
 
     assert _pick_one_shot_task_id(agent_loop, "cli:direct", set(), "task_resume") == "task_resume"
 
 
 def test_pick_one_shot_task_id_returns_newest_new_task() -> None:
-    store = TaskStore()
-    store.add(_task("task_old", state=TaskState.DONE, updated_at="2026-03-16T00:00:00Z"))
-    store.add(_task("task_newer", state=TaskState.RUNNING, updated_at="2026-03-16T00:00:02Z"))
-    store.add(_task("task_newest", state=TaskState.RUNNING, updated_at="2026-03-16T00:00:03Z"))
+    store = RightBrainStore()
+    store.add(_task("task_old", state=RightBrainState.DONE, updated_at="2026-03-16T00:00:00Z"))
+    store.add(_task("task_newer", state=RightBrainState.RUNNING, updated_at="2026-03-16T00:00:02Z"))
+    store.add(_task("task_newest", state=RightBrainState.RUNNING, updated_at="2026-03-16T00:00:03Z"))
     agent_loop = SimpleNamespace(kernel=SimpleNamespace(task_store=store))
 
     assert _pick_one_shot_task_id(agent_loop, "cli:direct", {"task_old"}, None) == "task_newest"
 
 
-def test_is_one_shot_task_settled_accepts_waiting_input_and_terminal() -> None:
-    waiting = _task("task_waiting", state=TaskState.WAITING)
-    done = _task("task_done", state=TaskState.DONE)
-    running = _task("task_running", state=TaskState.RUNNING)
+def test_is_one_shot_task_settled_accepts_terminal_only() -> None:
+    done = _task("task_done", state=RightBrainState.DONE)
+    running = _task("task_running", state=RightBrainState.RUNNING)
     tasks = {
-        waiting.task_id: waiting,
         done.task_id: done,
         running.task_id: running,
     }
     agent_loop = SimpleNamespace(kernel=SimpleNamespace(get_task=tasks.get))
 
-    assert _is_one_shot_task_settled(agent_loop, "task_waiting") is True
     assert _is_one_shot_task_settled(agent_loop, "task_done") is True
     assert _is_one_shot_task_settled(agent_loop, "task_running") is False
 
 
 def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -> None:
-    store = TaskStore()
+    store = RightBrainStore()
     streamed_chunks: list[str] = []
     printed_responses: list[str] = []
 
@@ -107,7 +104,7 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
             message_id: str | None,
         ) -> str:
             assert deliver is True
-            task = _task("task_streamed", state=TaskState.RUNNING)
+            task = _task("task_streamed", state=RightBrainState.RUNNING)
             task.session_id = session_key
             store.add(task)
             await self._bus.publish_outbound(
@@ -139,7 +136,7 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
                 )
             )
             await asyncio.sleep(0)
-            task.state = TaskState.DONE
+            task.state = RightBrainState.DONE
             task.touch()
             await self._bus.publish_outbound(
                 OutboundMessage(

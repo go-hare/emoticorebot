@@ -1,4 +1,4 @@
-"""Input normalization helpers that emit turn input events."""
+"""Input normalization helpers that emit turn and stream input events."""
 
 from __future__ import annotations
 
@@ -7,7 +7,14 @@ from typing import Any
 
 from emoticorebot.protocol.contracts import ChannelKind, InputKind, SessionMode
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import InputSlots, TurnInputPayload
+from emoticorebot.protocol.events import (
+    InputSlots,
+    StreamChunkPayload,
+    StreamCommitPayload,
+    StreamInterruptedPayload,
+    StreamStartPayload,
+    TurnInputPayload,
+)
 from emoticorebot.protocol.task_models import ContentBlock, MessageRef
 from emoticorebot.protocol.topics import EventType
 
@@ -16,7 +23,7 @@ _TASK_SLOT_RE = re.compile(r"#+\s*task\s*#+", re.IGNORECASE)
 
 
 class InputNormalizer:
-    """Collapse channel-specific input into one turn business event."""
+    """Collapse channel-specific input into turn and stream business events."""
 
     def normalize_turn_input(
         self,
@@ -159,6 +166,113 @@ class InputNormalizer:
             attachments=attachments,
             metadata=metadata,
             barge_in=barge_in,
+        )
+
+    def normalize_stream_start(
+        self,
+        *,
+        session_id: str,
+        stream_id: str,
+        channel: str,
+        chat_id: str,
+        sender_id: str,
+        message_id: str,
+        channel_kind: ChannelKind,
+        input_kind: InputKind = "voice",
+        metadata: dict[str, Any] | None = None,
+        session_mode: SessionMode | None = None,
+    ) -> BusEnvelope[StreamStartPayload]:
+        resolved_session_mode = session_mode or self._session_mode(channel_kind)
+        payload_metadata = dict(metadata or {})
+        payload_metadata.setdefault("channel_kind", channel_kind)
+        payload_metadata.setdefault("input_kind", input_kind)
+        payload_metadata.setdefault("session_mode", resolved_session_mode)
+        return build_envelope(
+            event_type=EventType.INPUT_STREAM_STARTED,
+            source="input_normalizer",
+            target="broadcast",
+            session_id=session_id,
+            correlation_id=stream_id,
+            payload=StreamStartPayload(
+                session_mode=resolved_session_mode,
+                stream_id=stream_id,
+                message=MessageRef(
+                    channel=channel,
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                    message_id=message_id,
+                ),
+                metadata=payload_metadata,
+            ),
+        )
+
+    def normalize_stream_chunk(
+        self,
+        *,
+        session_id: str,
+        stream_id: str,
+        chunk_index: int,
+        chunk_text: str,
+        is_commit_point: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> BusEnvelope[StreamChunkPayload]:
+        return build_envelope(
+            event_type=EventType.INPUT_STREAM_CHUNK,
+            source="input_normalizer",
+            target="broadcast",
+            session_id=session_id,
+            correlation_id=stream_id,
+            payload=StreamChunkPayload(
+                stream_id=stream_id,
+                chunk_index=chunk_index,
+                chunk_text=chunk_text,
+                is_commit_point=is_commit_point,
+                metadata=dict(metadata or {}),
+            ),
+        )
+
+    def normalize_stream_commit(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        stream_id: str,
+        committed_text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> BusEnvelope[StreamCommitPayload]:
+        return build_envelope(
+            event_type=EventType.INPUT_STREAM_COMMITTED,
+            source="input_normalizer",
+            target="broadcast",
+            session_id=session_id,
+            turn_id=turn_id,
+            correlation_id=turn_id,
+            payload=StreamCommitPayload(
+                stream_id=stream_id,
+                committed_text=committed_text,
+                metadata=dict(metadata or {}),
+            ),
+        )
+
+    def normalize_stream_interrupted(
+        self,
+        *,
+        session_id: str,
+        stream_id: str,
+        reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> BusEnvelope[StreamInterruptedPayload]:
+        return build_envelope(
+            event_type=EventType.INPUT_STREAM_INTERRUPTED,
+            source="input_normalizer",
+            target="broadcast",
+            session_id=session_id,
+            correlation_id=stream_id,
+            payload=StreamInterruptedPayload(
+                stream_id=stream_id,
+                reason=reason,
+                metadata=dict(metadata or {}),
+            ),
         )
 
     @staticmethod

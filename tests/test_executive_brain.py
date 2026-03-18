@@ -4,475 +4,186 @@ import asyncio
 
 from emoticorebot.brain.executive import ExecutiveBrain
 from emoticorebot.bus.pubsub import PriorityPubSubBus
-from emoticorebot.protocol.commands import LeftReplyRequestPayload
+from emoticorebot.protocol.commands import FollowupContextPayload, LeftReplyRequestPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload, TaskSummaryPayload, TaskUpdatePayload, TurnInputPayload
-from emoticorebot.protocol.task_models import MessageRef, ProtocolModel, TaskRequestSpec
+from emoticorebot.protocol.events import LeftFollowupReadyPayload
+from emoticorebot.protocol.task_models import MessageRef, TaskRequestSpec
 from emoticorebot.protocol.topics import EventType
-from emoticorebot.runtime.state_machine import TaskState
-from emoticorebot.runtime.task_store import RuntimeTaskRecord, TaskStore
-from emoticorebot.session.runtime import SessionRuntime
+from emoticorebot.right.store import RightBrainRecord, RightBrainStore
 
 
 def _left_reply_request(
     *,
-    source: str,
     session_id: str,
     turn_id: str,
-    turn_input: TurnInputPayload,
-    correlation_id: str | None = None,
     task_id: str | None = None,
+    followup_context: FollowupContextPayload | None = None,
 ) -> BusEnvelope[LeftReplyRequestPayload]:
     return build_envelope(
         event_type=EventType.LEFT_COMMAND_REPLY_REQUESTED,
-        source=source,
+        source="session",
         target="brain",
         session_id=session_id,
         turn_id=turn_id,
         task_id=task_id,
-        correlation_id=correlation_id or turn_id,
+        correlation_id=task_id or turn_id,
         payload=LeftReplyRequestPayload(
             request_id=f"left_req_{turn_id}",
-            turn_input=turn_input,
+            followup_context=followup_context,
         ),
     )
 
 
-def _task_store() -> TaskStore:
-    store = TaskStore()
+def _store() -> RightBrainStore:
+    store = RightBrainStore()
     store.add(
-        RuntimeTaskRecord(
-            task_id="task_1",
-            session_id="sess_1",
-            turn_id="turn_1",
-            request=TaskRequestSpec(request="完成任务", title="完成任务"),
-            origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
-            title="完成任务",
-            state=TaskState.DONE,
-            summary="done",
+        RightBrainRecord(
+            task_id="task_exec_1",
+            session_id="sess_exec_1",
+            turn_id="turn_exec_1",
+            job_id="job_exec_1",
+            request=TaskRequestSpec(request="整理模块", title="整理模块"),
+            title="整理模块",
+            origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_exec_1"),
         )
     )
     return store
 
 
-async def _exercise_terminal_reflection() -> None:
-    bus = PriorityPubSubBus()
-    store = _task_store()
-    brain = ExecutiveBrain(bus=bus, task_store=store)
-    brain.register()
-
-    turn_events: list[BusEnvelope[ProtocolModel]] = []
-
-    async def _capture_turn(event: BusEnvelope[ProtocolModel]) -> None:
-        turn_events.append(event)
-
-    bus.subscribe(consumer="memory_governor", event_type=EventType.REFLECT_LIGHT, handler=_capture_turn)
-
-    task = store.require("task_1")
-    await bus.publish(
-        _left_reply_request(
-            source="session",
-            session_id="sess_1",
-            turn_id="turn_1",
-            task_id="task_1",
-            correlation_id="task_1",
-            turn_input=TurnInputPayload(
-                input_id="task_front_1",
-                input_mode="turn",
-                session_mode="turn_chat",
-                message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_1"),
-                user_text="已完成",
-                metadata={
-                    "front_origin": "task",
-                    "task_event_type": EventType.TASK_END,
-                    "task_event_id": "evt_task_end_1",
-                    "task_id": "task_1",
-                    "task_result": "success",
-                    "task_summary": "已完成",
-                    "task_output": "任务已经完成。",
-                    "channel_kind": "chat",
-                },
-            ),
-        )
-    )
-    await bus.drain()
-
-    assert len(turn_events) == 1
-    assert turn_events[0].payload.reason == "task_result"
-    assert "reflection_input" in turn_events[0].payload.metadata
-    task_projection = turn_events[0].payload.metadata["reflection_input"]["task"]
-    assert task_projection["state"] == "done"
-    assert task_projection["result"] == "success"
-    assert turn_events[0].payload.metadata["reflection_input"]["assistant_output"]
-
-
-def test_executive_brain_emits_light_reflection_for_terminal_result() -> None:
-    asyncio.run(_exercise_terminal_reflection())
-
-
-async def _exercise_task_ask_reflection() -> None:
-    bus = PriorityPubSubBus()
-    store = TaskStore()
-    store.add(
-        RuntimeTaskRecord(
-            task_id="task_waiting_1",
-            session_id="sess_waiting",
-            turn_id="turn_waiting",
-            request=TaskRequestSpec(request="帮我处理任务", title="帮我处理任务"),
-            origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_waiting"),
-            title="帮我处理任务",
-            state=TaskState.WAITING,
-            summary="需要补充仓库地址",
-        )
-    )
-    brain = ExecutiveBrain(bus=bus, task_store=store)
-    brain.register()
-
-    turn_events: list[BusEnvelope[ProtocolModel]] = []
-
-    async def _capture_turn(event: BusEnvelope[ProtocolModel]) -> None:
-        turn_events.append(event)
-
-    bus.subscribe(consumer="memory_governor", event_type=EventType.REFLECT_LIGHT, handler=_capture_turn)
-
-    await bus.publish(
-        _left_reply_request(
-            source="session",
-            session_id="sess_waiting",
-            turn_id="turn_waiting",
-            task_id="task_waiting_1",
-            correlation_id="task_waiting_1",
-            turn_input=TurnInputPayload(
-                input_id="task_front_waiting",
-                input_mode="turn",
-                session_mode="turn_chat",
-                message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_waiting"),
-                user_text="需要你补充仓库地址",
-                metadata={
-                    "front_origin": "task",
-                    "task_event_type": EventType.TASK_ASK,
-                    "task_event_id": "evt_task_ask_1",
-                    "task_id": "task_waiting_1",
-                    "task_question": "请补充仓库地址",
-                    "task_field": "repo_url",
-                    "task_why": "缺少执行目标",
-                    "channel_kind": "chat",
-                },
-            ),
-        )
-    )
-    await bus.drain()
-
-    assert len(turn_events) == 1
-    assert turn_events[0].payload.reason == "task_need_input"
-    reflection_input = turn_events[0].payload.metadata["reflection_input"]
-    assert reflection_input["source_type"] == "task_event"
-    assert reflection_input["execution"]["status"] == "waiting_input"
-    assert reflection_input["execution"]["missing"] == ["repo_url"]
-
-
-def test_executive_brain_emits_light_reflection_for_task_ask() -> None:
-    asyncio.run(_exercise_task_ask_reflection())
-
-
-def test_task_create_context_injects_memory_bundle() -> None:
-    class _ContextBuilder:
-        def build_task_memory_bundle(self, *, query: str, limit: int = 6):
-            assert "创建 add.py" in query
-            return {
-                "relevant_task_memories": [
-                    {"type": "workflow_pattern", "summary": "复杂任务先收敛后输出"},
-                ],
-                "relevant_tool_memories": [],
-                "skill_hints": [
-                    {
-                        "summary": "最终结果式执行",
-                        "payload": {"skill_name": "final-result-execution", "trigger": "多步执行", "hint": "优先最终结果"},
-                    }
-                ],
-            }
-
-    brain = ExecutiveBrain(bus=PriorityPubSubBus(), task_store=TaskStore(), context_builder=_ContextBuilder())
-    payload = TurnInputPayload(
-        input_id="turn_1",
-        input_mode="turn",
-        session_mode="turn_chat",
-        message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_1"),
-        user_text="创建 add.py",
-        metadata={},
-    )
-
-    context = brain._task_create_context(
-        task={},
-        payload=payload,
-        origin=payload.message,
-        suppress_delivery=False,
-    )
-
-    assert context["memory_refs"] == ["[workflow_pattern] 复杂任务先收敛后输出"]
-    assert context["skill_hints"] == ["技能 `final-result-execution` | 触发: 多步执行 | 优先最终结果"]
-
-
-async def _exercise_task_origin_reply_guard_redacts_before_publish() -> None:
-    bus = PriorityPubSubBus()
-    store = TaskStore()
-    store.add(
-        RuntimeTaskRecord(
-            task_id="task_2",
-            session_id="sess_2",
-            turn_id="turn_2",
-            request=TaskRequestSpec(request="完成任务", title="完成任务"),
-            origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_2"),
-            title="完成任务",
-            state=TaskState.DONE,
-        )
-    )
-    brain = ExecutiveBrain(bus=bus, task_store=store)
-    brain.register()
-
-    pushed: list[BusEnvelope[ReplyReadyPayload]] = []
-    inline: list[BusEnvelope[ReplyReadyPayload]] = []
-
-    async def _capture_push(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        pushed.append(event)
-
-    async def _capture_inline(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        inline.append(event)
-
-    bus.subscribe(consumer="test:push", event_type=EventType.OUTPUT_PUSH_READY, handler=_capture_push)
-    bus.subscribe(consumer="test:inline", event_type=EventType.OUTPUT_INLINE_READY, handler=_capture_inline)
-
-    await bus.publish(
-        _left_reply_request(
-            source="session",
-            session_id="sess_2",
-            turn_id="turn_2",
-            task_id="task_2",
-            correlation_id="task_2",
-            turn_input=TurnInputPayload(
-                input_id="task_front_2",
-                input_mode="turn",
-                session_mode="turn_chat",
-                message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_2"),
-                user_text="任务结束",
-                metadata={
-                    "front_origin": "task",
-                    "task_event_type": EventType.TASK_END,
-                    "task_event_id": "evt_task_end_2",
-                    "task_id": "task_2",
-                    "task_result": "success",
-                    "task_summary": "已完成",
-                    "task_output": "api_key=sk-abcdefghijklmnopqrstuv",
-                },
-            ),
-        )
-    )
-    await bus.drain()
-
-    assert inline == []
-    assert len(pushed) == 1
-    assert pushed[0].payload.reply.plain_text == "完成任务 已完成。api_key=[REDACTED]"
-
-
-def test_executive_brain_task_origin_reply_guard_redacts_before_publish() -> None:
-    asyncio.run(_exercise_task_origin_reply_guard_redacts_before_publish())
-
-
-class _UnsafeReplyBrainLLM:
-    async def ainvoke(self, _prompt):
-        return "####user####\n-----BEGIN PRIVATE KEY-----\n\n####task####\nmode=answer\naction=none\n"
-
-
-async def _exercise_user_turn_blocked_reply_falls_back_synchronously() -> None:
-    bus = PriorityPubSubBus()
-    store = TaskStore()
-    brain = ExecutiveBrain(bus=bus, task_store=store, brain_llm=_UnsafeReplyBrainLLM())
-    brain.register()
-
-    inline: list[BusEnvelope[ReplyReadyPayload]] = []
-    pushed: list[BusEnvelope[ReplyReadyPayload]] = []
-
-    async def _capture_inline(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        inline.append(event)
-
-    async def _capture_push(event: BusEnvelope[ReplyReadyPayload]) -> None:
-        pushed.append(event)
-
-    bus.subscribe(consumer="test:inline", event_type=EventType.OUTPUT_INLINE_READY, handler=_capture_inline)
-    bus.subscribe(consumer="test:push", event_type=EventType.OUTPUT_PUSH_READY, handler=_capture_push)
-
-    await bus.publish(
-        _left_reply_request(
-            source="input_normalizer",
-            session_id="sess_3",
-            turn_id="turn_3",
-            correlation_id="turn_3",
-            turn_input=TurnInputPayload(
-                input_id="turn_3",
-                input_mode="turn",
-                session_mode="turn_chat",
-                message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_3"),
-                user_text="回复我",
-                metadata={"channel_kind": "chat"},
-            ),
-        )
-    )
+async def _drain(bus: PriorityPubSubBus) -> None:
     await bus.drain()
     await asyncio.sleep(0)
     await bus.drain()
 
-    assert pushed == []
-    assert len(inline) == 1
-    assert inline[0].payload.reply.safe_fallback is True
-    assert inline[0].payload.reply.kind == "safety_fallback"
-    assert "不能直接发出" in str(inline[0].payload.reply.plain_text or "")
 
-
-def test_executive_brain_user_turn_blocked_reply_falls_back_synchronously() -> None:
-    asyncio.run(_exercise_user_turn_blocked_reply_falls_back_synchronously())
-
-
-class _CapturingBrainLLM:
-    def __init__(self) -> None:
-        self.prompts: list[object] = []
-
-    async def ainvoke(self, prompt: object):
-        self.prompts.append(prompt)
-        return "####user####\n收到。\n\n####task####\nmode=answer\naction=none\n"
-
-
-async def _exercise_user_turn_consumes_unread_task_traces() -> None:
+async def _exercise_executive_brain_formats_right_brain_followups() -> None:
     bus = PriorityPubSubBus()
-    store = TaskStore()
-    session = SessionRuntime(bus=bus, task_store=store)
-    session.register()
-
-    task = store.add(
-        RuntimeTaskRecord(
-            task_id="task_trace_1",
-            session_id="sess_trace",
-            turn_id="turn_trace_1",
-            request=TaskRequestSpec(request="更新 add.py", title="更新 add.py"),
-            origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_trace_1"),
-            title="更新 add.py",
-            state=TaskState.RUNNING,
-        )
-    )
-    brain_llm = _CapturingBrainLLM()
-    brain = ExecutiveBrain(
-        bus=bus,
-        task_store=store,
-        brain_llm=brain_llm,
-        session_runtime=session,
-    )
+    brain = ExecutiveBrain(bus=bus, task_store=_store())
     brain.register()
 
-    try:
-        task.touch()
-        await bus.publish(
-            build_envelope(
-                event_type=EventType.TASK_UPDATE,
-                source="runtime",
-                target="broadcast",
-                session_id="sess_trace",
-                turn_id="turn_trace_1",
-                task_id="task_trace_1",
-                correlation_id="task_trace_1",
-                payload=TaskUpdatePayload(
-                    task_id="task_trace_1",
-                    updated_at=task.updated_at,
-                    message="正在写 add.py",
-                    trace_append=[
-                        {
-                            "trace_id": "trace_progress_1",
-                            "task_id": "task_trace_1",
-                            "session_id": "sess_trace",
-                            "ts": task.updated_at,
-                            "kind": "progress",
-                            "message": "正在写 add.py",
-                        }
-                    ],
-                ),
-            )
+    followups: list[BusEnvelope[LeftFollowupReadyPayload]] = []
+    reflections: list[str] = []
+
+    async def _capture_followup(event: BusEnvelope[LeftFollowupReadyPayload]) -> None:
+        followups.append(event)
+
+    async def _capture_reflection(event: BusEnvelope[object]) -> None:
+        reflections.append(str(event.event_type))
+
+    bus.subscribe(consumer="test:followup", event_type=EventType.LEFT_EVENT_FOLLOWUP_READY, handler=_capture_followup)
+    bus.subscribe(consumer="memory_governor", event_type=EventType.REFLECT_LIGHT, handler=_capture_reflection)
+
+    await bus.publish(
+        _left_reply_request(
+            session_id="sess_exec_1",
+            turn_id="turn_exec_1",
+            task_id="task_exec_1",
+            followup_context=FollowupContextPayload(
+                source_event=EventType.RIGHT_EVENT_JOB_ACCEPTED,
+                job_id="job_exec_1",
+                decision="accept",
+                reason="audit_tool 返回任务可以开始。",
+                preferred_delivery_mode="push",
+            ),
         )
-        await bus.drain()
-        await bus.publish(
-            _left_reply_request(
-                source="input_normalizer",
-                session_id="sess_trace",
-                turn_id="turn_trace_1",
-                correlation_id="turn_trace_1",
-                turn_input=TurnInputPayload(
-                    input_id="turn_trace_1",
-                    input_mode="turn",
-                    session_mode="turn_chat",
-                    message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_trace_1"),
-                    user_text="现在进度怎样？",
-                    metadata={"channel_kind": "chat"},
-                ),
-            )
+    )
+    await bus.publish(
+        _left_reply_request(
+            session_id="sess_exec_1",
+            turn_id="turn_exec_2",
+            task_id="task_exec_1",
+            followup_context=FollowupContextPayload(
+                source_event=EventType.RIGHT_EVENT_PROGRESS,
+                job_id="job_exec_1",
+                decision="accept",
+                summary="已完成扫描。",
+                progress=0.4,
+                next_step="整理输出",
+                preferred_delivery_mode="push",
+            ),
         )
-        await bus.drain()
-        await asyncio.sleep(0)
-        await bus.drain()
-
-        first_prompt = brain_llm.prompts[0][-1].content
-        assert "正在写 add.py" in first_prompt
-
-        task.touch()
-        await bus.publish(
-            build_envelope(
-                event_type=EventType.TASK_SUMMARY,
-                source="runtime",
-                target="broadcast",
-                session_id="sess_trace",
-                turn_id="turn_trace_2",
-                task_id="task_trace_1",
-                correlation_id="task_trace_1",
-                payload=TaskSummaryPayload(
-                    task_id="task_trace_1",
-                    updated_at=task.updated_at,
-                    summary="准备提交结果",
-                    trace_append=[
-                        {
-                            "trace_id": "trace_summary_2",
-                            "task_id": "task_trace_1",
-                            "session_id": "sess_trace",
-                            "ts": task.updated_at,
-                            "kind": "summary",
-                            "message": "准备提交结果",
-                        }
-                    ],
-                ),
-            )
+    )
+    await bus.publish(
+        _left_reply_request(
+            session_id="sess_exec_1",
+            turn_id="turn_exec_3",
+            task_id="task_exec_1",
+            followup_context=FollowupContextPayload(
+                source_event=EventType.RIGHT_EVENT_RESULT_READY,
+                job_id="job_exec_1",
+                decision="answer_only",
+                summary="更适合直接回答。",
+                result_text="这是右脑给左脑的答案素材。",
+                preferred_delivery_mode="inline",
+                metadata={"result": "success"},
+            ),
         )
-        await bus.drain()
-        await bus.publish(
-            _left_reply_request(
-                source="input_normalizer",
-                session_id="sess_trace",
-                turn_id="turn_trace_2",
-                correlation_id="turn_trace_2",
-                turn_input=TurnInputPayload(
-                    input_id="turn_trace_2",
-                    input_mode="turn",
-                    session_mode="turn_chat",
-                    message=MessageRef(channel="cli", chat_id="direct", sender_id="user", message_id="msg_trace_2"),
-                    user_text="再说一下最新进度",
-                    metadata={"channel_kind": "chat"},
-                ),
-            )
+    )
+    await _drain(bus)
+
+    assert len(followups) == 3
+    assert followups[0].payload.reply_kind == "status"
+    assert "已开始处理" in followups[0].payload.reply_text
+    assert "已完成扫描" in followups[1].payload.reply_text
+    assert "整理输出" in followups[1].payload.reply_text
+    assert followups[2].payload.reply_kind == "answer"
+    assert followups[2].payload.reply_text == "这是右脑给左脑的答案素材。"
+    assert reflections == []
+
+
+def test_executive_brain_formats_right_brain_followups() -> None:
+    asyncio.run(_exercise_executive_brain_formats_right_brain_followups())
+
+
+async def _exercise_executive_brain_formats_rejected_and_failed_followups() -> None:
+    bus = PriorityPubSubBus()
+    store = _store()
+    brain = ExecutiveBrain(bus=bus, task_store=store)
+    brain.register()
+
+    followups: list[BusEnvelope[LeftFollowupReadyPayload]] = []
+
+    async def _capture_followup(event: BusEnvelope[LeftFollowupReadyPayload]) -> None:
+        followups.append(event)
+
+    bus.subscribe(consumer="test:followup-2", event_type=EventType.LEFT_EVENT_FOLLOWUP_READY, handler=_capture_followup)
+
+    await bus.publish(
+        _left_reply_request(
+            session_id="sess_exec_1",
+            turn_id="turn_exec_4",
+            task_id="task_exec_1",
+            followup_context=FollowupContextPayload(
+                source_event=EventType.RIGHT_EVENT_JOB_REJECTED,
+                job_id="job_exec_1",
+                decision="reject",
+                reason="缺少可处理的源文件。",
+                preferred_delivery_mode="push",
+            ),
         )
-        await bus.drain()
-        await asyncio.sleep(0)
-        await bus.drain()
+    )
+    await bus.publish(
+        _left_reply_request(
+            session_id="sess_exec_1",
+            turn_id="turn_exec_5",
+            task_id="task_exec_1",
+            followup_context=FollowupContextPayload(
+                source_event=EventType.RIGHT_EVENT_RESULT_READY,
+                job_id="job_exec_1",
+                decision="accept",
+                summary="右脑执行失败。",
+                result_text="执行命令失败。",
+                preferred_delivery_mode="push",
+                metadata={"result": "failed"},
+            ),
+        )
+    )
+    await _drain(bus)
 
-        second_prompt = brain_llm.prompts[1][-1].content
-        assert "准备提交结果" in second_prompt
-        assert "正在写 add.py" not in second_prompt
-    finally:
-        await brain.stop()
+    assert len(followups) == 2
+    assert "先不继续执行" in followups[0].payload.reply_text
+    assert "失败了" in followups[1].payload.reply_text
 
 
-def test_executive_brain_user_turn_consumes_unread_task_traces() -> None:
-    asyncio.run(_exercise_user_turn_consumes_unread_task_traces())
+def test_executive_brain_formats_rejected_and_failed_followups() -> None:
+    asyncio.run(_exercise_executive_brain_formats_rejected_and_failed_followups())

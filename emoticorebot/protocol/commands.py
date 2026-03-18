@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
-from .contracts import RightBrainJobAction, RightBrainStrategy
-from .events import TurnInputPayload
+from .contracts import DeliveryMode, RightBrainDecision, RightBrainJobAction, RightBrainStrategy
+from .events import DeliveryTargetPayload, TurnInputPayload
 from .task_models import (
     AgentInputContext,
     AgentRole,
@@ -22,20 +22,54 @@ from .task_models import (
 )
 
 ControlAction = Literal["speak", "move", "stop", "manipulate"]
+
+
+FollowupSourceEvent = Literal[
+    "right.event.job_accepted",
+    "right.event.progress",
+    "right.event.result_ready",
+    "right.event.job_rejected",
+]
+
+
+class FollowupContextPayload(ProtocolModel):
+    source_event: FollowupSourceEvent
+    job_id: str
+    decision: RightBrainDecision
+    stage: str | None = None
+    summary: str | None = None
+    progress: float | None = None
+    next_step: str | None = None
+    result_text: str | None = None
+    reason: str | None = None
+    preferred_delivery_mode: DeliveryMode = "push"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class LeftReplyRequestPayload(ProtocolModel):
     request_id: str
-    turn_input: TurnInputPayload
+    turn_input: TurnInputPayload | None = None
+    followup_context: FollowupContextPayload | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "LeftReplyRequestPayload":
+        if (self.turn_input is None) == (self.followup_context is None):
+            raise ValueError("left reply requests require exactly one of turn_input or followup_context")
+        return self
 
 
 class RightBrainJobRequestPayload(ProtocolModel):
     job_id: str
     right_brain_strategy: RightBrainStrategy = "async"
     job_action: RightBrainJobAction
+    job_kind: str | None = None
     source_text: str | None = None
     request_text: str | None = None
     task_id: str | None = None
     goal: str | None = None
+    delivery_target: DeliveryTargetPayload | None = None
+    scores: dict[str, float] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -119,6 +153,7 @@ __all__ = [
     "CancelAgentPayload",
     "ControlAction",
     "ControlCommandPayload",
+    "FollowupContextPayload",
     "LeftReplyRequestPayload",
     "RightBrainJobAction",
     "RightBrainJobRequestPayload",

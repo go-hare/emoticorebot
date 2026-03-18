@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from emoticorebot.execution.backend import build_backend, build_interrupt_on, build_tools, build_task_profile
+from emoticorebot.right.deep_agent_backend import build_backend, build_interrupt_on, build_tools, build_task_profile
 from emoticorebot.tools import ExecTool, ToolRegistry, WriteFileTool
 
 

@@ -22,9 +22,7 @@ ExecutionStatus = Literal[
 ]
 ExecutionEffectiveness = Literal["high", "medium", "low", "none"]  # 执行有效性评级
 
-MemoryAudience = Literal["brain", "task", "shared"]  # 记忆面向的消费方
-MemoryKind = Literal["episodic", "durable", "procedural"]  # 记忆的稳定性/形态
-MemoryType = Literal["insight", "user", "preference", "workflow", "skill", "turn_insight"]
+LongTermMemoryType = Literal["relationship", "fact", "working", "execution", "reflection"]
 
 
 class EmotionState(TypedDict):
@@ -81,16 +79,13 @@ class StateUpdateDelta(TypedDict, total=False):
 class MemoryCandidate(TypedDict, total=False):
     """可写入长期记忆的候选项。"""
 
-    audience: MemoryAudience  # 面向 brain/task/shared 的记忆受众
-    kind: MemoryKind  # 记忆形态
-    type: MemoryType  # 记忆具体类型
+    memory_type: LongTermMemoryType  # 正式长期记忆类型
     summary: str  # 一句话摘要
-    content: str  # 记忆正文
-    importance: int  # 重要度 1-10
+    detail: str  # 更完整提炼内容
     confidence: float  # 置信度
     stability: float  # 稳定度
     tags: list[str]  # 标签列表
-    payload: dict[str, Any]  # 扩展结构化负载
+    metadata: dict[str, Any]  # 扩展结构化负载
 
 
 class ExecutionReview(TypedDict, total=False):
@@ -118,16 +113,6 @@ class TurnReflectionOutput(TypedDict, total=False):
     execution_review: ExecutionReview  # 执行复盘
 
 
-class SkillHint(TypedDict, total=False):
-    """深反思产出的技能提示。"""
-
-    summary: str  # 一句话概括
-    content: str  # 更完整说明
-    trigger: str  # 触发条件
-    hint: str  # 给 task 的使用提示
-    skill_name: str  # 技能名建议
-
-
 class DeepReflectionOutput(TypedDict, total=False):
     """深反思输出。"""
 
@@ -135,7 +120,6 @@ class DeepReflectionOutput(TypedDict, total=False):
     memory_candidates: list[MemoryCandidate]  # 长期记忆候选
     user_updates: list[str]  # 用户画像更新
     soul_updates: list[str]  # 主脑风格更新
-    skill_hints: list[SkillHint]  # 技能提示
 
 
 __all__ = [
@@ -148,15 +132,12 @@ __all__ = [
     "ExecutionInfo",
     "ExecutionReview",
     "ExecutionStatus",
-    "MemoryAudience",
     "MemoryCandidate",
-    "MemoryKind",
-    "MemoryType",
+    "LongTermMemoryType",
     "ReflectionInput",
     "ReflectionSourceType",
     "ReviewItem",
     "ReviewSeverity",
-    "SkillHint",
     "StateUpdateDelta",
     "TaskExecutionResult",
     "TaskEvent",

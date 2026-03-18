@@ -206,6 +206,14 @@
 
 右脑可以使用 `DeepAgent` 一类深度执行器，但右脑不是用户的主体人格，只是主体脑内部的后台子系统。
 
+在实现上，右脑 runtime 常驻存在；收到请求后立即启动一次 `DeepAgent` run。
+
+其中：
+
+- `audit_tool` 只是 `DeepAgent` 内部审核钩子
+- 真正的 run 生命周期由右脑 runtime 统一控制
+- 关键进展应持续回流给左脑，让用户可实时感知与随时停止
+
 #### `Reflection`
 
 反思系统负责慢速认知演化。
@@ -558,18 +566,20 @@ r任务相关
 
 > 将一个请求送入右脑受理，而不表示它一定会被真正执行。
 
-右脑收到后可以做四种决策：
+右脑收到后会立即启动 `DeepAgent`，并由 `audit_tool` 给出三种正式裁决：
 
 1. `accept`
-   - 真正开始执行
-2. `clarify`
-   - 需要用户补充信息
-3. `reject`
-   - 不应执行
-4. `answer_only`
-   - 不需要执行，只需返回一个理性答案给左脑
+   - 返回“任务可以开始”，放行并继续执行
+2. `reject`
+   - 由工具直接发出终止信号
+3. `answer_only`
+   - 由工具直接发出终止信号，并只返回理性答案素材给左脑
 
-这样 `create_task` 的语义就从“创建一个必须执行的任务”升级为“提交给右脑评估和处理”。
+右脑 runtime 收到 `reject / answer_only` 终止信号后，必须先通知左脑，再关停当前 run。
+
+右脑内部不再维护“等待用户补充信息”的中间态；信息不足时，本次 run 直接结束。
+
+这样 `create_task` 的语义就从“创建一个必须执行的任务”升级为“提交给右脑评估并处理”。
 
 这更符合陪伴场景下“先受理，再判断，再表达”的内部逻辑。
 
@@ -592,9 +602,6 @@ r任务相关
 - `input.stream.committed`
 - `session.interrupt`
 
-#### 意图事件
-
-- `intent.scored`
 
 #### 左脑事件
 
@@ -607,7 +614,7 @@ r任务相关
 
 - `right.job.requested`
 - `right.job.accepted`
-- `right.job.clarify`
+- `right.progress`
 - `right.job.rejected`
 - `right.result.ready`
 
@@ -666,7 +673,7 @@ r任务相关
 1. 收到一条完整输入
 2. 左脑识别到 `task` 槽非空
 3. 左脑当前先回复
-4. 右脑后台受理并执行
+4. 右脑后台启动 `DeepAgent` 并持续回流受理与进展
 5. 完成后产生 `right.result.ready`
 6. 左脑将其整理成新消息
 7. 投递层用 `push` 发给用户
@@ -799,6 +806,7 @@ r任务相关
 - 从左脑与右脑的结果中抽取长期模式
 - 更新关系、风格、人格提案
 - 生成长期记忆写入
+- 异步自行拉取所需上下文，而不是要求右脑同步打包全部材料
 
 ---
 
@@ -811,7 +819,7 @@ r任务相关
 | 目标模块 | 当前可承接模块 |
 |------|------|
 | `Left Brain` | `front/` + `brain/executive.py` 的前台表达部分 |
-| `Right Brain` | `task/` + `execution/` + `DeepAgentExecutor` |
+| `Right Brain` | `right/`（内部可使用 `DeepAgentExecutor` 作为执行引擎） |
 | `Reflection` | `reflection/` + `memory/governor.py` |
 | `Memory` | `memory/` + `session/thread_store.py` |
 | `Session Supervisor` | `session/runtime.py` |
@@ -857,4 +865,3 @@ r任务相关
 > 系统支持 `turn / stream` 两类输入，支持 `inline / push / stream` 三类投递。  
 > 左脑负责前台陪伴与表达，右脑负责异步理性与执行，反思与记忆负责长期连续性。  
 > 模块之间通过事件协作，以便后续在不破坏整体逻辑的前提下持续演进。
-

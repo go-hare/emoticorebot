@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from emoticorebot.agent.reflection.memory_candidates import compact_text, normalize_memory_candidates
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.types import EmotionState, ExecutionInfo, TurnReflectionOutput
 
@@ -98,16 +99,16 @@ class TurnReflectionService:
   }},
   "memory_candidates": [
     {{
-      "audience": "brain|task|shared",
-      "kind": "episodic|durable|procedural",
-      "type": "insight|user|preference|workflow|skill",
+      "memory_type": "relationship|fact|working|execution|reflection",
       "summary": "",
-      "content": "",
-      "importance": 1,
+      "detail": "",
       "confidence": 0.0,
       "stability": 0.0,
       "tags": [""],
-      "payload": {{}}
+      "metadata": {{
+        "subtype": "",
+        "importance": 1
+      }}
     }}
   ],
   "execution_review": {{
@@ -139,16 +140,13 @@ class TurnReflectionService:
 - `drives_delta`：必须始终写出 `social`、`energy` 两个键；字段名保留为 `delta`，但这里实际填写的是你判断后的状态值，不是增量。
 
 `memory_candidates` 内部字段说明：
-- `audience`：只能是 `brain`、`task`、`shared`。
-- `kind`：只能是 `episodic`、`durable`、`procedural`。
-- `type`：记忆类型，可选 `insight`（本轮洞察）、`user`（用户信息）、`preference`（偏好）、`workflow`（工作流模式）、`skill`（技能提示）。
+- `memory_type`：只能是 `relationship`、`fact`、`working`、`execution`、`reflection`。
 - `summary`：一句话摘要。
-- `content`：蒸馏后的完整内容。
-- `importance`：1 到 10 的整数。
+- `detail`：蒸馏后的完整内容。
 - `confidence`：0 到 1 的小数。
 - `stability`：0 到 1 的小数。
 - `tags`：标签列表，没有就 `[]`。
-        - `payload`：类型扩展字段，没有就 `{{}}`。
+- `metadata`：类型扩展字段，没有就 `{{}}`；可用 `metadata.subtype` 表示更细分类，如 `turn_insight / workflow / skill_hint / tool_experience / error_pattern`。
 
 示例：
 {{
@@ -175,16 +173,15 @@ class TurnReflectionService:
   }},
   "memory_candidates": [
     {{
-      "audience": "shared",
-      "kind": "episodic",
-      "type": "turn_insight",
+      "memory_type": "reflection",
       "summary": "多次尝试后完成执行",
-      "content": "本轮在补齐关键条件后完成执行，后续可优先检查缺参。",
-      "importance": 7,
+      "detail": "本轮在补齐关键条件后完成执行，后续可优先检查缺参。",
       "confidence": 0.86,
       "stability": 0.52,
       "tags": ["execution", "retry"],
-      "payload": {{
+      "metadata": {{
+        "subtype": "turn_insight",
+        "importance": 7,
         "problem": "初始方案缺少关键参数",
         "attempt_count": 2,
         "resolution": "补齐条件后成功执行",
@@ -293,7 +290,16 @@ class TurnReflectionService:
                 payload.get("state_update"),
                 fallback=fallback["state_update"],
             ),
-            "memory_candidates": self._normalize_memory_candidates(payload.get("memory_candidates")) or fallback["memory_candidates"],
+            "memory_candidates": normalize_memory_candidates(
+                payload.get("memory_candidates"),
+                default_memory_type="reflection",
+                default_subtype="turn_insight",
+                default_confidence=0.8,
+                default_stability=0.5,
+                default_importance=5,
+                limit=6,
+            )
+            or fallback["memory_candidates"],
             "execution_review": self._normalize_execution_review(
                 payload.get("execution_review"),
                 fallback=fallback["execution_review"],
@@ -345,20 +351,19 @@ class TurnReflectionService:
         if invoked:
             memory_candidates.append(
                 {
-                    "audience": "shared",
-                    "kind": "episodic",
-                    "type": "turn_insight",
-                    "summary": self._compact(summary, limit=100),
-                    "content": self._compact(
+                    "memory_type": "reflection",
+                    "summary": compact_text(summary, limit=100),
+                    "detail": compact_text(
                         f"本轮执行状态为 {status}。{resolution}"
                         + (f" 主要缺失信息：{'; '.join(missing[:3])}。" if missing else ""),
                         limit=220,
                     ),
-                    "importance": 7 if status in {"failed", "need_more"} else 6,
                     "confidence": 0.82,
                     "stability": 0.45,
                     "tags": ["turn", "execution"],
-                    "payload": {
+                    "metadata": {
+                        "subtype": "turn_insight",
+                        "importance": 7 if status in {"failed", "need_more"} else 6,
                         "problem": problems[0] if problems else "",
                         "attempt_count": execution_review["attempt_count"],
                         "resolution": resolution,
@@ -425,34 +430,6 @@ class TurnReflectionService:
             or TurnReflectionService._normalize_str_list(fallback.get("missing_inputs")),
             "next_execution_hint": str(review.get("next_execution_hint", fallback.get("next_execution_hint", "")) or "").strip(),
         }
-
-    @staticmethod
-    def _normalize_memory_candidates(value: Any) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        records: list[dict[str, Any]] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            summary = str(item.get("summary", "") or "").strip()
-            content = str(item.get("content", "") or "").strip()
-            if not summary and not content:
-                continue
-            records.append(
-                {
-                    "audience": str(item.get("audience", "shared") or "shared").strip(),
-                    "kind": str(item.get("kind", "episodic") or "episodic").strip(),
-                    "type": str(item.get("type", "turn_insight") or "turn_insight").strip(),
-                    "summary": summary,
-                    "content": content or summary,
-                    "importance": int(item.get("importance", 5) or 5),
-                    "confidence": float(item.get("confidence", 0.8) or 0.8),
-                    "stability": float(item.get("stability", 0.5) or 0.5),
-                    "tags": TurnReflectionService._normalize_str_list(item.get("tags")),
-                    "payload": dict(item.get("payload", {}) or {}),
-                }
-            )
-        return records[:6]
 
     @staticmethod
     def _normalize_state_update(value: Any, *, fallback: dict[str, Any]) -> dict[str, Any]:
@@ -664,9 +641,6 @@ class TurnReflectionService:
 
     @staticmethod
     def _compact(text: str, *, limit: int) -> str:
-        compact = " ".join(str(text or "").split())
-        if len(compact) <= limit:
-            return compact
-        return compact[: limit - 1] + "…"
+        return compact_text(text, limit=limit)
 
 __all__ = ["TurnReflectionResult", "TurnReflectionService"]

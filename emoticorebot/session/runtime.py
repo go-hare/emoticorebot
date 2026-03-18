@@ -8,12 +8,24 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from emoticorebot.bus.pubsub import PriorityPubSubBus
-from emoticorebot.protocol.commands import LeftReplyRequestPayload, RightBrainJobRequestPayload
+from emoticorebot.protocol.commands import FollowupContextPayload, LeftReplyRequestPayload, RightBrainJobRequestPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import InputSlots, LeftReplyReadyPayload, ReplyReadyPayload, TurnInputPayload
-from emoticorebot.protocol.task_models import MessageRef
+from emoticorebot.protocol.events import (
+    LeftReplyReadyPayload,
+    ReplyReadyPayload,
+    RightBrainAcceptedPayload,
+    RightBrainProgressPayload,
+    RightBrainRejectedPayload,
+    RightBrainResultPayload,
+    StreamChunkPayload,
+    StreamCommitPayload,
+    StreamInterruptedPayload,
+    StreamStartPayload,
+    TurnInputPayload,
+    InputSlots,
+)
 from emoticorebot.protocol.topics import EventType, Topic
-from emoticorebot.runtime.task_store import TaskStore
+from emoticorebot.right.store import RightBrainStore
 
 from .models import SessionContext, SessionTaskView, SessionTraceRecord
 
@@ -29,7 +41,7 @@ _TRACE_LIMIT = 64
 class SessionRuntime:
     """Maintains process-local session context and compact task views."""
 
-    def __init__(self, *, bus: PriorityPubSubBus, task_store: TaskStore) -> None:
+    def __init__(self, *, bus: PriorityPubSubBus, task_store: RightBrainStore) -> None:
         self._bus = bus
         self._task_store = task_store
         self._sessions: dict[str, SessionContext] = {}
@@ -37,7 +49,23 @@ class SessionRuntime:
 
     def register(self) -> None:
         self._bus.subscribe(consumer="session", event_type=EventType.INPUT_TURN_RECEIVED, handler=self._on_user_input)
+        self._bus.subscribe(consumer="session", event_type=EventType.INPUT_STREAM_STARTED, handler=self._on_input_stream_started)
+        self._bus.subscribe(consumer="session", event_type=EventType.INPUT_STREAM_CHUNK, handler=self._on_input_stream_chunk)
+        self._bus.subscribe(
+            consumer="session",
+            event_type=EventType.INPUT_STREAM_COMMITTED,
+            handler=self._on_input_stream_committed,
+        )
+        self._bus.subscribe(
+            consumer="session",
+            event_type=EventType.INPUT_STREAM_INTERRUPTED,
+            handler=self._on_input_stream_interrupted,
+        )
         self._bus.subscribe(consumer="session", event_type=EventType.LEFT_EVENT_REPLY_READY, handler=self._on_left_reply_ready)
+        self._bus.subscribe(consumer="session", event_type=EventType.RIGHT_EVENT_JOB_ACCEPTED, handler=self._on_right_followup_event)
+        self._bus.subscribe(consumer="session", event_type=EventType.RIGHT_EVENT_PROGRESS, handler=self._on_right_followup_event)
+        self._bus.subscribe(consumer="session", event_type=EventType.RIGHT_EVENT_JOB_REJECTED, handler=self._on_right_followup_event)
+        self._bus.subscribe(consumer="session", event_type=EventType.RIGHT_EVENT_RESULT_READY, handler=self._on_right_followup_event)
         self._bus.subscribe(consumer="session", event_type=EventType.OUTPUT_INLINE_READY, handler=self._on_reply_output)
         self._bus.subscribe(consumer="session", event_type=EventType.OUTPUT_PUSH_READY, handler=self._on_reply_output)
         self._bus.subscribe(consumer="session", event_type=EventType.OUTPUT_STREAM_OPEN, handler=self._on_reply_output)
@@ -110,7 +138,12 @@ class SessionRuntime:
 
     def should_archive(self, session_id: str) -> bool:
         context = self._get_or_create(session_id)
-        return not context.active_task_ids and not context.waiting_task_ids and not context.active_reply_stream_id
+        return (
+            not context.active_task_ids
+            and not context.waiting_task_ids
+            and not context.active_reply_stream_id
+            and not context.active_input_stream_id
+        )
 
     def update_memory_snapshot(self, session_id: str, snapshot: Mapping[str, Any] | None) -> None:
         context = self._get_or_create(session_id)
@@ -123,24 +156,132 @@ class SessionRuntime:
         left_request: BusEnvelope[LeftReplyRequestPayload] | None = None
         async with self._session_lock(session_id):
             context = self._get_or_create(session_id)
-            task_origin = self._is_task_origin_input(event.payload)
-            if not task_origin:
-                context.last_turn_id = event.turn_id
+            context.last_turn_id = event.turn_id
             context.channel_kind = self._channel_kind(event.payload)
             if self._should_supersede_active_reply(event.payload):
                 context.active_reply_stream_id = None
-            if not task_origin:
-                context.last_user_input = self._user_text(event.payload)
+            context.last_user_input = self._user_text(event.payload)
             if event.turn_id:
-                context.last_front_instance_id = (
-                    f"front_task_{self._task_origin_task_id(event.payload) or event.turn_id}"
-                    if task_origin
-                    else f"front_{event.turn_id}"
-                )
+                context.last_front_instance_id = f"front_{event.turn_id}"
             context.archived = self.should_archive(session_id)
             left_request = self._build_left_reply_request(event)
         if left_request is not None:
             await self._bus.publish(left_request)
+
+    async def _on_input_stream_started(self, event: BusEnvelope[StreamStartPayload]) -> None:
+        session_id = str(event.session_id or "").strip()
+        if not session_id:
+            return
+        async with self._session_lock(session_id):
+            context = self._get_or_create(session_id)
+            if event.payload.stream_id in context.interrupted_input_stream_ids:
+                context.archived = self.should_archive(session_id)
+                return
+            payload_metadata = dict(event.payload.metadata or {})
+            payload_metadata.setdefault("session_mode", event.payload.session_mode)
+            context.active_input_stream_id = event.payload.stream_id
+            context.active_input_stream_message = event.payload.message.model_copy(deep=True)
+            context.active_input_stream_metadata = payload_metadata
+            context.active_input_stream_text = ""
+            context.input_stream_commit_count = 0
+            context.channel_kind = self._stream_channel_kind(payload_metadata, fallback=context.channel_kind or "voice")
+            if self._should_supersede_active_reply_from_stream():
+                context.active_reply_stream_id = None
+            context.archived = self.should_archive(session_id)
+
+    async def _on_input_stream_chunk(self, event: BusEnvelope[StreamChunkPayload]) -> None:
+        session_id = str(event.session_id or "").strip()
+        if not session_id:
+            return
+        async with self._session_lock(session_id):
+            context = self._get_or_create(session_id)
+            if event.payload.stream_id in context.interrupted_input_stream_ids:
+                return
+            if context.active_input_stream_id != event.payload.stream_id:
+                return
+            context.active_input_stream_text += str(event.payload.chunk_text or "")
+            context.archived = self.should_archive(session_id)
+
+    async def _on_input_stream_committed(self, event: BusEnvelope[StreamCommitPayload]) -> None:
+        session_id = str(event.session_id or "").strip()
+        if not session_id:
+            return
+        turn_event: BusEnvelope[TurnInputPayload] | None = None
+        async with self._session_lock(session_id):
+            context = self._get_or_create(session_id)
+            if event.payload.stream_id in context.interrupted_input_stream_ids:
+                return
+            if context.active_input_stream_id != event.payload.stream_id:
+                return
+            if context.active_input_stream_message is None:
+                return
+
+            commit_index = context.input_stream_commit_count + 1
+            committed_text = str(event.payload.committed_text or "").strip() or str(context.active_input_stream_text or "").strip()
+            if not committed_text:
+                return
+
+            stream_metadata = dict(context.active_input_stream_metadata or {})
+            commit_metadata = dict(event.payload.metadata or {})
+            merged_metadata = dict(stream_metadata)
+            merged_metadata.update(commit_metadata)
+
+            channel_kind = self._stream_channel_kind(merged_metadata, fallback=context.channel_kind or "voice")
+            input_kind = self._stream_input_kind(merged_metadata)
+            session_mode = self._stream_session_mode(merged_metadata, fallback_channel_kind=channel_kind)
+            barge_in = bool(merged_metadata.get("barge_in", False))
+            turn_id = str(event.turn_id or "").strip() or f"turn_stream_{event.payload.stream_id}_{commit_index}"
+
+            turn_metadata = dict(merged_metadata)
+            turn_metadata.update(
+                {
+                    "source_input_mode": "stream",
+                    "source_stream_id": event.payload.stream_id,
+                    "stream_commit": True,
+                    "stream_commit_index": commit_index,
+                }
+            )
+
+            context.input_stream_commit_count = commit_index
+            context.active_input_stream_text = ""
+            context.archived = self.should_archive(session_id)
+
+            turn_event = build_envelope(
+                event_type=EventType.INPUT_TURN_RECEIVED,
+                source="session",
+                target="broadcast",
+                session_id=event.session_id,
+                turn_id=turn_id,
+                correlation_id=turn_id,
+                causation_id=event.event_id,
+                payload=TurnInputPayload(
+                    input_id=turn_id,
+                    input_mode="turn",
+                    session_mode=session_mode,
+                    channel_kind=channel_kind,
+                    input_kind=input_kind,
+                    barge_in=barge_in,
+                    message=context.active_input_stream_message.model_copy(deep=True),
+                    user_text=committed_text,
+                    input_slots=InputSlots(user=committed_text, task=""),
+                    metadata=turn_metadata,
+                ),
+            )
+        if turn_event is not None:
+            await self._bus.publish(turn_event)
+
+    async def _on_input_stream_interrupted(self, event: BusEnvelope[StreamInterruptedPayload]) -> None:
+        session_id = str(event.session_id or "").strip()
+        if not session_id:
+            return
+        async with self._session_lock(session_id):
+            context = self._get_or_create(session_id)
+            context.interrupted_input_stream_ids.add(event.payload.stream_id)
+            if context.active_input_stream_id != event.payload.stream_id:
+                context.archived = self.should_archive(session_id)
+                return
+            self._clear_active_input_stream(context)
+            context.archived = self.should_archive(session_id)
 
     async def _on_left_reply_ready(self, event: BusEnvelope[LeftReplyReadyPayload]) -> None:
         if not event.payload.invoke_right_brain:
@@ -158,7 +299,7 @@ class SessionRuntime:
             build_envelope(
                 event_type=EventType.RIGHT_COMMAND_JOB_REQUESTED,
                 source="session",
-                target="runtime",
+                target="right_runtime",
                 session_id=event.session_id,
                 turn_id=event.turn_id,
                 task_id=task_id,
@@ -168,10 +309,13 @@ class SessionRuntime:
                     job_id=job_id,
                     right_brain_strategy=strategy,
                     job_action=job_action,
+                    job_kind=str(request.get("job_kind", "") or "").strip() or None,
                     source_text=str(request.get("source_text", "") or "").strip() or None,
                     request_text=str(request.get("request_text", "") or "").strip() or None,
                     task_id=task_id,
                     goal=str(request.get("goal", "") or "").strip() or None,
+                    delivery_target=request.get("delivery_target"),
+                    scores=dict(request.get("scores", {}) or {}),
                     context=dict(request.get("context", {}) or {}),
                     metadata={
                         "left_request_id": event.payload.request_id,
@@ -182,15 +326,67 @@ class SessionRuntime:
             )
         )
 
+    async def _on_right_followup_event(
+        self,
+        event: BusEnvelope[
+            RightBrainAcceptedPayload | RightBrainProgressPayload | RightBrainRejectedPayload | RightBrainResultPayload
+        ],
+    ) -> None:
+        session_id = str(event.session_id or "").strip()
+        if not session_id:
+            return
+        async with self._session_lock(session_id):
+            context = self._get_or_create(session_id)
+            self._apply_right_event(context, event)
+            if event.task_id:
+                context.last_front_instance_id = f"front_followup_{event.task_id}"
+            context.archived = self.should_archive(session_id)
+            left_request = self._build_followup_reply_request(event)
+        await self._bus.publish(left_request)
+
+    def _apply_right_event(
+        self,
+        context: SessionContext,
+        event: BusEnvelope[
+            RightBrainAcceptedPayload | RightBrainProgressPayload | RightBrainRejectedPayload | RightBrainResultPayload
+        ],
+    ) -> None:
+        task_id = str(event.task_id or "").strip()
+        if not task_id:
+            return
+        view = context.tasks.get(task_id)
+        if view is None:
+            view = SessionTaskView(task_id=task_id)
+            context.tasks[task_id] = view
+        context.trace_cursor.setdefault(task_id, "")
+
+        self._hydrate_task_view(view)
+        task = self._task_store.get(task_id)
+        if task is not None:
+            view.title = str(task.title or "").strip()
+            view.request = str(task.request.request or "").strip()
+            view.state = task.state.value
+            view.result = task.result
+            view.updated_at = str(task.updated_at or "").strip()
+            view.summary = str(task.summary or task.last_progress or "").strip()
+
+        trace = self._build_right_trace(event)
+        if trace is not None:
+            view.trace.append(trace)
+            view.trace.sort(key=lambda item: (item.ts, item.trace_id))
+            if len(view.trace) > _TRACE_LIMIT:
+                view.trace = view.trace[-_TRACE_LIMIT:]
+
+        context.rebuild_indexes()
+
     async def _on_reply_output(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
         session_id = str(event.session_id or "").strip()
         if not session_id:
             return
         async with self._session_lock(session_id):
             context = self._get_or_create(session_id)
-            reply_metadata = dict(event.payload.reply.metadata or {})
-            stream_state = self._reply_stream_state(event.event_type, reply_metadata)
-            stream_id = str(reply_metadata.get("stream_id", "") or "").strip() or event.payload.reply.reply_id
+            stream_state = self._reply_stream_state(event.payload)
+            stream_id = str(event.payload.stream_id or "").strip() or event.payload.reply.reply_id
 
             if stream_state in {"open", "delta"}:
                 context.active_reply_stream_id = stream_id
@@ -216,7 +412,6 @@ class SessionRuntime:
         if not session_id or not task_id:
             return
 
-        trigger_event: BusEnvelope[TurnInputPayload] | None = None
         async with self._session_lock(session_id):
             context = self._get_or_create(session_id)
             view = context.tasks.get(task_id)
@@ -228,12 +423,7 @@ class SessionRuntime:
             self._hydrate_task_view(view)
             self._apply_task_event(context, view, event)
             context.rebuild_indexes()
-            if str(event.event_type) in {str(EventType.TASK_ASK), str(EventType.TASK_END)}:
-                context.last_front_instance_id = f"front_task_{task_id}"
-                trigger_event = self._build_task_front_trigger(context=context, view=view, event=event)
             context.archived = self.should_archive(session_id)
-        if trigger_event is not None:
-            await self._bus.publish(trigger_event)
 
     def _apply_task_event(self, context: SessionContext, view: SessionTaskView, event: BusEnvelope[object]) -> None:
         payload = event.payload
@@ -445,15 +635,8 @@ class SessionRuntime:
         return "\n".join(str(part).strip() for part in parts if str(part).strip()).strip()
 
     @staticmethod
-    def _reply_stream_state(event_type: str, metadata: Mapping[str, Any] | None) -> str:
-        if str(event_type) == str(EventType.OUTPUT_STREAM_OPEN):
-            return "open"
-        if str(event_type) == str(EventType.OUTPUT_STREAM_DELTA):
-            return "delta"
-        if str(event_type) == str(EventType.OUTPUT_STREAM_CLOSE):
-            return "close"
-        stream_state = str((metadata or {}).get("stream_state", "") or "").strip()
-        return "close" if stream_state == "final" else stream_state
+    def _reply_stream_state(payload: ReplyReadyPayload) -> str:
+        return str(payload.stream_state or "").strip()
 
     @staticmethod
     def _user_text(payload: TurnInputPayload) -> str:
@@ -468,64 +651,24 @@ class SessionRuntime:
     def _channel_kind(payload: TurnInputPayload) -> str:
         return str(getattr(payload, "channel_kind", "") or "chat").strip() or "chat"
 
-    def _build_task_front_trigger(
-        self,
-        *,
-        context: SessionContext,
-        view: SessionTaskView,
-        event: BusEnvelope[object],
-    ) -> BusEnvelope[TurnInputPayload] | None:
-        task_id = str(view.task_id or "").strip()
-        if not task_id:
-            return None
-        task = self._task_store.get(task_id)
-        origin = (
-            getattr(task, "origin_message", None)
-            if task is not None and getattr(task, "origin_message", None) is not None
-            else MessageRef(channel="system", chat_id=context.session_id, message_id=f"task_prompt_{task_id}")
-        )
-        task_event_type = str(event.event_type)
-        prompt_text = self._task_event_message(event)
-        metadata: dict[str, Any] = {
-            "front_origin": "task",
-            "task_event_type": task_event_type,
-            "task_event_id": event.event_id,
-            "task_id": task_id,
-            "task_result": str(getattr(event.payload, "result", "") or "").strip(),
-            "task_question": str(getattr(event.payload, "question", "") or "").strip(),
-            "task_field": str(getattr(event.payload, "field", "") or "").strip(),
-            "task_why": str(getattr(event.payload, "why", "") or "").strip(),
-            "task_summary": str(getattr(event.payload, "summary", "") or "").strip(),
-            "task_output": str(getattr(event.payload, "output", "") or "").strip(),
-            "task_error": str(getattr(event.payload, "error", "") or "").strip(),
-        }
-        turn_id = f"turn_task_{task_id}_{str(event.event_id or task_id)[-8:]}"
-        return build_envelope(
-            event_type=EventType.INPUT_TURN_RECEIVED,
-            source="session",
-            target="broadcast",
-            session_id=context.session_id,
-            turn_id=turn_id,
-            task_id=task_id,
-            correlation_id=event.correlation_id or task_id or turn_id,
-            causation_id=event.event_id,
-            payload=TurnInputPayload(
-                input_id=f"task_front_{task_id}_{event.event_id[-8:]}",
-                input_mode="turn",
-                session_mode="turn_chat" if (context.channel_kind or "chat") == "chat" else "realtime_chat",
-                channel_kind=context.channel_kind or "chat",
-                input_kind="text",
-                message=origin,
-                user_text=prompt_text or f"task event {task_event_type}",
-                input_slots=InputSlots(user=prompt_text or f"task event {task_event_type}", task=""),
-                metadata=metadata,
-            ),
-        )
+    @staticmethod
+    def _stream_channel_kind(metadata: Mapping[str, Any] | None, *, fallback: str) -> str:
+        value = str((metadata or {}).get("channel_kind", "") or "").strip()
+        if value in {"chat", "voice", "video"}:
+            return value
+        return fallback or "voice"
 
     @staticmethod
-    def _is_task_origin_input(payload: TurnInputPayload) -> bool:
-        metadata = getattr(payload, "metadata", {})
-        return isinstance(metadata, Mapping) and str(metadata.get("front_origin", "") or "").strip() == "task"
+    def _stream_input_kind(metadata: Mapping[str, Any] | None) -> str:
+        value = str((metadata or {}).get("input_kind", "") or "").strip()
+        return value if value in {"text", "voice", "multimodal"} else "voice"
+
+    @classmethod
+    def _stream_session_mode(cls, metadata: Mapping[str, Any] | None, *, fallback_channel_kind: str) -> str:
+        value = str((metadata or {}).get("session_mode", "") or "").strip()
+        if value in {"turn_chat", "realtime_chat"}:
+            return value
+        return "turn_chat" if fallback_channel_kind == "chat" else "realtime_chat"
 
     def _build_left_reply_request(self, event: BusEnvelope[TurnInputPayload]) -> BusEnvelope[LeftReplyRequestPayload]:
         return build_envelope(
@@ -540,16 +683,101 @@ class SessionRuntime:
             payload=LeftReplyRequestPayload(
                 request_id=f"left_req_{uuid4().hex[:12]}",
                 turn_input=event.payload,
-                metadata={"task_origin": self._is_task_origin_input(event.payload)},
+                metadata={},
             ),
         )
 
-    @staticmethod
-    def _task_origin_task_id(payload: TurnInputPayload) -> str:
-        metadata = getattr(payload, "metadata", {})
-        if not isinstance(metadata, Mapping):
-            return ""
-        return str(metadata.get("task_id", "") or "").strip()
+    def _build_followup_reply_request(
+        self,
+        event: BusEnvelope[
+            RightBrainAcceptedPayload | RightBrainProgressPayload | RightBrainRejectedPayload | RightBrainResultPayload
+        ],
+    ) -> BusEnvelope[LeftReplyRequestPayload]:
+        payload = event.payload
+        followup_context = FollowupContextPayload(
+            source_event=str(event.event_type),
+            job_id=str(payload.job_id or "").strip(),
+            decision=str(getattr(payload, "decision", "") or "").strip() or "accept",
+            stage=str(getattr(payload, "stage", "") or "").strip() or None,
+            summary=(
+                str(getattr(payload, "summary", "") or getattr(payload, "reason", "") or "").strip()
+                or None
+            ),
+            progress=getattr(payload, "progress", None),
+            next_step=str(getattr(payload, "next_step", "") or "").strip() or None,
+            result_text=str(getattr(payload, "result_text", "") or "").strip() or None,
+            reason=str(getattr(payload, "reason", "") or "").strip() or None,
+            preferred_delivery_mode=self._followup_delivery_mode(task_id=event.task_id, payload=payload),
+            metadata=dict(getattr(payload, "metadata", {}) or {}),
+        )
+        return build_envelope(
+            event_type=EventType.LEFT_COMMAND_REPLY_REQUESTED,
+            source="session",
+            target="brain",
+            session_id=event.session_id,
+            turn_id=event.turn_id,
+            task_id=event.task_id,
+            correlation_id=event.task_id or event.correlation_id or event.turn_id or payload.job_id,
+            causation_id=event.event_id,
+            payload=LeftReplyRequestPayload(
+                request_id=f"left_req_{uuid4().hex[:12]}",
+                followup_context=followup_context,
+                metadata={"followup": True},
+            ),
+        )
+
+    def _followup_delivery_mode(self, *, task_id: str | None, payload: object) -> str:
+        delivery_target = getattr(payload, "delivery_target", None)
+        if delivery_target is None:
+            task = self._task_store.get(str(task_id or "").strip())
+            if task is not None and task.preferred_delivery_mode in {"inline", "push", "stream"}:
+                return task.preferred_delivery_mode
+            return "push"
+        delivery_mode = str(getattr(delivery_target, "delivery_mode", "") or "").strip()
+        return delivery_mode if delivery_mode in {"inline", "push", "stream"} else "push"
+
+    def _build_right_trace(
+        self,
+        event: BusEnvelope[
+            RightBrainAcceptedPayload | RightBrainProgressPayload | RightBrainRejectedPayload | RightBrainResultPayload
+        ],
+    ) -> SessionTraceRecord | None:
+        task_id = str(event.task_id or "").strip()
+        if not task_id:
+            return None
+        payload = event.payload
+        message = ""
+        kind = "status"
+        if event.event_type == EventType.RIGHT_EVENT_JOB_ACCEPTED:
+            message = str(getattr(payload, "reason", "") or "右脑已开始处理。").strip()
+            kind = "status"
+        elif event.event_type == EventType.RIGHT_EVENT_PROGRESS:
+            message = str(getattr(payload, "summary", "") or "").strip()
+            kind = "tool" if str(getattr(payload, "metadata", {}).get("event", "") or "").strip() == "task.tool" else "progress"
+        elif event.event_type == EventType.RIGHT_EVENT_JOB_REJECTED:
+            message = str(getattr(payload, "reason", "") or "右脑拒绝执行当前请求。").strip()
+            kind = "warning"
+        elif event.event_type == EventType.RIGHT_EVENT_RESULT_READY:
+            message = str(getattr(payload, "result_text", "") or getattr(payload, "summary", "") or "").strip()
+            outcome = str(getattr(payload, "metadata", {}).get("result", "") or "").strip()
+            if outcome == "failed":
+                kind = "error"
+            elif outcome == "cancelled":
+                kind = "warning"
+            else:
+                kind = "summary"
+        if not message:
+            return None
+        task = self._task_store.get(task_id)
+        ts = str(task.updated_at or "").strip() if task is not None else ""
+        return SessionTraceRecord(
+            trace_id=str(event.event_id or f"trace_{task_id}"),
+            task_id=task_id,
+            kind=kind,
+            message=message,
+            ts=ts,
+            data={"source_event": str(event.event_type), **dict(getattr(payload, "metadata", {}) or {})},
+        )
 
     @staticmethod
     def _should_supersede_active_reply(payload: TurnInputPayload) -> bool:
@@ -557,6 +785,18 @@ class SessionRuntime:
         if barge_in:
             return True
         return True
+
+    @staticmethod
+    def _should_supersede_active_reply_from_stream() -> bool:
+        return True
+
+    @staticmethod
+    def _clear_active_input_stream(context: SessionContext) -> None:
+        context.active_input_stream_id = None
+        context.active_input_stream_message = None
+        context.active_input_stream_metadata = {}
+        context.active_input_stream_text = ""
+        context.input_stream_commit_count = 0
 
 
 __all__ = ["SessionRuntime"]

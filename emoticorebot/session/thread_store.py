@@ -1,4 +1,4 @@
-"""Thread persistence layer for dialogue and internal histories."""
+"""Thread persistence layer for raw front/right session histories."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ from typing import Any
 
 from loguru import logger
 
-from emoticorebot.session.history_store import HistoryStore, normalize_message_payload
-from emoticorebot.utils.task_context import build_task_context
 from emoticorebot.utils.llm_utils import normalize_content_blocks
+from emoticorebot.utils.task_context import build_task_context
+
+from emoticorebot.session.history_store import HistoryStore, normalize_message_payload
 
 
 @dataclass
@@ -30,7 +31,7 @@ class ConversationThread:
             {
                 "role": role,
                 "content": content,
-                "timestamp": datetime.now().isoformat(),
+                "created_at": datetime.now().isoformat(),
                 **kwargs,
             }
         )
@@ -53,7 +54,7 @@ class ConversationThread:
 
         out: list[dict[str, Any]] = []
         for message in sliced:
-            content = normalize_content_blocks(message.get("content", []))
+            content = normalize_content_blocks(message.get("content_blocks", []))
             if include_task_context and message.get("role") == "assistant":
                 task_context = build_task_context(message)
                 if task_context:
@@ -77,24 +78,24 @@ class ThreadStore:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.threads_dir = workspace / "sessions"
-        self.dialogue_store = HistoryStore(self.threads_dir, "dialogue.jsonl")
-        self.internal_store = HistoryStore(self.threads_dir, "internal.jsonl")
+        self.threads_dir = workspace / "session"
+        self.front_store = HistoryStore(self.threads_dir, "front.jsonl")
+        self.right_store = HistoryStore(self.threads_dir, "right.jsonl")
         self._cache: dict[str, ConversationThread] = {}
 
-    def append_internal_messages(self, thread_id: str, messages: list[dict[str, Any]]) -> None:
-        self.internal_store.append_messages(thread_id, messages)
+    def append_right_messages(self, thread_id: str, messages: list[dict[str, Any]]) -> None:
+        self.right_store.append_messages(thread_id, messages)
 
-    def clear_internal_messages(self, thread_id: str) -> None:
-        self.internal_store.clear_messages(thread_id)
+    def clear_right_messages(self, thread_id: str) -> None:
+        self.right_store.clear_messages(thread_id)
 
-    def get_internal_messages(
+    def get_right_messages(
         self,
         thread_id: str,
         *,
         max_messages: int | None = None,
     ) -> list[dict[str, Any]]:
-        return self.internal_store.load_messages(thread_id, max_messages=max_messages)
+        return self.right_store.load_messages(thread_id, max_messages=max_messages)
 
     def get_or_create(self, thread_id: str) -> ConversationThread:
         if thread_id in self._cache:
@@ -118,7 +119,7 @@ class ThreadStore:
 
     def save(self, thread: ConversationThread) -> None:
         thread.updated_at = datetime.now()
-        self.dialogue_store.write_messages(thread.thread_id, thread.messages)
+        self.front_store.write_messages(thread.thread_id, thread.messages)
         self._cache[thread.thread_id] = thread
 
     def invalidate(self, thread_id: str) -> None:
@@ -126,9 +127,9 @@ class ThreadStore:
 
     def list_threads(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        for path in self.dialogue_store.iter_thread_dirs():
-            dialogue_path = path / "dialogue.jsonl"
-            messages = HistoryStore.read_jsonl(dialogue_path)
+        for path in self.front_store.iter_thread_dirs():
+            front_path = path / "front.jsonl"
+            messages = HistoryStore.read_jsonl(front_path)
             created_at = self._infer_created_at(messages)
             updated_at = self._infer_updated_at(messages)
             records.append(
@@ -136,17 +137,17 @@ class ThreadStore:
                     "thread_id": path.name,
                     "created_at": created_at.isoformat() if created_at else "",
                     "updated_at": updated_at.isoformat() if updated_at else "",
-                    "path": str(dialogue_path),
+                    "path": str(front_path),
                 }
             )
         return sorted(records, key=lambda item: item.get("updated_at", ""), reverse=True)
 
     def _load(self, thread_id: str) -> ConversationThread | None:
-        dialogue_path = self.dialogue_store.path_for(thread_id)
-        if not dialogue_path.exists():
+        front_path = self.front_store.path_for(thread_id)
+        if not front_path.exists():
             return None
         try:
-            messages = HistoryStore.read_jsonl(dialogue_path)
+            messages = HistoryStore.read_jsonl(front_path)
             return self._thread_from_payload(
                 thread_id=thread_id,
                 messages=messages,
@@ -191,7 +192,7 @@ class ThreadStore:
     @staticmethod
     def _infer_created_at(messages: list[dict[str, Any]]) -> datetime | None:
         for message in messages:
-            created_at = ThreadStore._parse_datetime(message.get("timestamp"))
+            created_at = ThreadStore._parse_datetime(message.get("created_at"))
             if created_at is not None:
                 return created_at
         return None
@@ -199,7 +200,7 @@ class ThreadStore:
     @staticmethod
     def _infer_updated_at(messages: list[dict[str, Any]]) -> datetime | None:
         for message in reversed(messages):
-            updated_at = ThreadStore._parse_datetime(message.get("timestamp"))
+            updated_at = ThreadStore._parse_datetime(message.get("created_at"))
             if updated_at is not None:
                 return updated_at
         return None

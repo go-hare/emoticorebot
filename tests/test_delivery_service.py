@@ -6,7 +6,7 @@ from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.delivery.service import DeliveryService
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.events import DeliveryFailedPayload, RepliedPayload, ReplyReadyPayload
-from emoticorebot.protocol.task_models import MessageRef, ReplyDraft
+from emoticorebot.protocol.task_models import ContentBlock, MessageRef, ReplyDraft
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import TransportBus
 
@@ -208,9 +208,12 @@ async def _exercise_delivery_stream_delta_skips_replied_event() -> None:
                     reply_id="reply_stream_1",
                     kind="answer",
                     plain_text="你",
-                    metadata={"stream_id": "stream_turn_1", "stream_state": "open", "stream_index": 1},
                 ),
                 origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
+                delivery_mode="stream",
+                stream_id="stream_turn_1",
+                stream_state="open",
+                stream_index=1,
             ),
         )
     )
@@ -247,9 +250,12 @@ async def _exercise_delivery_stream_stale_reply_emits_superseded() -> None:
                     reply_id="reply_stream_stale",
                     kind="answer",
                     plain_text="旧内容",
-                    metadata={"stream_id": "stream_turn_1", "stream_state": "delta", "stream_index": 2},
                 ),
                 origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
+                delivery_mode="stream",
+                stream_id="stream_turn_1",
+                stream_state="delta",
+                stream_index=2,
             ),
         )
     )
@@ -262,3 +268,45 @@ async def _exercise_delivery_stream_stale_reply_emits_superseded() -> None:
 
 def test_delivery_service_stream_stale_reply_emits_superseded() -> None:
     asyncio.run(_exercise_delivery_stream_stale_reply_emits_superseded())
+
+
+async def _exercise_delivery_preserves_multimodal_blocks() -> None:
+    bus = PriorityPubSubBus()
+    transport = TransportBus()
+    service = DeliveryService(bus=bus, transport=transport)
+
+    service.register()
+
+    await bus.publish(
+        build_envelope(
+            event_type=EventType.OUTPUT_INLINE_READY,
+            source="safety",
+            target="broadcast",
+            session_id="sess_media",
+            turn_id="turn_media",
+            payload=ReplyReadyPayload(
+                reply=ReplyDraft(
+                    reply_id="reply_media",
+                    kind="answer",
+                    content_blocks=[
+                        ContentBlock(type="text", text="看这个"),
+                        ContentBlock(type="image", path="/tmp/example.png", mime_type="image/png"),
+                        ContentBlock(type="link", url="https://example.com/reference"),
+                    ],
+                ),
+                origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_media"),
+            ),
+        )
+    )
+    await bus.drain()
+
+    outbound = await transport.consume_outbound()
+    assert outbound.content == "看这个"
+    assert outbound.media == ["/tmp/example.png"]
+    assert outbound.content_blocks[0]["type"] == "text"
+    assert outbound.content_blocks[1]["path"] == "/tmp/example.png"
+    assert outbound.content_blocks[2]["url"] == "https://example.com/reference"
+
+
+def test_delivery_service_preserves_multimodal_blocks() -> None:
+    asyncio.run(_exercise_delivery_preserves_multimodal_blocks())

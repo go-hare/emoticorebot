@@ -29,7 +29,7 @@ PRIORITY_BY_EVENT_TYPE: dict[str, EventPriority] = {
     EventType.LEFT_EVENT_FOLLOWUP_READY: EventPriority.P1,
     EventType.RIGHT_COMMAND_JOB_REQUESTED: EventPriority.P1,
     EventType.RIGHT_EVENT_JOB_ACCEPTED: EventPriority.P2,
-    EventType.RIGHT_EVENT_JOB_CLARIFY: EventPriority.P2,
+    EventType.RIGHT_EVENT_PROGRESS: EventPriority.P2,
     EventType.RIGHT_EVENT_JOB_REJECTED: EventPriority.P2,
     EventType.RIGHT_EVENT_RESULT_READY: EventPriority.P2,
     EventType.TASK_CREATE: EventPriority.P1,

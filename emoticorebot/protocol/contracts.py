@@ -15,6 +15,7 @@ TaskCommandType = Literal["create", "resume", "cancel"]
 TaskEventType = Literal["update", "summary", "ask", "end"]
 RightBrainStrategy = Literal["skip", "sync", "async"]
 RightBrainJobAction = Literal["create_task", "resume_task", "cancel_task"]
+RightBrainDecision = Literal["accept", "answer_only", "reject"]
 
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "InputKind",
     "InputMode",
     "ReplyDeliveryMode",
+    "RightBrainDecision",
     "RightBrainJobAction",
     "RightBrainStrategy",
     "SessionMode",

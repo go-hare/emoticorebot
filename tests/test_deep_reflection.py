@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 
 from emoticorebot.agent.cognitive import CognitiveEvent
 from emoticorebot.agent.reflection.deep import DeepReflectionService
+from emoticorebot.agent.reflection.memory_candidates import build_skill_hint_candidate
 from emoticorebot.config.schema import MemoryConfig, MemoryVectorConfig
 from emoticorebot.memory.crystallizer import SkillMaterializer
 from emoticorebot.memory import MemoryStore
@@ -42,45 +43,39 @@ def test_cognitive_event_recent_prefers_latest_timestamp() -> None:
         assert rows[0]["id"] == "evt_new"
 
 
-def test_deep_reflection_normalize_skill_hints_uses_skill_hint_type() -> None:
-    records = DeepReflectionService._normalize_skill_hints(
-        [
-            {
-                "summary": "复杂任务优先走最终结果式执行",
-                "content": "对于复杂任务，优先让 task 在单次执行中收敛到最终结果。",
-                "trigger": "需要多步执行或工具组合时",
-                "hint": "减少中间汇报，优先给最终结果。",
-                "skill_name": "final-result-execution",
-            }
-        ]
+def test_build_skill_hint_candidate_uses_formal_execution_schema() -> None:
+    record = build_skill_hint_candidate(
+        summary="复杂任务优先走最终结果式执行",
+        detail="对于复杂任务，优先让 task 在单次执行中收敛到最终结果。",
+        trigger="需要多步执行或工具组合时",
+        hint="减少中间汇报，优先给最终结果。",
+        skill_name="final-result-execution",
     )
 
-    assert len(records) == 1
-    assert records[0]["type"] == "skill_hint"
-    assert records[0]["payload"]["skill_name"] == "final-result-execution"
+    assert record["memory_type"] == "execution"
+    assert record["metadata"]["subtype"] == "skill_hint"
+    assert record["metadata"]["skill_name"] == "final-result-execution"
 
 
-def test_deep_reflection_derive_skill_names_from_content_when_missing() -> None:
-    records = DeepReflectionService._normalize_skill_hints(
-        [
-            {
-                "summary": "处理代码重构时优先先写测试",
-                "content": "先补测试再改代码",
-                "trigger": "代码重构",
-                "hint": "先写测试",
-            },
-            {
-                "summary": "陪伴对话里多用选项题收敛",
-                "content": "给用户2到3个选项收敛需求",
-                "trigger": "陪伴对话",
-                "hint": "给选项题",
-            },
-        ]
+def test_build_skill_hint_candidate_derives_skill_name_when_missing() -> None:
+    first = build_skill_hint_candidate(
+        summary="处理代码重构时优先先写测试",
+        detail="先补测试再改代码",
+        trigger="代码重构",
+        hint="先写测试",
+        skill_name="",
+    )
+    second = build_skill_hint_candidate(
+        summary="陪伴对话里多用选项题收敛",
+        detail="给用户2到3个选项收敛需求",
+        trigger="陪伴对话",
+        hint="给选项题",
+        skill_name="",
     )
 
-    assert len(records) == 2
-    assert records[0]["payload"]["skill_name"] != records[1]["payload"]["skill_name"]
-    assert all(record["payload"]["skill_name"] != "unnamed-skill" for record in records)
+    assert first["metadata"]["skill_name"] != second["metadata"]["skill_name"]
+    assert first["metadata"]["skill_name"] != ""
+    assert second["metadata"]["skill_name"] != ""
 
 
 def test_deep_reflection_event_block_includes_updates_and_state() -> None:
@@ -121,7 +116,7 @@ def test_deep_reflection_event_block_includes_updates_and_state() -> None:
     assert '"should_apply": false' in block
 
 
-def test_skill_materializer_accepts_legacy_skill_type() -> None:
+def test_skill_materializer_accepts_formal_skill_hint_records() -> None:
     with TemporaryDirectory() as tmp_dir:
         workspace = Path(tmp_dir)
         store = MemoryStore(
@@ -131,12 +126,11 @@ def test_skill_materializer_accepts_legacy_skill_type() -> None:
         store.append_many(
             [
                 {
-                    "audience": "task",
-                    "kind": "procedural",
-                    "type": "skill",
+                    "memory_type": "execution",
                     "summary": "暧昧场景用接住情绪加选项题推进对话",
-                    "content": "先接住情绪，再给2到3个互斥选项，让用户低成本选择后续互动方式。",
-                    "payload": {
+                    "detail": "先接住情绪，再给2到3个互斥选项，让用户低成本选择后续互动方式。",
+                    "metadata": {
+                        "subtype": "skill_hint",
                         "skill_id": "skill_affection_choices",
                         "skill_name": "affection-acknowledge-and-choices",
                         "trigger": "用户表达夸赞或好感时",
@@ -144,12 +138,11 @@ def test_skill_materializer_accepts_legacy_skill_type() -> None:
                     },
                 },
                 {
-                    "audience": "task",
-                    "kind": "procedural",
-                    "type": "skill_hint",
+                    "memory_type": "execution",
                     "summary": "用有限选项收敛暧昧/陪伴需求",
-                    "content": "当用户给出夸赞或模糊陪伴诉求时，用2到4个选项快速收敛需求和语气。",
-                    "payload": {
+                    "detail": "当用户给出夸赞或模糊陪伴诉求时，用2到4个选项快速收敛需求和语气。",
+                    "metadata": {
+                        "subtype": "skill_hint",
                         "skill_id": "skill_choice_based_affective_clarification",
                         "skill_name": "choice-based-affective-clarification",
                         "trigger": "用户表达情绪需求但不够具体时",

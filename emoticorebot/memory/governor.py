@@ -225,11 +225,12 @@ class MemoryGovernor:
                 continue
 
             if signal.event_type == EventType.REFLECT_LIGHT:
-                if pending.delivery is None:
+                delivery = pending.delivery if self._light_signal_requires_delivery(signal) else None
+                if self._light_signal_requires_delivery(signal) and delivery is None:
                     remaining.append(signal)
                     continue
                 self._remember_trigger(signal.payload.trigger_id)
-                await self._apply_turn_reflection(signal, pending.delivery)
+                await self._apply_turn_reflection(signal, delivery)
             elif signal.event_type == EventType.REFLECT_DEEP:
                 self._remember_trigger(signal.payload.trigger_id)
                 warm_limit = self._deep_warm_limit(signal)
@@ -252,7 +253,7 @@ class MemoryGovernor:
     async def _apply_turn_reflection(
         self,
         signal: BusEnvelope[ReflectSignalPayload],
-        delivery: BusEnvelope[RepliedPayload],
+        delivery: BusEnvelope[RepliedPayload] | None,
     ) -> None:
         proposal = await self._reflection.propose_turn(signal=signal, delivery=delivery)
         if proposal is None:
@@ -408,9 +409,10 @@ class MemoryGovernor:
         metadata: dict[str, Any],
     ) -> None:
         for record in records:
-            memory_id = str(record.get("id", "") or "").strip()
+            memory_id = str(record.get("memory_id", "") or "").strip()
             if not memory_id:
                 continue
+            metadata_payload = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
             await self._bus.publish(
                 build_envelope(
                     event_type=EventType.MEMORY_WRITE_COMMITTED,
@@ -422,11 +424,15 @@ class MemoryGovernor:
                     correlation_id=signal.correlation_id or signal.task_id or signal.turn_id,
                     causation_id=signal.event_id,
                     payload=MemoryWriteCommittedPayload(
-                        request_id=str(record.get("payload", {}).get("request_id", "") or record.get("id", "") or _new_id("memreq")),
+                        request_id=str(metadata_payload.get("request_id", "") or memory_id or _new_id("memreq")),
                         memory_id=memory_id,
                         memory_type=self._record_memory_type(record),
                         committed_at=_utc_now(),
-                        metadata={**metadata, "record_type": str(record.get("type", "") or "")},
+                        metadata={
+                            **metadata,
+                            "record_type": str(record.get("memory_type", "") or ""),
+                            "record_subtype": str(metadata_payload.get("subtype", "") or ""),
+                        },
                     ),
                 )
             )
@@ -490,56 +496,46 @@ class MemoryGovernor:
 
     def _record_from_write_request(self, event: BusEnvelope[MemoryWriteRequestPayload]) -> dict[str, Any]:
         payload = event.payload
-        audience, kind, record_type = self._memory_record_shape(payload.memory_type)
+        memory_type, subtype = self._memory_record_shape(payload.memory_type)
         return {
-            "id": f"mem_{payload.request_id}",
-            "audience": audience,
-            "kind": kind,
-            "type": record_type,
+            "memory_id": f"mem_{payload.request_id}",
+            "memory_type": memory_type,
+            "session_id": event.session_id or self._SYSTEM_SESSION_ID,
             "summary": payload.summary or payload.content or "",
-            "content": payload.content or payload.summary or "",
+            "detail": payload.content or payload.summary or "",
             "confidence": payload.confidence or 0.8,
             "stability": 0.9 if payload.memory_type in {"persona", "user_model"} else 0.65,
-            "source": {
-                "session_id": event.session_id or self._SYSTEM_SESSION_ID,
-                "turn_id": event.turn_id or "",
-                "event_ids": self._context_ids_for(event),
-                "producer": payload.source_component or event.source,
-                "tool_names": [],
-            },
-            "links": {
-                "related_ids": [],
-                "evidence_ids": list(payload.evidence_event_ids),
-                "entity_ids": [],
-                "skill_ids": [],
-                "supersedes": [],
-                "invalidates": [],
-            },
-            "payload": {"request_id": payload.request_id, **payload.metadata},
-            "metadata": dict(payload.metadata),
+            "source_module": payload.source_component or event.source,
+            "source_event_ids": [
+                *self._context_ids_for(event),
+                *[item for item in payload.evidence_event_ids if item not in self._context_ids_for(event)],
+            ],
+            "metadata": {"request_id": payload.request_id, "subtype": subtype, **payload.metadata},
         }
 
     @staticmethod
-    def _memory_record_shape(memory_type: str) -> tuple[str, str, str]:
+    def _memory_record_shape(memory_type: str) -> tuple[str, str]:
         mapping = {
-            "persona": ("brain", "durable", "persona"),
-            "user_model": ("brain", "durable", "user"),
-            "episodic": ("shared", "episodic", "turn_insight"),
-            "task_experience": ("task", "procedural", "workflow"),
-            "tool_experience": ("task", "procedural", "tool_experience"),
+            "persona": ("reflection", "persona"),
+            "user_model": ("relationship", "user_model"),
+            "episodic": ("reflection", "turn_insight"),
+            "task_experience": ("execution", "workflow"),
+            "tool_experience": ("execution", "tool_experience"),
         }
-        return mapping.get(memory_type, ("shared", "episodic", "turn_insight"))
+        return mapping.get(memory_type, ("fact", "generic"))
 
     @staticmethod
     def _record_memory_type(record: Mapping[str, Any]) -> str:
-        record_type = str(record.get("type", "") or "").strip()
-        if record_type == "persona":
+        memory_type = str(record.get("memory_type", "") or "").strip()
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+        record_subtype = str(metadata.get("subtype", "") or "").strip()
+        if record_subtype == "persona":
             return "persona"
-        if record_type in {"user", "preference"}:
+        if memory_type == "relationship":
             return "user_model"
-        if record_type == "tool_experience":
+        if record_subtype == "tool_experience":
             return "tool_experience"
-        if str(record.get("audience", "") or "") == "task" or str(record.get("kind", "") or "") == "procedural":
+        if memory_type == "execution":
             return "task_experience"
         return "episodic"
 
@@ -603,6 +599,13 @@ class MemoryGovernor:
             return max(int(metadata.get("warm_limit", 15) or 15), 1)
         except (TypeError, ValueError):
             return 15
+
+    @staticmethod
+    def _light_signal_requires_delivery(signal: BusEnvelope[ReflectSignalPayload]) -> bool:
+        metadata = dict(signal.payload.metadata or {})
+        if "await_delivery" in metadata:
+            return bool(metadata.get("await_delivery"))
+        return str(signal.source or "").strip() == "brain"
 
     @staticmethod
     def _governance_metadata(result: GovernedWriteResult, *, scope: str, action: str) -> dict[str, Any]:

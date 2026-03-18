@@ -1,4 +1,4 @@
-"""Reply command builders for the executive brain."""
+"""Builders for output-layer reply events."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
-class ReplyBuilder:
-    """Creates output inline/push/stream envelopes with stable protocol fields."""
+class OutputEventBuilder:
+    """Creates output events with stable delivery metadata."""
 
     def build(
         self,
@@ -31,11 +31,17 @@ class ReplyBuilder:
         kind: ReplyKind = "answer",
         safe_fallback: bool = False,
         reply_id: str | None = None,
+        delivery_mode: str = "inline",
+        stream_id: str | None = None,
+        stream_state: str | None = None,
+        stream_index: int | None = None,
         reply_metadata: dict[str, Any] | None = None,
+        channel_override: str | None = None,
+        chat_id_override: str | None = None,
     ) -> BusEnvelope[ReplyReadyPayload]:
         metadata = dict(reply_metadata or {})
-        event_type = self._event_type(metadata)
-        delivery_mode = self._delivery_mode(event_type=event_type, metadata=metadata)
+        event_type = self._event_type(delivery_mode=delivery_mode, stream_state=stream_state)
+        resolved_delivery_mode = self._delivery_mode(event_type=event_type, delivery_mode=delivery_mode)
         reply = ReplyDraft(
             reply_id=reply_id or _new_id("reply"),
             kind=kind,
@@ -46,7 +52,7 @@ class ReplyBuilder:
         )
         return build_envelope(
             event_type=event_type,
-            source="brain",
+            source="output_runtime",
             target="broadcast",
             session_id=session_id,
             turn_id=turn_id,
@@ -58,7 +64,12 @@ class ReplyBuilder:
                 related_task_id=related_task_id,
                 origin_message=origin_message,
                 related_event_id=causation_id,
-                delivery_mode=delivery_mode,
+                channel_override=channel_override,
+                chat_id_override=chat_id_override,
+                delivery_mode=resolved_delivery_mode,
+                stream_id=stream_id,
+                stream_state=stream_state,
+                stream_index=stream_index,
             ),
         )
 
@@ -69,29 +80,29 @@ class ReplyBuilder:
         return self.build(kind="ask_user", **kwargs)
 
     @staticmethod
-    def _event_type(metadata: dict[str, Any]) -> str:
-        stream_state = str(metadata.get("stream_state", "") or "").strip()
-        if stream_state in {"open"}:
+    def _event_type(*, delivery_mode: str, stream_state: str | None) -> str:
+        stream_state = str(stream_state or "").strip()
+        if stream_state == "open":
             return EventType.OUTPUT_STREAM_OPEN
-        if stream_state in {"delta"}:
+        if stream_state == "delta":
             return EventType.OUTPUT_STREAM_DELTA
-        if stream_state in {"close", "final"}:
+        if stream_state in {"close", "superseded"}:
             return EventType.OUTPUT_STREAM_CLOSE
-        delivery_mode = str(metadata.get("delivery_mode", "") or "").strip()
-        if delivery_mode == "push" or str(metadata.get("front_origin", "") or "").strip() == "task":
+        delivery_mode = str(delivery_mode or "").strip()
+        if delivery_mode == "push":
             return EventType.OUTPUT_PUSH_READY
         return EventType.OUTPUT_INLINE_READY
 
     @staticmethod
-    def _delivery_mode(*, event_type: str, metadata: dict[str, Any]) -> str:
-        delivery_mode = str(metadata.get("delivery_mode", "") or "").strip()
-        if delivery_mode in {"inline", "push", "stream"}:
-            return delivery_mode
-        if event_type == EventType.OUTPUT_PUSH_READY:
-            return "push"
+    def _delivery_mode(*, event_type: str, delivery_mode: str) -> str:
+        delivery_mode = str(delivery_mode or "").strip()
         if event_type in {EventType.OUTPUT_STREAM_OPEN, EventType.OUTPUT_STREAM_DELTA, EventType.OUTPUT_STREAM_CLOSE}:
             return "stream"
+        if event_type == EventType.OUTPUT_PUSH_READY:
+            return "push"
+        if delivery_mode in {"inline", "push", "stream"}:
+            return delivery_mode
         return "inline"
 
 
-__all__ = ["ReplyBuilder"]
+__all__ = ["OutputEventBuilder"]

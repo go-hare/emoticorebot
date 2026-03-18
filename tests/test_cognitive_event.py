@@ -241,6 +241,73 @@ def test_fallback_state_update_uses_current_context_values() -> None:
     }
 
 
+def test_turn_reflection_memory_candidates_use_formal_long_term_schema() -> None:
+    with TemporaryDirectory() as tmp_dir:
+        service = TurnReflectionService(EmotionStateManager(Path(tmp_dir)), llm=None)
+
+        reflection = service._normalize_turn_reflection(
+            {
+                "summary": "本轮完成一次执行。",
+                "problems": [],
+                "resolution": "执行结束。",
+                "outcome": "success",
+                "next_hint": "继续推进。",
+                "user_updates": [],
+                "soul_updates": [],
+                "state_update": {
+                    "should_apply": False,
+                    "confidence": 0.5,
+                    "reason": "状态稳定。",
+                    "pad_delta": {"pleasure": 0.2, "arousal": 0.1, "dominance": 0.0},
+                    "drives_delta": {"social": 60.0, "energy": 70.0},
+                },
+                "memory_candidates": [
+                    {
+                        "memory_type": "reflection",
+                        "summary": "本轮执行完成",
+                        "detail": "执行链路完整收敛并返回结果。",
+                        "confidence": 0.81,
+                        "stability": 0.45,
+                        "tags": ["execution"],
+                        "metadata": {"subtype": "turn_insight", "importance": 6},
+                    }
+                ],
+                "execution_review": {
+                    "attempt_count": 1,
+                    "effectiveness": "high",
+                    "main_failure_reason": "",
+                    "missing_inputs": [],
+                    "next_execution_hint": "",
+                },
+            },
+            user_input="帮我整理一下",
+            output="已经整理好了。",
+            emotion={
+                "emotion_label": "平静",
+                "pad": {"pleasure": 0.2, "arousal": 0.1, "dominance": 0.0},
+                "drives": {"social": 60.0, "energy": 70.0},
+            },
+            execution={
+                "invoked": True,
+                "status": "done",
+                "summary": "已完成",
+                "missing": [],
+                "confidence": 0.9,
+                "attempt_count": 1,
+                "failure_reason": "",
+                "recommended_action": "",
+            },
+        )
+
+    candidate = reflection["memory_candidates"][0]
+    assert candidate["memory_type"] == "reflection"
+    assert candidate["detail"] == "执行链路完整收敛并返回结果。"
+    assert candidate["metadata"]["subtype"] == "turn_insight"
+    assert "type" not in candidate
+    assert "content" not in candidate
+    assert "payload" not in candidate
+
+
 def test_emotion_state_manager_applies_reflection_state_as_absolute_values() -> None:
     with TemporaryDirectory() as tmp_dir:
         manager = EmotionStateManager(Path(tmp_dir))

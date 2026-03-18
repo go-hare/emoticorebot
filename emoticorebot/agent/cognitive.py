@@ -10,7 +10,7 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from emoticorebot.types import ReflectionInput
 
-from emoticorebot.utils.task_projection import project_task_for_memory
+from emoticorebot.utils.right_brain_projection import project_task_for_memory
 
 
 @dataclass

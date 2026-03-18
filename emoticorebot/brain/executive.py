@@ -11,29 +11,25 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.brain.decision_packet import BrainControlPacket, normalize_brain_packet, parse_raw_brain_json
-from emoticorebot.protocol.commands import LeftReplyRequestPayload
+from emoticorebot.protocol.commands import FollowupContextPayload, LeftReplyRequestPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.events import (
+    LeftFollowupReadyPayload,
     LeftReplyReadyPayload,
-    ReplyBlockedPayload,
-    ReplyReadyPayload,
-    TaskAskPayload,
-    TaskEndPayload,
+    LeftStreamDeltaPayload,
     TurnInputPayload,
 )
 from emoticorebot.protocol.memory_models import ReflectSignalPayload
 from emoticorebot.protocol.task_models import MessageRef, ProtocolModel
 from emoticorebot.protocol.topics import EventType
-from emoticorebot.runtime.task_store import TaskStore
-from emoticorebot.safety.guard import SafetyGuard
-from emoticorebot.utils.task_projection import (
+from emoticorebot.right.store import RightBrainStore
+from emoticorebot.utils.right_brain_projection import (
     normalize_task_state,
     project_task_from_runtime_snapshot,
     project_task_from_session_view,
 )
 
 from .dialogue_policy import DialoguePolicy
-from .reply_builder import ReplyBuilder
 
 _USER_TAG = "####user####"
 _TASK_TAG = "####task####"
@@ -116,13 +112,11 @@ class ExecutiveBrain:
         self,
         *,
         bus: PriorityPubSubBus,
-        task_store: TaskStore,
+        task_store: RightBrainStore,
         brain_llm: Any | None = None,
         context_builder: Any | None = None,
         session_runtime: Any | None = None,
         dialogue: DialoguePolicy | None = None,
-        replies: ReplyBuilder | None = None,
-        reply_guard: SafetyGuard | None = None,
     ) -> None:
         self._bus = bus
         self._tasks = task_store
@@ -130,10 +124,7 @@ class ExecutiveBrain:
         self._context_builder = context_builder
         self._session_runtime = session_runtime
         self._dialogue = dialogue or DialoguePolicy()
-        self._replies = replies or ReplyBuilder()
-        self._reply_guard = reply_guard or SafetyGuard()
         self._session_origins: dict[str, MessageRef] = {}
-        self._cancel_replied_task_ids: set[str] = set()
         self._tasks_in_flight: set[asyncio.Task[None]] = set()
         self._active_user_turns: dict[str, asyncio.Task[None]] = {}
 
@@ -150,16 +141,18 @@ class ExecutiveBrain:
         if event.event_type != EventType.LEFT_COMMAND_REPLY_REQUESTED:
             return
         command_event = cast(BusEnvelope[LeftReplyRequestPayload], event)
+        if command_event.payload.followup_context is not None:
+            self._spawn_followup_turn(command_event.session_id or "", command_event)
+            return
         turn_event = self._turn_event_from_left_command(command_event)
         session_id = turn_event.session_id or ""
-        if self._is_task_origin_input(turn_event):
-            self._spawn_task_origin_turn(session_id, turn_event)
-            return
         self._cancel_active_user_turn(session_id)
         self._spawn_user_turn(session_id, turn_event)
 
     @staticmethod
     def _turn_event_from_left_command(event: BusEnvelope[LeftReplyRequestPayload]) -> BusEnvelope[TurnInputPayload]:
+        if event.payload.turn_input is None:
+            raise RuntimeError("left turn requests require turn_input")
         return build_envelope(
             event_type=EventType.INPUT_TURN_RECEIVED,
             source=event.source,
@@ -179,8 +172,8 @@ class ExecutiveBrain:
         task.add_done_callback(self._tasks_in_flight.discard)
         task.add_done_callback(lambda finished, key=session_id: self._discard_user_turn(key, finished))
 
-    def _spawn_task_origin_turn(self, session_id: str, event: BusEnvelope[TurnInputPayload]) -> None:
-        task = asyncio.create_task(self._run_task_origin_turn(event), name=f"brain-task-turn:{session_id or 'default'}")
+    def _spawn_followup_turn(self, session_id: str, event: BusEnvelope[LeftReplyRequestPayload]) -> None:
+        task = asyncio.create_task(self._run_followup_turn(event), name=f"brain-followup-turn:{session_id or 'default'}")
         self._tasks_in_flight.add(task)
         task.add_done_callback(self._tasks_in_flight.discard)
         task.add_done_callback(self._swallow_background_turn_result)
@@ -220,6 +213,7 @@ class ExecutiveBrain:
         stream_id = f"stream_{event.turn_id or uuid4().hex[:12]}"
         stream_counter = 0
         stream_enabled = self._can_stream_user_reply(origin)
+        explicit_sync_hint = str(payload.metadata.get("right_brain_strategy", "") or "").strip() == "sync"
 
         async def _publish_stream_chunk(text: str) -> None:
             nonlocal stream_counter
@@ -228,32 +222,24 @@ class ExecutiveBrain:
                 return
             stream_state = "open" if stream_counter == 0 else "delta"
             stream_counter += 1
-            await self._publish_guarded_reply(
-                self._replies.reply(
-                    session_id=session_id,
-                    turn_id=event.turn_id,
-                    text=chunk,
-                    origin_message=origin,
-                    causation_id=event.event_id,
-                    correlation_id=event.turn_id,
-                    kind="answer",
-                    reply_id=f"{stream_id}_{stream_counter}",
-                    reply_metadata=self._reply_metadata(
-                        extra={
-                            "stream_id": stream_id,
-                            "stream_state": stream_state,
-                            "stream_index": stream_counter,
-                        },
-                        suppress_delivery=suppress_delivery,
-                    ),
-                )
+            await self._publish_left_stream_delta_ready(
+                session_id=session_id,
+                turn_id=event.turn_id,
+                causation_id=event.event_id,
+                correlation_id=event.turn_id,
+                stream_id=stream_id,
+                delta_text=chunk,
+                stream_state=stream_state,
+                stream_index=stream_counter,
+                origin_message=origin,
+                metadata=self._reply_metadata(suppress_delivery=suppress_delivery),
             )
 
         packet = await self._decide_user_turn(
             event=event,
             user_text=user_text,
             tasks=tasks,
-            on_user_stream=_publish_stream_chunk if stream_enabled else None,
+            on_user_stream=_publish_stream_chunk if stream_enabled and not explicit_sync_hint else None,
         )
         task_action = str(packet.get("task_action", "none") or "none").strip()
         reply_text = str(packet.get("final_message", "") or "").strip()
@@ -264,13 +250,7 @@ class ExecutiveBrain:
             )
         reflection_task = None
         final_reply_metadata = (
-            self._reply_metadata(
-                extra={
-                    "stream_id": stream_id,
-                    "stream_state": "close",
-                },
-                suppress_delivery=suppress_delivery,
-            )
+            self._reply_metadata(suppress_delivery=suppress_delivery)
             if stream_enabled and stream_counter > 0
             else self._reply_metadata(suppress_delivery=suppress_delivery)
         )
@@ -279,12 +259,14 @@ class ExecutiveBrain:
         task_id = str(task.get("task_id", "") or "").strip()
         if task_action in {"resume_task", "cancel_task"} and task_id:
             reflection_task = self._tasks.get(task_id)
-        if task_action == "cancel_task" and task_id:
-            self._cancel_replied_task_ids.add(task_id)
 
         right_brain_strategy, invoke_right_brain = self._right_brain_plan(
             payload=payload,
             task_action=task_action,
+        )
+        sync_reply_deferred = invoke_right_brain and right_brain_strategy == "sync"
+        reply_kind = "status" if task_action in {"create_task", "resume_task", "cancel_task"} else (
+            "ask_user" if packet.get("final_decision") == "ask_user" else "answer"
         )
         right_brain_request = self._build_right_brain_request(
             event=event,
@@ -297,34 +279,21 @@ class ExecutiveBrain:
         await self._publish_left_reply_ready(
             event=event,
             reply_text=reply_text,
-            reply_kind=(
-                "status"
-                if task_action in {"create_task", "resume_task", "cancel_task"}
-                else ("ask_user" if packet.get("final_decision") == "ask_user" else "answer")
-            ),
+            reply_kind=reply_kind,
+            origin_message=origin,
             right_brain_strategy=right_brain_strategy,
             invoke_right_brain=invoke_right_brain,
             right_brain_request=right_brain_request,
             related_task_id=task_id or None,
-            metadata={"task_action": task_action, "task_reason": str(packet.get("task_reason", "") or "").strip()},
-        )
-
-        suppress_task_reply = suppress_delivery or self._task_suppress_delivery(reflection_task)
-        reply_kind = "status" if task_action in {"create_task", "resume_task", "cancel_task"} else (
-            "ask_user" if packet.get("final_decision") == "ask_user" else "answer"
-        )
-        await self._publish_user_turn_reply(
-            session_id=session_id,
-            turn_id=event.turn_id,
-            origin_message=origin,
-            text=reply_text,
-            related_task_id=task_id or None,
-            causation_id=event.event_id,
-            correlation_id=task_id or event.turn_id,
-            kind=reply_kind,
-            reply_metadata=self._reply_metadata(
-                extra=final_reply_metadata,
-                suppress_delivery=suppress_task_reply,
+            stream_id=stream_id if stream_enabled and stream_counter > 0 else None,
+            stream_state="close" if stream_enabled and stream_counter > 0 else None,
+            metadata=self._merge_reply_metadata(
+                final_reply_metadata,
+                {
+                    "task_action": task_action,
+                    "task_reason": str(packet.get("task_reason", "") or "").strip(),
+                },
+                {"suppress_output": True} if sync_reply_deferred else None,
             ),
         )
 
@@ -341,84 +310,26 @@ class ExecutiveBrain:
             ),
         )
 
-    async def _run_task_origin_turn(self, event: BusEnvelope[TurnInputPayload]) -> None:
-        payload = event.payload
-        self._session_origins[event.session_id or ""] = payload.message
-        metadata = dict(payload.metadata or {})
-        task_event_type = str(metadata.get("task_event_type", "") or "").strip()
-        if task_event_type == str(EventType.TASK_ASK):
-            task_event = self._build_task_ask_event_from_input(event)
-            if task_event is not None:
-                await self._on_task_ask(task_event)
+    async def _run_followup_turn(self, event: BusEnvelope[LeftReplyRequestPayload]) -> None:
+        followup = event.payload.followup_context
+        if followup is None:
             return
-        if task_event_type == str(EventType.TASK_END):
-            task_event = self._build_task_end_event_from_input(event)
-            if task_event is not None:
-                await self._on_task_end(task_event)
+        task = self._tasks.get(event.task_id or "")
+        session_id = event.session_id or ""
+        origin = self._origin_for(session_id, task)
+        if origin is not None:
+            self._session_origins[session_id] = origin
+        reply_text, reply_kind = self._followup_reply(task=task, followup=followup)
+        if not reply_text:
             return
-
-    async def _on_task_ask(self, event: BusEnvelope[TaskAskPayload]) -> None:
-        task = self._tasks.get(event.payload.task_id)
-        reply_text = self._dialogue.task_ask(task, event.payload)
-        await self._publish_guarded_reply(
-            self._replies.ask_user(
-                session_id=event.session_id or "",
-                turn_id=event.turn_id,
-                text=reply_text,
-                origin_message=self._origin_for(event.session_id or "", task),
-                related_task_id=event.payload.task_id,
-                causation_id=event.event_id,
-                correlation_id=event.correlation_id or event.payload.task_id,
-                reply_metadata=self._reply_metadata(
-                    extra=self._task_origin_reply_metadata(
-                        event.event_id,
-                        task_event_type=str(EventType.TASK_ASK),
-                    ),
-                    task=task,
-                ),
-            )
-        )
-        metadata = self._task_event_reflection_metadata(
+        await self._publish_left_followup_ready(
             event=event,
-            task=task,
+            followup=followup,
             reply_text=reply_text,
-            execution=self._task_ask_execution(event.payload, reply_text=reply_text),
-        )
-        await self._publish_reflection(event, reason="task_need_input", metadata=metadata)
-
-    async def _on_task_end(self, event: BusEnvelope[TaskEndPayload]) -> None:
-        if event.payload.task_id in self._cancel_replied_task_ids:
-            self._cancel_replied_task_ids.discard(event.payload.task_id)
-            return
-        task = self._tasks.get(event.payload.task_id)
-        reply_text = self._dialogue.task_end(task, event.payload)
-        await self._publish_guarded_reply(
-            self._replies.reply(
-                session_id=event.session_id or "",
-                turn_id=event.turn_id,
-                text=reply_text,
-                origin_message=self._origin_for(event.session_id or "", task),
-                related_task_id=event.payload.task_id,
-                causation_id=event.event_id,
-                correlation_id=event.correlation_id or event.payload.task_id,
-                kind="status",
-                reply_metadata=self._reply_metadata(
-                    extra=self._task_origin_reply_metadata(
-                        event.event_id,
-                        task_event_type=str(EventType.TASK_END),
-                    ),
-                    task=task,
-                ),
-            )
-        )
-        metadata = self._task_event_reflection_metadata(
-            event=event,
+            reply_kind=reply_kind,
+            origin_message=origin,
             task=task,
-            reply_text=reply_text,
-            execution=self._task_end_execution(event.payload, task=task, reply_text=reply_text),
         )
-        reason = self._task_end_reason(event.payload)
-        await self._publish_reflection(event, reason=reason, metadata=metadata)
 
     async def _publish_reflection(
         self,
@@ -460,11 +371,6 @@ class ExecutiveBrain:
             return payload.input_slots.user
         parts = [block.text for block in payload.content_blocks if block.type == "text" and block.text]
         return "\n".join(parts).strip()
-
-    @staticmethod
-    def _is_task_origin_input(event: BusEnvelope[TurnInputPayload]) -> bool:
-        metadata = getattr(event.payload, "metadata", {})
-        return isinstance(metadata, dict) and str(metadata.get("front_origin", "") or "").strip() == "task"
 
     @staticmethod
     def _review_policy(payload: TurnInputPayload) -> str | None:
@@ -510,6 +416,10 @@ class ExecutiveBrain:
                 "history_context": str(task.get("history_context", "") or "").strip()
                 or str(payload.metadata.get("history_context", "") or "").strip()
                 or None,
+                "recent_turns": list(payload.metadata.get("recent_turns", []) or []),
+                "short_term_memory": list(payload.metadata.get("short_term_memory", []) or []),
+                "long_term_memory": list(payload.metadata.get("long_term_memory", []) or []),
+                "tool_context": dict(payload.metadata.get("tool_context", {}) or {}),
                 "memory_refs": self._merge_string_lists(
                     self._string_list(task.get("memory_refs")),
                     self._task_memory_refs(
@@ -550,6 +460,46 @@ class ExecutiveBrain:
             self._delivery_flag(
                 suppress_delivery=suppress_delivery or self._task_suppress_delivery(task),
             ),
+        )
+
+    def _followup_reply(self, *, task: object | None, followup: FollowupContextPayload) -> tuple[str, str]:
+        runtime_task = task if task is None or hasattr(task, "task_id") else None
+        if followup.source_event == str(EventType.RIGHT_EVENT_JOB_ACCEPTED):
+            return (
+                self._dialogue.right_brain_accepted(
+                    runtime_task,
+                    reason=str(followup.reason or "").strip() or None,
+                ),
+                "status",
+            )
+        if followup.source_event == str(EventType.RIGHT_EVENT_PROGRESS):
+            return (
+                self._dialogue.right_brain_progress(
+                    runtime_task,
+                    summary=str(followup.summary or "").strip() or "右脑正在继续处理。",
+                    next_step=str(followup.next_step or "").strip() or None,
+                ),
+                "status",
+            )
+        if followup.source_event == str(EventType.RIGHT_EVENT_JOB_REJECTED):
+            return (
+                self._dialogue.right_brain_rejected(
+                    runtime_task,
+                    reason=str(followup.reason or "").strip() or "当前无法处理。",
+                ),
+                "status",
+            )
+        outcome = str(followup.metadata.get("result", "") or "").strip() or None
+        reply_kind = "answer" if followup.decision == "answer_only" else "status"
+        return (
+            self._dialogue.right_brain_result(
+                runtime_task,
+                decision=followup.decision,
+                summary=str(followup.summary or "").strip() or None,
+                result_text=str(followup.result_text or "").strip() or None,
+                outcome=outcome,
+            ),
+            reply_kind,
         )
 
     @staticmethod
@@ -615,9 +565,12 @@ class ExecutiveBrain:
             return {
                 "job_id": f"job_{uuid4().hex[:12]}",
                 "job_action": "create_task",
+                "job_kind": "execution_review",
                 "source_text": user_text,
                 "request_text": str(task.get("request", "") or "").strip() or user_text,
                 "goal": str(task.get("goal", "") or "").strip() or None,
+                "delivery_target": {"delivery_mode": "inline" if str(payload.metadata.get("right_brain_strategy", "") or "").strip() == "sync" else "push"},
+                "scores": {},
                 "context": self._task_create_context(
                     task=task,
                     payload=payload,
@@ -632,9 +585,12 @@ class ExecutiveBrain:
                 {
                     "job_id": f"job_{uuid4().hex[:12]}",
                     "job_action": "resume_task",
+                    "job_kind": "execution_review",
                     "task_id": task_id or None,
                     "source_text": user_text,
                     "request_text": user_text,
+                    "delivery_target": {"delivery_mode": "inline" if str(payload.metadata.get("right_brain_strategy", "") or "").strip() == "sync" else "push"},
+                    "scores": {},
                     "context": self._task_resume_context(task=runtime_task, user_text=user_text),
                 }
             )
@@ -644,9 +600,12 @@ class ExecutiveBrain:
             {
                 "job_id": f"job_{uuid4().hex[:12]}",
                 "job_action": "cancel_task",
+                "job_kind": "execution_review",
                 "task_id": task_id or None,
                 "source_text": user_text,
                 "request_text": reason,
+                "delivery_target": {"delivery_mode": "inline"},
+                "scores": {},
                 "context": {"reason": reason, "source_event_id": event.event_id},
             }
         )
@@ -684,8 +643,8 @@ class ExecutiveBrain:
     def _format_memory_ref(record: object) -> str:
         if not isinstance(record, dict):
             return ""
-        summary = str(record.get("summary", "") or record.get("content", "") or "").strip()
-        record_type = str(record.get("type", "") or "").strip()
+        summary = str(record.get("summary", "") or record.get("detail", "") or "").strip()
+        record_type = str(record.get("memory_type", "") or record.get("subtype", "") or "").strip()
         if not summary:
             return ""
         if record_type:
@@ -696,10 +655,10 @@ class ExecutiveBrain:
     def _format_skill_hint(record: object) -> str:
         if not isinstance(record, dict):
             return ""
-        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-        skill_name = str(payload.get("skill_name", "") or "").strip()
-        hint = str(payload.get("hint", "") or record.get("summary", "") or "").strip()
-        trigger = str(payload.get("trigger", "") or "").strip()
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        skill_name = str(metadata.get("skill_name", "") or "").strip()
+        hint = str(metadata.get("hint", "") or record.get("summary", "") or "").strip()
+        trigger = str(metadata.get("trigger", "") or "").strip()
         parts: list[str] = []
         if skill_name:
             parts.append(f"技能 `{skill_name}`")
@@ -709,7 +668,7 @@ class ExecutiveBrain:
             parts.append(hint)
         if parts:
             return " | ".join(parts)
-        return str(record.get("summary", "") or record.get("content", "") or "").strip()
+        return str(record.get("summary", "") or record.get("detail", "") or "").strip()
 
     async def _decide_user_turn(
         self,
@@ -862,23 +821,65 @@ class ExecutiveBrain:
             return "你再补充一点信息，我就继续。"
         return "收到。"
 
+    async def _publish_left_stream_delta_ready(
+        self,
+        *,
+        session_id: str,
+        turn_id: str | None,
+        causation_id: str | None,
+        correlation_id: str | None,
+        stream_id: str,
+        delta_text: str,
+        stream_state: str = "delta",
+        stream_index: int | None = None,
+        origin_message: MessageRef | None = None,
+        metadata: dict[str, Any] | None = None,
+        related_task_id: str | None = None,
+    ) -> None:
+        if not delta_text:
+            return
+        await self._bus.publish(
+            build_envelope(
+                event_type=EventType.LEFT_EVENT_STREAM_DELTA_READY,
+                source="brain",
+                target="broadcast",
+                session_id=session_id,
+                turn_id=turn_id,
+                task_id=related_task_id,
+                correlation_id=correlation_id or related_task_id or turn_id,
+                causation_id=causation_id,
+                payload=LeftStreamDeltaPayload(
+                    stream_id=stream_id,
+                    delta_text=delta_text,
+                    stream_state=stream_state if stream_state in {"open", "delta", "close", "superseded"} else "delta",
+                    stream_index=stream_index,
+                    origin_message=origin_message,
+                    metadata=dict(metadata or {}),
+                ),
+            )
+        )
+
     async def _publish_left_reply_ready(
         self,
         *,
         event: BusEnvelope[TurnInputPayload],
         reply_text: str,
         reply_kind: str,
+        origin_message: MessageRef | None,
         right_brain_strategy: str,
         invoke_right_brain: bool,
         right_brain_request: dict[str, Any],
         related_task_id: str | None,
+        stream_id: str | None = None,
+        stream_state: str | None = None,
+        stream_index: int | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         await self._bus.publish(
             build_envelope(
                 event_type=EventType.LEFT_EVENT_REPLY_READY,
                 source="brain",
-                target="session",
+                target="broadcast",
                 session_id=event.session_id,
                 turn_id=event.turn_id,
                 task_id=related_task_id or event.task_id,
@@ -888,66 +889,55 @@ class ExecutiveBrain:
                     request_id=f"left_reply_{uuid4().hex[:12]}",
                     reply_text=reply_text,
                     reply_kind=reply_kind if reply_kind in {"answer", "ask_user", "status"} else "answer",
+                    origin_message=origin_message,
                     right_brain_strategy=right_brain_strategy if right_brain_strategy in {"skip", "sync", "async"} else "skip",
                     invoke_right_brain=invoke_right_brain,
                     right_brain_request=dict(right_brain_request or {}),
                     related_task_id=related_task_id,
+                    stream_id=stream_id,
+                    stream_state=stream_state if stream_state in {"open", "delta", "close", "superseded"} else None,
+                    stream_index=stream_index,
                     metadata=dict(metadata or {}),
                 ),
             )
         )
 
-    async def _publish_user_turn_reply(
+    async def _publish_left_followup_ready(
         self,
         *,
-        session_id: str,
-        turn_id: str | None,
+        event: BusEnvelope[LeftReplyRequestPayload],
+        followup: FollowupContextPayload,
+        reply_text: str,
+        reply_kind: str,
         origin_message: MessageRef | None,
-        text: str,
-        related_task_id: str | None = None,
-        causation_id: str | None = None,
-        correlation_id: str | None = None,
-        kind: str = "answer",
-        reply_metadata: dict[str, Any] | None = None,
+        task: object | None,
     ) -> None:
-        if not text:
-            return
-        builder = self._replies.ask_user if kind == "ask_user" else self._replies.reply
-        await self._publish_guarded_reply(
-            builder(
-                session_id=session_id,
-                turn_id=turn_id,
-                text=text,
-                origin_message=origin_message,
-                related_task_id=related_task_id,
-                causation_id=causation_id,
-                correlation_id=correlation_id,
-                kind=("status" if kind == "status" else "answer") if kind != "ask_user" else "ask_user",
-                reply_metadata=reply_metadata,
-            )
-        )
-
-    async def _publish_guarded_reply(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
-        guarded = self._reply_guard.guard_reply_event(event)
-        if guarded.event is not None:
-            await self._bus.publish(guarded.event)
-            return
-        if guarded.blocked is None or event.payload.reply.safe_fallback:
-            return
-        task = self._tasks.get(event.task_id or "")
-        suppress_delivery = bool(event.payload.reply.metadata.get("suppress_delivery"))
-        await self._publish_guarded_reply(
-            self._replies.reply(
-                session_id=event.session_id or "",
+        await self._bus.publish(
+            build_envelope(
+                event_type=EventType.LEFT_EVENT_FOLLOWUP_READY,
+                source="brain",
+                target="broadcast",
+                session_id=event.session_id,
                 turn_id=event.turn_id,
-                text=self._dialogue.safe_fallback(guarded.blocked),
-                origin_message=event.payload.origin_message or self._origin_for(event.session_id or "", task),
-                related_task_id=event.payload.related_task_id,
-                causation_id=event.causation_id or event.event_id,
-                correlation_id=event.correlation_id or event.task_id or event.turn_id,
-                kind="safety_fallback",
-                safe_fallback=True,
-                reply_metadata=self._reply_metadata(suppress_delivery=suppress_delivery, task=task),
+                task_id=event.task_id,
+                correlation_id=event.task_id or event.correlation_id or followup.job_id,
+                causation_id=event.event_id,
+                payload=LeftFollowupReadyPayload(
+                    job_id=followup.job_id,
+                    source_event=followup.source_event,
+                    source_decision=followup.decision,
+                    reply_text=reply_text,
+                    reply_kind=reply_kind if reply_kind in {"answer", "ask_user", "status"} else "status",
+                    delivery_target={"delivery_mode": followup.preferred_delivery_mode},
+                    origin_message=origin_message,
+                    related_task_id=event.task_id,
+                    metadata=self._merge_reply_metadata(
+                        dict(followup.metadata or {}),
+                        {"followup_source": followup.source_event},
+                        self._delivery_flag(suppress_delivery=self._task_suppress_delivery(task)),
+                    )
+                    or {},
+                ),
             )
         )
 
@@ -969,6 +959,7 @@ class ExecutiveBrain:
     ) -> dict[str, Any]:
         origin = event.payload.message
         return {
+            "await_delivery": True,
             "reflection_input": {
                 "session_id": event.session_id or "",
                 "turn_id": event.turn_id or "",
@@ -986,19 +977,20 @@ class ExecutiveBrain:
             }
         }
 
-    def _task_event_reflection_metadata(
+    def _followup_reflection_metadata(
         self,
         *,
-        event: BusEnvelope[object],
+        event: BusEnvelope[LeftReplyRequestPayload],
+        followup: FollowupContextPayload,
         task: object,
         reply_text: str,
-        execution: dict[str, Any],
     ) -> dict[str, Any]:
         origin = self._origin_for(event.session_id or "", task) or MessageRef()
         user_input = ""
         if task is not None and getattr(task, "request", None) is not None:
             user_input = str(getattr(task, "request").request or "").strip()
         return {
+            "await_delivery": True,
             "reflection_input": {
                 "session_id": event.session_id or "",
                 "turn_id": event.turn_id or "",
@@ -1010,8 +1002,12 @@ class ExecutiveBrain:
                 "channel": origin.channel or "",
                 "chat_id": origin.chat_id or "",
                 "task": self._task_snapshot(task, session_id=event.session_id or ""),
-                "execution": execution,
-                "metadata": {"source_event_type": event.event_type, "related_task_id": event.task_id or ""},
+                "execution": self._followup_execution(followup=followup, reply_text=reply_text),
+                "metadata": {
+                    "source_event_type": followup.source_event,
+                    "decision": followup.decision,
+                    "related_task_id": event.task_id or "",
+                },
             }
         }
 
@@ -1036,49 +1032,67 @@ class ExecutiveBrain:
         }
 
     @staticmethod
-    def _task_ask_execution(payload: TaskAskPayload, *, reply_text: str) -> dict[str, Any]:
-        missing = []
-        field = str(payload.field or "").strip()
-        if field:
-            missing.append(field)
-        return {
-            "invoked": True,
-            "status": "waiting_input",
-            "summary": str(payload.question or reply_text or "").strip(),
-            "confidence": 0.0,
-            "attempt_count": 1,
-            "missing": missing,
-            "failure_reason": "",
-            "recommended_action": str(payload.why or payload.question or "").strip(),
-        }
+    def _followup_reason(followup: FollowupContextPayload) -> str:
+        if followup.source_event == str(EventType.RIGHT_EVENT_JOB_ACCEPTED):
+            return "right_brain_accepted"
+        if followup.source_event == str(EventType.RIGHT_EVENT_PROGRESS):
+            return "right_brain_progress"
+        if followup.source_event == str(EventType.RIGHT_EVENT_JOB_REJECTED):
+            return "task_rejected"
+        if followup.decision == "answer_only":
+            return "right_brain_answer_only"
+        outcome = str(followup.metadata.get("result", "") or "").strip()
+        if outcome == "cancelled":
+            return "task_cancelled"
+        if outcome == "failed":
+            return "task_failed"
+        return "task_result"
 
-    @staticmethod
-    def _task_end_reason(payload: TaskEndPayload) -> str:
-        return {
-            "success": "task_result",
-            "failed": "task_failed",
-            "cancelled": "task_cancelled",
-        }.get(payload.result, "task_end")
-
-    @staticmethod
-    def _task_end_execution(payload: TaskEndPayload, *, task: object, reply_text: str) -> dict[str, Any]:
-        confidence = getattr(getattr(task, "latest_result", None), "confidence", None)
-        if payload.result == "success":
-            return ExecutiveBrain._execution_payload(
-                status="done",
-                summary=payload.summary or reply_text,
-                confidence=confidence,
-            )
-        if payload.result == "cancelled":
-            return ExecutiveBrain._execution_payload(
+    def _followup_execution(self, *, followup: FollowupContextPayload, reply_text: str) -> dict[str, Any]:
+        if followup.source_event == str(EventType.RIGHT_EVENT_JOB_ACCEPTED):
+            return {
+                "invoked": True,
+                "status": "running",
+                "summary": str(followup.reason or reply_text or "").strip(),
+                "confidence": 1.0,
+                "attempt_count": 1,
+                "missing": [],
+                "failure_reason": "",
+                "recommended_action": "",
+            }
+        if followup.source_event == str(EventType.RIGHT_EVENT_PROGRESS):
+            return {
+                "invoked": True,
+                "status": "running",
+                "summary": str(followup.summary or reply_text or "").strip(),
+                "confidence": 1.0,
+                "attempt_count": 1,
+                "missing": [],
+                "failure_reason": "",
+                "recommended_action": str(followup.next_step or "").strip(),
+            }
+        if followup.source_event == str(EventType.RIGHT_EVENT_JOB_REJECTED):
+            return self._execution_payload(
                 status="failed",
-                summary=payload.summary or reply_text,
-                failure_reason=payload.error or "task_cancelled",
+                summary=str(followup.reason or reply_text or "").strip() or "rejected",
+                failure_reason=str(followup.reason or "rejected").strip(),
             )
-        return ExecutiveBrain._execution_payload(
-            status="failed",
-            summary=payload.summary or reply_text,
-            failure_reason=payload.error,
+        outcome = str(followup.metadata.get("result", "") or "").strip()
+        if outcome == "cancelled":
+            return self._execution_payload(
+                status="failed",
+                summary=str(followup.summary or reply_text or "").strip() or "cancelled",
+                failure_reason="task_cancelled",
+            )
+        if outcome == "failed":
+            return self._execution_payload(
+                status="failed",
+                summary=str(followup.summary or reply_text or "").strip() or "failed",
+                failure_reason=str(followup.result_text or followup.summary or "task_failed").strip(),
+            )
+        return self._execution_payload(
+            status="done",
+            summary=str(followup.summary or reply_text or "").strip() or "done",
         )
 
     def _task_snapshot(self, task: object, *, session_id: str = "") -> dict[str, Any]:
@@ -1095,60 +1109,6 @@ class ExecutiveBrain:
         return project_task_from_runtime_snapshot(
             getattr(task, "snapshot")().model_dump(exclude_none=True),
             params=params,
-        )
-
-    @staticmethod
-    def _task_origin_reply_metadata(task_event_id: str, *, task_event_type: str = "") -> dict[str, Any]:
-        metadata = {"front_origin": "task", "task_event_id": task_event_id}
-        if task_event_type:
-            metadata["task_event_type"] = task_event_type
-        return metadata
-
-    def _build_task_ask_event_from_input(self, event: BusEnvelope[TurnInputPayload]) -> BusEnvelope[TaskAskPayload] | None:
-        metadata = dict(event.payload.metadata or {})
-        task_id = str(metadata.get("task_id", "") or event.task_id or "").strip()
-        question = str(metadata.get("task_question", "") or event.payload.user_text or "").strip()
-        if not task_id or not question:
-            return None
-        return build_envelope(
-            event_type=EventType.TASK_ASK,
-            source="front",
-            target="brain",
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            task_id=task_id,
-            correlation_id=event.correlation_id or task_id,
-            causation_id=str(metadata.get("task_event_id", "") or event.event_id),
-            payload=TaskAskPayload(
-                task_id=task_id,
-                question=question,
-                field=str(metadata.get("task_field", "") or "").strip() or None,
-                why=str(metadata.get("task_why", "") or "").strip() or None,
-            ),
-        )
-
-    def _build_task_end_event_from_input(self, event: BusEnvelope[TurnInputPayload]) -> BusEnvelope[TaskEndPayload] | None:
-        metadata = dict(event.payload.metadata or {})
-        task_id = str(metadata.get("task_id", "") or event.task_id or "").strip()
-        result = str(metadata.get("task_result", "") or "").strip()
-        if task_id == "" or result not in {"success", "failed", "cancelled"}:
-            return None
-        return build_envelope(
-            event_type=EventType.TASK_END,
-            source="front",
-            target="brain",
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            task_id=task_id,
-            correlation_id=event.correlation_id or task_id,
-            causation_id=str(metadata.get("task_event_id", "") or event.event_id),
-            payload=TaskEndPayload(
-                task_id=task_id,
-                result=cast(Any, result),
-                summary=str(metadata.get("task_summary", "") or "").strip() or None,
-                output=str(metadata.get("task_output", "") or "").strip() or None,
-                error=str(metadata.get("task_error", "") or "").strip() or None,
-            ),
         )
 
     def _latest_waiting_task_id(self, session_id: str, tasks: list[object]) -> str:

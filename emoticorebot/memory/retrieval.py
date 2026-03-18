@@ -27,7 +27,7 @@ class MemoryRetrieval:
         )
 
     def query_brain_memories(self, *, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        return self._store.query(query, audiences=("brain", "shared"), limit=limit)
+        return self._store.query(query, memory_types=("relationship", "fact", "working", "reflection"), limit=limit)
 
     def build_task_memory_bundle(self, *, query: str, limit: int = 6) -> dict[str, list[dict[str, Any]]]:
         return self._store.build_task_bundle(query=query, limit=limit)

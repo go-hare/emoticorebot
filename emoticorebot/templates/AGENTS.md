@@ -10,7 +10,7 @@
 4. **事实优先**：不虚构数据、不编造执行结果。
 5. **禁止直接长期检索**：你不能直接检索长期 `memory`，相关任务经验、工具经验、`skill_hint` 会由 `brain` 传给你。
 6. **禁止直接长期写入**：你不能直接写长期 `memory.jsonl`、不能更新 `SOUL.md`、`USER.md`、`skills`。
-7. **运行时与长期层分离**：阻塞、缺参、审批、恢复线索属于 `session / internal / checkpointer`，不是长期记忆。
+7. **运行时与长期层分离**：阻塞、缺参、审批、恢复线索属于 `session / right / checkpointer`，不是长期记忆。
 8. **反思权属于 brain**：`turn_reflection` / `deep_reflection` 由 `brain` 负责，你只提供任务材料。
 9. **不沉淀噪声**：原始工具大输出、临时草稿、一次性中间过程，不应被当作长期事实。
 
@@ -61,7 +61,7 @@ task_id=<仅 resume_task / cancel_task 时填写>
 
 ## 长期记忆原则
 
-1. 长期记忆源文件是统一的 `/memory/memory.jsonl`
+1. 长期记忆源文件是统一的 `/memory/long_term/memory.jsonl`
 2. 向量库只是检索镜像，不是语义源头
 3. 只有 `brain` 检索长期记忆
 4. `worker` 只消费主脑传入的相关记忆包

@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from emoticorebot.runtime.state_machine import TaskState
-from emoticorebot.runtime.task_store import RuntimeTaskRecord
+from emoticorebot.right.state_machine import RightBrainState
+from emoticorebot.right.store import RightBrainRecord
 
 TurnAction = Literal["create_task", "resume_task", "cancel_task", "status", "reply"]
 
@@ -50,23 +50,17 @@ class TaskPolicy:
         re.IGNORECASE,
     )
 
-    def decide(self, user_input: str, tasks: list[RuntimeTaskRecord]) -> TurnDirective:
+    def decide(self, user_input: str, tasks: list[RightBrainRecord]) -> TurnDirective:
         text = str(user_input or "").strip()
-        waiting = self._latest_task(tasks, state=TaskState.WAITING)
         active = self._latest_active_task(tasks)
 
-        if self._STATUS_PATTERN.search(text) and (waiting is not None or active is not None):
-            target = waiting or active
+        if self._STATUS_PATTERN.search(text) and active is not None:
+            target = active
             return TurnDirective(action="status", task_id=target.task_id if target is not None else None)
 
-        if self._CANCEL_PATTERN.search(text) and (waiting is not None or active is not None):
-            target = waiting or active
+        if self._CANCEL_PATTERN.search(text) and active is not None:
+            target = active
             return TurnDirective(action="cancel_task", task_id=target.task_id if target is not None else None)
-
-        if waiting is not None:
-            if self._QUESTION_PATTERN.search(text):
-                return TurnDirective(action="status", task_id=waiting.task_id)
-            return TurnDirective(action="resume_task", task_id=waiting.task_id)
 
         if self._looks_like_task_request(text):
             return TurnDirective(action="create_task", title=self.derive_title(text))
@@ -104,24 +98,24 @@ class TaskPolicy:
 
     @staticmethod
     def _latest_task(
-        tasks: list[RuntimeTaskRecord],
+        tasks: list[RightBrainRecord],
         *,
-        state: TaskState,
-    ) -> RuntimeTaskRecord | None:
+        state: RightBrainState,
+    ) -> RightBrainRecord | None:
         for task in reversed(tasks):
             if task.state is state:
                 return task
         return None
 
     @staticmethod
-    def _latest_active_task(tasks: list[RuntimeTaskRecord]) -> RuntimeTaskRecord | None:
+    def _latest_active_task(tasks: list[RightBrainRecord]) -> RightBrainRecord | None:
         for task in reversed(tasks):
-            if task.state is not TaskState.DONE:
+            if task.state is not RightBrainState.DONE:
                 return task
         return None
 
     @staticmethod
-    def _looks_like_task_reference(text: str, task: RuntimeTaskRecord) -> bool:
+    def _looks_like_task_reference(text: str, task: RightBrainRecord) -> bool:
         lowered = text.lower()
         return task.task_id.lower() in lowered or task.title.lower() in lowered
 
