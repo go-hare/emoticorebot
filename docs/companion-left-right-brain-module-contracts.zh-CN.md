@@ -1285,14 +1285,12 @@ session/
 | `last_delivery_at` | 最近一次投递时间 |
 | `last_delivery_channel` | 最近投递通道 |
 | `delivery_fail_count` | 失败次数 |
-| `pending_retry_count` | 待重试数量 |
 
 ### 12.5 交付边界
 
 投递层可以：
 
 - 适配通道协议
-- 处理重试
 - 处理流状态
 
 投递层不应：

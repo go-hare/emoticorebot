@@ -96,7 +96,7 @@ class DeliveryService:
         try:
             await self._transport.publish_outbound(outbound)
         except Exception:
-            await self._publish_failed(event, reason="delivery_transport_error", retryable=True)
+            await self._publish_failed(event, reason="delivery_transport_error")
             return
 
         if stream_state in {"open", "delta", "superseded"}:
@@ -154,7 +154,6 @@ class DeliveryService:
         event: BusEnvelope[ProtocolModel],
         *,
         reason: str,
-        retryable: bool = False,
     ) -> None:
         payload = event.payload
         reply = getattr(payload, "reply", None)
@@ -169,7 +168,7 @@ class DeliveryService:
                 task_id=event.task_id,
                 correlation_id=event.correlation_id,
                 causation_id=event.event_id,
-                payload=DeliveryFailedPayload(reply_id=reply_id, reason=reason, retryable=retryable),
+                payload=DeliveryFailedPayload(reply_id=reply_id, reason=reason),
             )
         )
 

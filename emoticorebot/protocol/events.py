@@ -368,7 +368,6 @@ class RepliedPayload(ProtocolModel):
 class DeliveryFailedPayload(ProtocolModel):
     reply_id: str
     reason: str
-    retryable: bool | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

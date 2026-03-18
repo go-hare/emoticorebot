@@ -269,7 +269,7 @@
 
 - 将内部结果投递成 `inline / push / stream`
 - 适配 Telegram、Discord、电话、App、邮件等通道
-- 保证消息幂等、重试、失败处理
+- 保证消息幂等与失败处理
 
 ---
 

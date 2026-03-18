@@ -93,7 +93,6 @@ async def _exercise_delivery_without_transport() -> None:
     assert len(replied) == 0
     assert len(failed) == 1
     assert failed[0].payload.reason == "delivery_transport_unavailable"
-    assert failed[0].payload.retryable is False
 
 
 def test_delivery_service_without_transport_emits_failure() -> None:
