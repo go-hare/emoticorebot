@@ -83,8 +83,18 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
 
 
 def _interactive_console() -> Console:
-    """Build a Rich console bound to the current stdout proxy used by prompt_toolkit."""
-    return Console(file=sys.stdout, color_system="auto")
+    """Build a Rich console safe for prompt_toolkit's stdout proxy.
+
+    prompt_toolkit's proxy does not always handle Rich ANSI styling for markdown
+    code blocks correctly, so keep interactive rendering plain-text safe.
+    """
+    return Console(
+        file=sys.stdout,
+        color_system=None,
+        no_color=True,
+        highlight=False,
+        soft_wrap=True,
+    )
 
 
 def _print_agent_response_interactive(response: str, render_markdown: bool) -> None:

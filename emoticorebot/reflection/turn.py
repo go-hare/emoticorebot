@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.reflection.candidates import compact_text, normalize_memory_candidates
 from emoticorebot.types import EmotionState, ExecutionInfo, TurnReflectionOutput
+from emoticorebot.utils.llm_utils import extract_message_text
 
 
 @dataclass(frozen=True)
@@ -18,8 +21,18 @@ class TurnReflectionResult:
     state_snapshot: dict[str, Any] | None = None  # 情绪状态快照
 
 
+class TurnReflectionUnavailable(RuntimeError):
+    """Raised when turn reflection cannot be generated from a real model result."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = str(reason or "").strip() or "turn_reflection_unavailable"
+
+
 class TurnReflectionService:
     """Generate one compact per-turn reflection plus memory candidates."""
+
+    _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
 
     _PROMPT = """
 你是 `left_brain` 的逐轮反思环节。
@@ -52,6 +65,8 @@ class TurnReflectionService:
 - 不要复制原始日志，不要复制大段对话原文。
 - 如果本轮没有执行，`outcome` 设为 `no_execution`，并把 `execution_review.effectiveness` 设为 `none`。
 - 如果本轮发生了执行，只描述最关键的阻塞、尝试过程和最有价值的下一步提示。
+- 如果 `task_trace` 里出现了工具报错、重试、路径错误、参数错误，但最终又成功了，`problems` 与 `resolution` 也必须如实体现，不要只写“执行成功”。
+- `needs_deep_reflection` 只在你判断“当前这轮虽然完成了浅反思，但还暴露出值得继续做深反思的重复模式或稳定问题”时设为 `true`；普通单轮问题默认 `false`。
 - `summary`、`resolution`、`next_hint` 使用与用户相同的语言。
         - 没有内容时，字符串字段返回 `""`，数组字段返回 `[]`，对象字段返回 `{{}}`。
 
@@ -63,6 +78,9 @@ class TurnReflectionService:
 - pad: {pad_json}
 - drives: {drives_json}
 - execution: {execution_json}
+- task: {task_json}
+- task_trace: {task_trace_json}
+- metadata: {metadata_json}
 
 判断原则：
 - `emotion`、`pad`、`drives` 是当前轮进入反思时的实时状态上下文。
@@ -81,6 +99,7 @@ class TurnReflectionService:
   "resolution": "",
   "outcome": "success|partial|failed|no_execution",
   "next_hint": "",
+  "needs_deep_reflection": false,
   "user_updates": [""],
   "soul_updates": [""],
   "state_update": {{
@@ -124,6 +143,7 @@ class TurnReflectionService:
 - `resolution`：这些问题最终是如何被解决的。
 - `outcome`：只能是 `success`、`partial`、`failed`、`no_execution`。
 - `next_hint`：下一轮左脑最值得记住的承接提示。
+- `needs_deep_reflection`：是否建议系统在本轮浅反思结束后继续触发一次深反思。
 - `user_updates`：本轮新增的用户信息直写候选，没有就返回空数组。
 - `soul_updates`：本轮新增的左脑风格修正直写候选，没有就返回空数组。
 - `state_update`：左脑对本轮状态变化的判断记录，必须填写完整结构。
@@ -153,6 +173,7 @@ class TurnReflectionService:
   "resolution": "调整执行路径后完成了任务。",
   "outcome": "success",
   "next_hint": "下次遇到类似情况时先确认关键参数是否齐全。",
+  "needs_deep_reflection": false,
   "user_updates": ["用户希望复杂问题先收敛架构判断，再进入具体实现。"],
   "soul_updates": ["复杂问题先收敛判断，再把最终任务交给 task。"],
   "state_update": {{
@@ -207,6 +228,9 @@ class TurnReflectionService:
         emotion: EmotionState,
         execution: ExecutionInfo | None = None,
         source_type: str = "user_turn",
+        task: dict[str, Any] | None = None,
+        task_trace: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> TurnReflectionResult:
         """
         执行逐轮反思
@@ -224,15 +248,44 @@ class TurnReflectionService:
         emotion_label = emotion.get("emotion_label", "平静")
         pad = emotion.get("pad", {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0})
         drives = emotion.get("drives", {"social": 50.0, "energy": 50.0})
-        
+
         if not self.llm:
-            reflection = self._fallback_turn_reflection(
-                user_input=user_input,
-                output=output,
-                emotion=emotion,
-                execution=normalized_execution,
+            raise TurnReflectionUnavailable("turn_reflection_llm_unavailable")
+
+        compact_task = {
+            key: value
+            for key, value in dict(task or {}).items()
+            if key in {"task_id", "title", "state", "result", "summary", "error"} and value not in ("", None, [], {})
+        }
+        compact_trace = []
+        for item in list(task_trace or [])[-12:]:
+            if not isinstance(item, Mapping):
+                continue
+            data = item.get("data")
+            compact_trace.append(
+                {
+                    key: value
+                    for key, value in {
+                        "kind": str(item.get("kind", "") or "").strip(),
+                        "message": str(item.get("message", "") or "").strip(),
+                        "tool_name": (
+                            str(item.get("tool_name", "") or "").strip()
+                            or (str(data.get("tool_name", "") or "").strip() if isinstance(data, Mapping) else "")
+                        ),
+                        "event": str(data.get("event", "") or "").strip() if isinstance(data, Mapping) else "",
+                        "source_event": str(data.get("source_event", "") or "").strip()
+                        if isinstance(data, Mapping)
+                        else "",
+                    }.items()
+                    if value not in ("", None, [], {})
+                }
             )
-            return TurnReflectionResult(turn_reflection=reflection, state_snapshot=self.emotion_mgr.snapshot())
+        compact_metadata = {
+            key: value
+            for key, value in dict(metadata or {}).items()
+            if key in {"recent_turns", "short_term_memory", "long_term_memory", "memory_refs", "tool_usage_summary"}
+            and value not in ("", None, [], {})
+        }
 
         prompt = self._PROMPT.format(
             user_input=user_input,
@@ -242,19 +295,20 @@ class TurnReflectionService:
             drives_json=json.dumps(drives, ensure_ascii=False),
             source_type=str(source_type or "user_turn"),
             execution_json=json.dumps(normalized_execution, ensure_ascii=False),
+            task_json=json.dumps(compact_task, ensure_ascii=False),
+            task_trace_json=json.dumps(compact_trace, ensure_ascii=False),
+            metadata_json=json.dumps(compact_metadata, ensure_ascii=False),
         )
-        try:
-            structured_llm = self.llm.with_structured_output(TurnReflectionOutput)
-            parsed = await structured_llm.ainvoke(prompt)
-        except Exception:
-            parsed = None
+
+        parsed = await self._invoke_reflection_model(prompt)
 
         reflection = self._normalize_turn_reflection(
-            parsed if isinstance(parsed, dict) else {},
+            parsed,
             user_input=user_input,
             output=output,
             emotion=emotion,
             execution=normalized_execution,
+            task_trace=list(task_trace or []),
         )
         return TurnReflectionResult(turn_reflection=reflection, state_snapshot=self.emotion_mgr.snapshot())
 
@@ -266,24 +320,24 @@ class TurnReflectionService:
         output: str,
         emotion: EmotionState,
         execution: dict[str, Any],
+        task_trace: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        fallback = self._fallback_turn_reflection(
-            user_input=user_input,
-            output=output,
-            emotion=emotion,
-            execution=execution,
-        )
+        trace_problems = self._trace_problems(task_trace=list(task_trace or []), execution=execution)
+        default_effectiveness = self._default_effectiveness(execution=execution, trace_problems=trace_problems)
+        default_failure_reason = trace_problems[0] if trace_problems else str(execution.get("failure_reason", "") or "").strip()
+        default_hint = self._default_next_hint(trace_problems)
         normalized = {
-            "summary": str(payload.get("summary", "") or fallback["summary"]).strip(),
-            "problems": self._normalize_str_list(payload.get("problems")) or fallback["problems"],
-            "resolution": str(payload.get("resolution", "") or fallback["resolution"]).strip(),
-            "outcome": self._normalize_outcome(payload.get("outcome"), fallback["outcome"]),
-            "next_hint": str(payload.get("next_hint", "") or fallback["next_hint"]).strip(),
+            "summary": str(payload.get("summary", "") or "").strip(),
+            "problems": self._normalize_str_list(payload.get("problems")) or trace_problems,
+            "resolution": str(payload.get("resolution", "") or "").strip(),
+            "outcome": self._normalize_outcome(payload.get("outcome"), self._default_outcome(execution)),
+            "next_hint": str(payload.get("next_hint", "") or "").strip() or default_hint,
+            "needs_deep_reflection": self._normalize_bool(payload.get("needs_deep_reflection"), default=False),
             "user_updates": self._normalize_str_list(payload.get("user_updates")),
             "soul_updates": self._normalize_str_list(payload.get("soul_updates")),
             "state_update": self._normalize_state_update(
                 payload.get("state_update"),
-                fallback=fallback["state_update"],
+                fallback=self._fallback_state_update(emotion),
             ),
             "memory_candidates": normalize_memory_candidates(
                 payload.get("memory_candidates"),
@@ -293,87 +347,66 @@ class TurnReflectionService:
                 default_stability=0.5,
                 default_importance=5,
                 limit=6,
-            )
-            or fallback["memory_candidates"],
+            ),
             "execution_review": self._normalize_execution_review(
                 payload.get("execution_review"),
-                fallback=fallback["execution_review"],
+                fallback={
+                    "effectiveness": default_effectiveness,
+                    "main_failure_reason": default_failure_reason,
+                    "next_execution_hint": default_hint,
+                },
             ),
         }
+        if not any(
+            (
+                normalized["summary"],
+                normalized["problems"],
+                normalized["resolution"],
+                normalized["user_updates"],
+                normalized["soul_updates"],
+                normalized["memory_candidates"],
+            )
+        ):
+            raise TurnReflectionUnavailable("turn_reflection_empty_payload")
         return normalized
 
-    def _fallback_turn_reflection(
-        self,
-        *,
-        user_input: str,
-        output: str,
-        emotion: EmotionState,
-        execution: dict[str, Any],
-    ) -> dict[str, Any]:
-        invoked = bool(execution.get("invoked"))
-        status = str(execution.get("status", "none") or "none")
-        summary = self._compact(user_input or output, limit=90) or "本轮完成了一次正常对话。"
-        if invoked and status in {"done", "completed"}:
-            resolution = "执行已完成，并返回了可用结果。"
-            outcome = "success"
-        elif invoked and status == "failed":
-            resolution = "执行未完成，需要调整做法。"
-            outcome = "failed"
-        elif invoked:
-            resolution = "执行已有进展，但还缺少继续推进的条件。"
-            outcome = "partial"
-        else:
-            resolution = "左脑直接完成了本轮回复。"
-            outcome = "no_execution"
+    async def _invoke_reflection_model(self, prompt: str) -> dict[str, Any]:
+        structured_error: Exception | None = None
+        if hasattr(self.llm, "with_structured_output"):
+            try:
+                structured_llm = self.llm.with_structured_output(TurnReflectionOutput)
+                if hasattr(structured_llm, "ainvoke"):
+                    response = await structured_llm.ainvoke(prompt)
+                elif hasattr(structured_llm, "invoke"):
+                    response = structured_llm.invoke(prompt)
+                else:
+                    response = None
+                payload = self._coerce_payload(response)
+                if payload:
+                    return payload
+            except Exception as exc:
+                structured_error = exc
 
-        problems = []
-        failure_reason = str(execution.get("failure_reason", "") or "").strip()
-        if failure_reason:
-            problems.append(failure_reason)
+        try:
+            if hasattr(self.llm, "ainvoke"):
+                response = await self.llm.ainvoke(prompt)
+            elif hasattr(self.llm, "invoke"):
+                response = self.llm.invoke(prompt)
+            else:
+                raise TurnReflectionUnavailable("turn_reflection_llm_missing_invoke")
+            payload = self._parse_json_payload(extract_message_text(response))
+            if payload:
+                return payload
+        except TurnReflectionUnavailable:
+            raise
+        except Exception as exc:
+            if structured_error is None:
+                structured_error = exc
 
-        execution_review = {
-            "effectiveness": self._fallback_effectiveness(execution),
-            "main_failure_reason": failure_reason,
-            "next_execution_hint": "根据失败原因调整执行路径。" if failure_reason else "",
-        }
-
-        memory_candidates: list[dict[str, Any]] = []
-        if invoked:
-            memory_candidates.append(
-                {
-                    "memory_type": "reflection",
-                    "summary": compact_text(summary, limit=100),
-                    "detail": compact_text(
-                        f"本轮执行状态为 {status}。{resolution}"
-                        + (f" 主要失败原因：{failure_reason}。" if failure_reason else ""),
-                        limit=220,
-                    ),
-                    "confidence": 0.82,
-                    "stability": 0.45,
-                    "tags": ["turn", "execution"],
-                    "metadata": {
-                        "subtype": "turn_insight",
-                        "importance": 7 if status in {"failed", "partial", "running"} else 6,
-                        "problem": problems[0] if problems else "",
-                        "resolution": resolution,
-                        "outcome": outcome,
-                        "follow_up": execution_review["next_execution_hint"],
-                    },
-                }
-            )
-
-        return {
-            "summary": summary,
-            "problems": problems,
-            "resolution": resolution,
-            "outcome": outcome,
-            "next_hint": "承接本轮结果继续推进。" if invoked else "自然承接用户当前话题。",
-            "user_updates": [],
-            "soul_updates": [],
-            "state_update": self._fallback_state_update(emotion),
-            "memory_candidates": memory_candidates,
-            "execution_review": execution_review,
-        }
+        raise TurnReflectionUnavailable(
+            "turn_reflection_generation_failed"
+            + (f": {type(structured_error).__name__}" if structured_error is not None else "")
+        )
 
     @staticmethod
     def _normalize_execution(execution: ExecutionInfo | None) -> dict[str, Any]:
@@ -588,10 +621,23 @@ class TurnReflectionService:
         return effectiveness if effectiveness in {"high", "medium", "low", "none"} else default
 
     @staticmethod
-    def _fallback_effectiveness(execution: dict[str, Any]) -> str:
+    def _normalize_bool(value: Any, *, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"true", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "0", "no", "n", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _default_effectiveness(*, execution: dict[str, Any], trace_problems: list[str]) -> str:
         if not execution.get("invoked"):
             return "none"
         status = str(execution.get("status", "none") or "none")
+        if trace_problems and status in {"done", "completed"}:
+            return "medium"
         if status in {"done", "completed"}:
             return "high"
         if status == "failed":
@@ -621,5 +667,79 @@ class TurnReflectionService:
     def _compact(text: str, *, limit: int) -> str:
         return compact_text(text, limit=limit)
 
-__all__ = ["TurnReflectionResult", "TurnReflectionService"]
+    @staticmethod
+    def _default_outcome(execution: dict[str, Any]) -> str:
+        if not execution.get("invoked"):
+            return "no_execution"
+        status = str(execution.get("status", "none") or "none")
+        if status in {"done", "completed"}:
+            return "success"
+        if status == "failed":
+            return "failed"
+        return "partial"
 
+    @staticmethod
+    def _default_next_hint(trace_problems: list[str]) -> str:
+        if not trace_problems:
+            return ""
+        return "下次先检查工作目录、工具参数和验证路径，再继续执行。"
+
+    @staticmethod
+    def _trace_problems(*, task_trace: list[dict[str, Any]], execution: dict[str, Any]) -> list[str]:
+        problems: list[str] = []
+        failure_reason = str(execution.get("failure_reason", "") or "").strip()
+        if failure_reason:
+            problems.append(failure_reason)
+        for item in task_trace:
+            if not isinstance(item, Mapping):
+                continue
+            message = str(item.get("message", "") or "").strip()
+            lower = message.lower()
+            if not message:
+                continue
+            if "error" not in lower and "invalid" not in lower and "no such file" not in lower and "failed" not in lower:
+                continue
+            compact = compact_text(message, limit=120)
+            if compact and compact not in problems:
+                problems.append(compact)
+        return problems[:4]
+
+    @classmethod
+    def _coerce_payload(cls, value: Any) -> dict[str, Any]:
+        if isinstance(value, Mapping):
+            return dict(value)
+        if hasattr(value, "model_dump"):
+            dumped = value.model_dump()
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
+        if hasattr(value, "dict"):
+            dumped = value.dict()
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
+        if isinstance(value, str):
+            return cls._parse_json_payload(value)
+        return {}
+
+    @classmethod
+    def _parse_json_payload(cls, text: str) -> dict[str, Any]:
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        candidates = [raw]
+        match = cls._JSON_FENCE_RE.search(raw)
+        if match:
+            candidates.insert(0, match.group(1).strip())
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            candidates.append(raw[start : end + 1])
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(payload, Mapping):
+                return dict(payload)
+        return {}
+
+__all__ = ["TurnReflectionResult", "TurnReflectionService"]

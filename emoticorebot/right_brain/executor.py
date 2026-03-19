@@ -206,13 +206,13 @@ class RightBrainExecutor:
             "metadata": {"assistant_id": "emoticorebot-right-brain", "run_id": run_id},
         }
 
-        if hasattr(agent, "astream"):
+        if hasattr(agent, "astream") or hasattr(agent, "stream"):
             return await self._stream_invoke(agent, payload, config, trace_reporter=trace_reporter)
         if hasattr(agent, "ainvoke"):
             return await agent.ainvoke(payload, config=config)
         if hasattr(agent, "invoke"):
             return agent.invoke(payload, config=config)
-        raise RuntimeError("right-brain agent does not expose invoke/ainvoke/astream")
+        raise RuntimeError("right-brain agent does not expose invoke/ainvoke/astream/stream")
 
     async def _stream_invoke(
         self,
@@ -223,32 +223,73 @@ class RightBrainExecutor:
         trace_reporter: DetailedProgressReporter | None = None,
     ) -> Any:
         last_values: Any = None
-        async for item in agent.astream(
-            payload,
-            config=config,
-            stream_mode=["values", "updates", "messages", "custom"],
-            subgraphs=True,
-        ):
-            namespace, mode, data = right_trace.parse_stream_item(item)
-            if mode == "values":
-                last_values = data
-                continue
-            for record in right_trace.build_trace_records(mode=mode, namespace=namespace, data=data):
-                self._trace_log.append(record)
-                if trace_reporter is None:
+        seen_signatures: set[str] = set()
+        stream_kwargs = {
+            "config": config,
+            "stream_mode": ["updates", "values"],
+            "subgraphs": True,
+        }
+        if hasattr(agent, "astream"):
+            stream = agent.astream(payload, **stream_kwargs)
+        elif hasattr(agent, "stream"):
+            stream = agent.stream(payload, **stream_kwargs)
+        else:
+            raise RuntimeError("right-brain agent does not expose streaming APIs")
+
+        if hasattr(stream, "__aiter__"):
+            async for item in stream:
+                namespace, mode, data = right_trace.parse_stream_item(item)
+                if mode == "values":
+                    last_values = data
                     continue
-                message = self._trace_message(record)
-                if not message:
+                for record in right_trace.build_trace_records(mode=mode, namespace=namespace, data=data):
+                    signature = str(record.get("trace_signature", "") or "").strip()
+                    if signature and signature in seen_signatures:
+                        continue
+                    if signature:
+                        seen_signatures.add(signature)
+                    self._trace_log.append(record)
+                    if trace_reporter is None:
+                        continue
+                    message = self._trace_message(record)
+                    if not message:
+                        continue
+                    await trace_reporter(
+                        message,
+                        {
+                            "event": "task.trace",
+                            "producer": str(record.get("role", "") or "right_brain").strip() or "right_brain",
+                            "phase": "trace",
+                            "payload": dict(record),
+                        },
+                    )
+        else:
+            for item in stream:
+                namespace, mode, data = right_trace.parse_stream_item(item)
+                if mode == "values":
+                    last_values = data
                     continue
-                await trace_reporter(
-                    message,
-                    {
-                        "event": "task.trace",
-                        "producer": str(record.get("role", "") or "right_brain").strip() or "right_brain",
-                        "phase": "trace",
-                        "payload": dict(record),
-                    },
-                )
+                for record in right_trace.build_trace_records(mode=mode, namespace=namespace, data=data):
+                    signature = str(record.get("trace_signature", "") or "").strip()
+                    if signature and signature in seen_signatures:
+                        continue
+                    if signature:
+                        seen_signatures.add(signature)
+                    self._trace_log.append(record)
+                    if trace_reporter is None:
+                        continue
+                    message = self._trace_message(record)
+                    if not message:
+                        continue
+                    await trace_reporter(
+                        message,
+                        {
+                            "event": "task.trace",
+                            "producer": str(record.get("role", "") or "right_brain").strip() or "right_brain",
+                            "phase": "trace",
+                            "payload": dict(record),
+                        },
+                    )
         if last_values is None:
             raise RuntimeError("right-brain trace stream did not produce final state")
         return last_values

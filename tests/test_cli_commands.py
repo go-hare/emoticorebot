@@ -201,3 +201,10 @@ def test_status_prints_left_brain_and_right_brain_models(monkeypatch, tmp_path) 
 
     assert any("Left Brain Model: anthropic/claude-opus-4-5" in line for line in printed)
     assert any("Right Brain Model: anthropic/claude-opus-4-5" in line for line in printed)
+
+
+def test_interactive_console_disables_ansi_sequences() -> None:
+    interactive_console = commands._interactive_console()
+
+    assert interactive_console.color_system is None
+    assert interactive_console.no_color is True

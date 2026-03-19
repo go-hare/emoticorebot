@@ -97,6 +97,7 @@ class TurnReflectionOutput(TypedDict, total=False):
     resolution: str  # 问题如何解决
     outcome: Literal["success", "partial", "failed", "no_execution"]  # 本轮结果
     next_hint: str  # 下一轮承接提示
+    needs_deep_reflection: bool  # 是否需要继续触发深反思
     user_updates: list[str]  # 用户画像更新候选
     soul_updates: list[str]  # 左脑风格更新候选
     state_update: StateUpdateDelta  # 状态记录判断
@@ -133,4 +134,3 @@ __all__ = [
     "TraceItem",
     "TurnReflectionOutput",
 ]
-

@@ -26,10 +26,10 @@ from emoticorebot.protocol.reflection_models import (
 from emoticorebot.protocol.task_models import ProtocolModel
 from emoticorebot.protocol.topics import EventType
 
-from .deep import DeepReflectionResult, DeepReflectionService
+from .deep import DeepReflectionResult, DeepReflectionService, DeepReflectionUnavailable
 from .manager import ReflectionManager
 from .persona import GovernedWriteResult, ManagedAnchorWriter, PersonaManager
-from .turn import TurnReflectionService
+from .turn import TurnReflectionService, TurnReflectionUnavailable
 
 
 def _new_id(prefix: str) -> str:
@@ -209,7 +209,11 @@ class ReflectionGovernor:
         self,
         signal: BusEnvelope[ReflectionSignalPayload],
     ) -> None:
-        proposal = await self._reflection.propose_turn(signal=signal)
+        try:
+            proposal = await self._reflection.propose_turn(signal=signal)
+        except TurnReflectionUnavailable as exc:
+            await self._publish_warning(signal, reason=exc.reason)
+            return
         if proposal is None:
             await self._publish_warning(signal, reason="reflection_input_missing_content")
             return
@@ -219,13 +223,9 @@ class ReflectionGovernor:
         for event_id in event_ids:
             self._remember(event_id, session_id=signal.session_id, task_id=signal.task_id)
 
-        memory_ids = self._reflection.append_turn_memories(proposal, event_ids=event_ids)
-        committed = self._reflection.lookup_memory_records(memory_ids)
-        await self._publish_committed_records(
-            signal=signal,
-            records=committed,
-            metadata={"reflection_type": "turn", "trigger_id": signal.payload.trigger_id},
-        )
+        # Turn reflection only persists to cognitive events.
+        # Long-term memory is reserved for deep reflection outputs.
+        memory_ids: list[str] = []
 
         updated_user, updated_soul, _, _ = self._persona.apply_turn_reflection_results(proposal.turn_reflection)
         if updated_user.applied:
@@ -252,6 +252,21 @@ class ReflectionGovernor:
                     **self._governance_metadata(updated_soul, scope="turn", action="apply"),
                 },
             )
+        if bool(proposal.turn_reflection.get("needs_deep_reflection", False)):
+            await self._apply_deep_reflection(
+                reason="turn_requested_deep_reflection",
+                session_id=signal.session_id or self._SYSTEM_SESSION_ID,
+                turn_id=signal.turn_id,
+                correlation_id=signal.correlation_id or signal.task_id or signal.turn_id or signal.event_id,
+                causation_id=signal.event_id,
+                task_id=signal.task_id,
+                recent_context_ids=self._context_ids_for(signal),
+                metadata={
+                    "trigger": "turn_reflection",
+                    "source_trigger_id": signal.payload.trigger_id,
+                    "source_event_id": signal.payload.source_event_id,
+                },
+            )
 
     async def _apply_deep_reflection(
         self,
@@ -270,7 +285,21 @@ class ReflectionGovernor:
         if not recent_events:
             return DeepReflectionResult()
 
-        proposal = await self._reflection.propose_deep(events=recent_events)
+        try:
+            proposal = await self._reflection.propose_deep(events=recent_events)
+        except DeepReflectionUnavailable as exc:
+            signal = self._system_like_signal(
+                reason=reason,
+                session_id=session_id,
+                turn_id=turn_id,
+                task_id=task_id,
+                correlation_id=correlation_id,
+                causation_id=causation_id,
+                recent_context_ids=recent_context_ids,
+                metadata=metadata,
+            )
+            await self._publish_warning(signal, reason=exc.reason)
+            return DeepReflectionResult()
         result = self._reflection.append_deep_memories(proposal)
 
         signal = self._system_like_signal(
@@ -609,8 +638,4 @@ class ReflectionGovernor:
 
 
 __all__ = ["ReflectionGovernor"]
-
-
-
-
 

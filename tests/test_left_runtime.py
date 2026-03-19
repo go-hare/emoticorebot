@@ -340,4 +340,43 @@ def test_left_brain_runtime_suppresses_sync_intermediate_followups() -> None:
     asyncio.run(_exercise_left_brain_runtime_suppresses_sync_intermediate_followups())
 
 
+async def _exercise_left_brain_runtime_keeps_sync_trace_progress_visible() -> None:
+    bus = PriorityPubSubBus()
+    left_runtime = LeftBrainRuntime(bus=bus, task_store=_store())
+    left_runtime.register()
+
+    followups: list[BusEnvelope[LeftFollowupReadyPayload]] = []
+
+    async def _capture_followup(event: BusEnvelope[LeftFollowupReadyPayload]) -> None:
+        followups.append(event)
+
+    bus.subscribe(consumer="test:followup-trace-visible", event_type=EventType.LEFT_EVENT_FOLLOWUP_READY, handler=_capture_followup)
+
+    await bus.publish(
+        _left_reply_request(
+            session_id="sess_exec_1",
+            turn_id="turn_exec_trace_1",
+            task_id="task_exec_1",
+            followup_context=FollowupContextPayload(
+                source_event=EventType.RIGHT_EVENT_PROGRESS,
+                job_id="job_exec_1",
+                decision="accept",
+                summary="准备调用工具：write_file",
+                delivery_target=DeliveryTargetPayload(delivery_mode="inline", channel="cli", chat_id="direct"),
+                metadata={
+                    "event": "task.trace",
+                    "payload": {"role": "assistant", "content": [{"type": "text", "text": "准备调用工具：write_file"}]},
+                },
+            ),
+        )
+    )
+    await _drain(bus)
+
+    assert len(followups) == 1
+    assert "suppress_output" not in followups[0].payload.metadata
+
+
+def test_left_brain_runtime_keeps_sync_trace_progress_visible() -> None:
+    asyncio.run(_exercise_left_brain_runtime_keeps_sync_trace_progress_visible())
+
 

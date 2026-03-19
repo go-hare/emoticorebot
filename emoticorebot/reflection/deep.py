@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from emoticorebot.reflection.candidates import (
-    build_skill_hint_candidate,
     compact_text,
     normalize_memory_candidates,
 )
 from emoticorebot.types import DeepReflectionOutput
+from emoticorebot.utils.llm_utils import extract_message_text
 
 
 @dataclass(frozen=True)
@@ -36,8 +38,18 @@ class DeepReflectionProposal:
     soul_updates: list[str] = field(default_factory=list)
 
 
+class DeepReflectionUnavailable(RuntimeError):
+    """Raised when deep reflection cannot be generated from a real model result."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = str(reason or "").strip() or "deep_reflection_unavailable"
+
+
 class DeepReflectionService:
     """Consolidate recent cognitive events into a structured deep-reflection proposal."""
+
+    _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
 
     _PROMPT = """
 你是 `left_brain` 的深反思过程。
@@ -143,20 +155,11 @@ class DeepReflectionService:
         if not events:
             return DeepReflectionProposal()
 
-        fallback = self._fallback_payload(events)
         if not self.llm:
-            return self._proposal_from_payload(fallback)
+            raise DeepReflectionUnavailable("deep_reflection_llm_unavailable")
 
         prompt = self._PROMPT.format(event_block=self._build_event_block(events))
-        try:
-            structured_llm = self.llm.with_structured_output(DeepReflectionOutput)
-            parsed = await structured_llm.ainvoke(prompt)
-        except Exception:
-            parsed = None
-
-        payload = self._normalize_payload(parsed if isinstance(parsed, dict) else fallback)
-        if not payload["memory_candidates"] and fallback["memory_candidates"]:
-            payload = fallback
+        payload = self._normalize_payload(await self._invoke_reflection_model(prompt))
         return self._proposal_from_payload(payload)
 
     @staticmethod
@@ -183,47 +186,81 @@ class DeepReflectionService:
             "soul_updates": self._normalize_str_list(payload.get("soul_updates")),
         }
 
-    def _fallback_payload(self, events: list[dict[str, Any]]) -> dict[str, Any]:
-        candidates: list[dict[str, Any]] = []
+    async def _invoke_reflection_model(self, prompt: str) -> dict[str, Any]:
+        structured_error: Exception | None = None
+        if hasattr(self.llm, "with_structured_output"):
+            try:
+                structured_llm = self.llm.with_structured_output(DeepReflectionOutput)
+                if hasattr(structured_llm, "ainvoke"):
+                    response = await structured_llm.ainvoke(prompt)
+                elif hasattr(structured_llm, "invoke"):
+                    response = structured_llm.invoke(prompt)
+                else:
+                    response = None
+                payload = self._coerce_payload(response)
+                if payload:
+                    return payload
+            except Exception as exc:
+                structured_error = exc
 
-        tool_events = [event for event in events if (event.get("task") or {}).get("used")]
-        if len(tool_events) >= 2:
-            candidates.append(
-                {
-                    "memory_type": "execution",
-                    "summary": "近期多轮任务中持续使用执行链路解决问题。",
-                    "detail": "最近多轮任务都依赖 task 执行并由 left_brain 统一收口，适合继续保持最终结果式返回。",
-                    "confidence": 0.76,
-                    "stability": 0.68,
-                    "tags": ["workflow", "task"],
-                    "metadata": {
-                        "subtype": "workflow",
-                        "importance": 7,
-                        "goal_cluster": "general_execution",
-                        "tool_sequence": [],
-                        "preconditions": ["需要外部工具或多步执行"],
-                        "steps_summary": "左脑决策，task 完成执行并返回最终结果。",
-                        "sample_size": len(tool_events),
-                        "success_rate": 0.7,
-                    },
-                }
-            )
-            candidates.append(
-                build_skill_hint_candidate(
-                    summary="复杂任务默认走最终结果式执行链路",
-                    detail="遇到复杂任务时，task 优先在单次执行内完成收敛，再把最终结果交回 left_brain。",
-                    trigger="需要多步执行或工具组合时",
-                    hint="减少中间态汇报，优先收敛到最终结果。",
-                    skill_name="final-result-execution",
-                )
-            )
+        try:
+            if hasattr(self.llm, "ainvoke"):
+                response = await self.llm.ainvoke(prompt)
+            elif hasattr(self.llm, "invoke"):
+                response = self.llm.invoke(prompt)
+            else:
+                raise DeepReflectionUnavailable("deep_reflection_llm_missing_invoke")
+            payload = self._parse_json_payload(extract_message_text(response))
+            if payload:
+                return payload
+        except DeepReflectionUnavailable:
+            raise
+        except Exception as exc:
+            if structured_error is None:
+                structured_error = exc
 
-        return {
-            "summary": "已对近期多轮认知事件完成一次深反思。",
-            "memory_candidates": candidates,
-            "user_updates": [],
-            "soul_updates": [],
-        }
+        raise DeepReflectionUnavailable(
+            "deep_reflection_generation_failed"
+            + (f": {type(structured_error).__name__}" if structured_error is not None else "")
+        )
+
+    @classmethod
+    def _coerce_payload(cls, value: Any) -> dict[str, Any]:
+        if isinstance(value, Mapping):
+            return dict(value)
+        if hasattr(value, "model_dump"):
+            dumped = value.model_dump()
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
+        if hasattr(value, "dict"):
+            dumped = value.dict()
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
+        if isinstance(value, str):
+            return cls._parse_json_payload(value)
+        return {}
+
+    @classmethod
+    def _parse_json_payload(cls, text: str) -> dict[str, Any]:
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        candidates = [raw]
+        match = cls._JSON_FENCE_RE.search(raw)
+        if match:
+            candidates.insert(0, match.group(1).strip())
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            candidates.append(raw[start : end + 1])
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(payload, Mapping):
+                return dict(payload)
+        return {}
 
     @staticmethod
     def _build_event_block(events: list[dict[str, Any]]) -> str:
@@ -244,6 +281,7 @@ class DeepReflectionService:
             problems = DeepReflectionService._normalize_str_list(turn_reflection.get("problems"))
             user_updates = DeepReflectionService._normalize_str_list(turn_reflection.get("user_updates"))
             soul_updates = DeepReflectionService._normalize_str_list(turn_reflection.get("soul_updates"))
+            needs_deep_reflection = bool(turn_reflection.get("needs_deep_reflection", False))
             state_update = turn_reflection.get("state_update") if isinstance(turn_reflection.get("state_update"), dict) else {}
             emotion_label = str(left_brain_state.get("emotion", "") or "").strip()
             pad = dict(left_brain_state.get("pad", {}) or {})
@@ -260,6 +298,7 @@ class DeepReflectionService:
                 f"problems={json.dumps(problems, ensure_ascii=False)} "
                 f"user_updates={json.dumps(user_updates, ensure_ascii=False)} "
                 f"soul_updates={json.dumps(soul_updates, ensure_ascii=False)} "
+                f"needs_deep_reflection={json.dumps(needs_deep_reflection, ensure_ascii=False)} "
                 f"state_update={json.dumps(state_update, ensure_ascii=False, sort_keys=True)}"
             )
         return "\n".join(lines)
@@ -279,4 +318,9 @@ class DeepReflectionService:
     def _compact(text: str, limit: int) -> str:
         return compact_text(text, limit=limit)
 
-__all__ = ["DeepReflectionProposal", "DeepReflectionResult", "DeepReflectionService"]
+__all__ = [
+    "DeepReflectionProposal",
+    "DeepReflectionResult",
+    "DeepReflectionService",
+    "DeepReflectionUnavailable",
+]

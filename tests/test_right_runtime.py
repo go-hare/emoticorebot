@@ -124,6 +124,35 @@ class _MissingAcceptExecutor:
         }
 
 
+class _StreamingThoughtExecutor:
+    def __init__(self) -> None:
+        self.run_hooks = RunHooks()
+
+    async def execute(self, task_spec, *, task_id: str, progress_reporter=None, trace_reporter=None):
+        del task_spec, task_id, trace_reporter
+        await self.run_hooks.audit(decision="accept", reason="audit_tool 返回任务可以开始。")
+        if progress_reporter is not None:
+            await progress_reporter(
+                "先检查一下项目结构",
+                {
+                    "event": "task.trace",
+                    "producer": "assistant",
+                    "phase": "trace",
+                    "payload": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "先检查一下项目结构"}],
+                    },
+                },
+            )
+        return {
+            "control_state": "completed",
+            "status": "success",
+            "analysis": "整理完成",
+            "message": "产物已生成",
+            "task_trace": [],
+        }
+
+
 async def _capture(bus: PriorityPubSubBus, event_type: str):
     events: list[BusEnvelope[object]] = []
 
@@ -406,5 +435,39 @@ async def _exercise_right_runtime_requires_accept_before_progress_or_result() ->
 def test_right_runtime_requires_accept_before_progress_or_result() -> None:
     asyncio.run(_exercise_right_runtime_requires_accept_before_progress_or_result())
 
+
+async def _exercise_right_runtime_marks_assistant_trace_progress_as_message() -> None:
+    bus = PriorityPubSubBus()
+    runtime = RightBrainRuntime(bus=bus, executor=_StreamingThoughtExecutor())
+    runtime.register()
+
+    progress = await _capture(bus, EventType.RIGHT_EVENT_PROGRESS)
+
+    await bus.publish(
+        build_envelope(
+            event_type=EventType.RIGHT_COMMAND_JOB_REQUESTED,
+            source="session",
+            target="right_runtime",
+            session_id="sess_right_6",
+            turn_id="turn_right_6",
+            correlation_id="turn_right_6",
+            payload=RightBrainJobRequestPayload(
+                job_id="job_right_7",
+                job_action="create_task",
+                request_text="继续整理项目",
+                delivery_target=DeliveryTargetPayload(delivery_mode="push", channel="cli", chat_id="direct"),
+            ),
+        )
+    )
+    await _drain(bus)
+
+    assert len(progress) == 1
+    assert progress[0].payload.summary == "先检查一下项目结构"
+    assert progress[0].payload.metadata["event"] == "task.trace"
+    assert progress[0].payload.metadata["payload"]["role"] == "assistant"
+
+
+def test_right_runtime_marks_assistant_trace_progress_as_message() -> None:
+    asyncio.run(_exercise_right_runtime_marks_assistant_trace_progress_as_message())
 
 

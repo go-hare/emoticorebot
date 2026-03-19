@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,14 +43,10 @@ class MemoryStore:
         return path
 
     @property
-    def long_term_dir(self) -> Path:
-        path = self.memory_dir / "long_term"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    @property
     def path(self) -> Path:
-        return self.long_term_dir / "memory.jsonl"
+        path = self.memory_dir / "memory.jsonl"
+        self._migrate_legacy_path(path)
+        return path
 
     def read_all(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -210,6 +207,18 @@ class MemoryStore:
     def recent(self, *, limit: int = 10) -> list[dict[str, Any]]:
         records = self.read_all()
         return records[-limit:] if limit > 0 else records
+
+    def _migrate_legacy_path(self, path: Path) -> None:
+        legacy_dir = self.memory_dir / "long_term"
+        legacy_path = legacy_dir / "memory.jsonl"
+        if path.exists() or not legacy_path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy_path), str(path))
+        try:
+            legacy_dir.rmdir()
+        except OSError:
+            pass
 
     @staticmethod
     def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -603,4 +612,3 @@ class MemoryStore:
 
 
 __all__ = ["MemoryStore"]
-

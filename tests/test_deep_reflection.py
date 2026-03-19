@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from emoticorebot.reflection.cognitive import CognitiveEvent
-from emoticorebot.reflection.deep import DeepReflectionService
+from emoticorebot.reflection.deep import DeepReflectionService, DeepReflectionUnavailable
 from emoticorebot.reflection.candidates import build_skill_hint_candidate
 from emoticorebot.config.schema import MemoryConfig, MemoryVectorConfig
 from emoticorebot.memory.crystallizer import SkillMaterializer
@@ -41,6 +42,26 @@ def test_cognitive_event_recent_prefers_latest_timestamp() -> None:
 
         assert len(rows) == 1
         assert rows[0]["id"] == "evt_new"
+
+
+def test_memory_store_migrates_legacy_long_term_path() -> None:
+    with TemporaryDirectory() as tmp_dir:
+        workspace = Path(tmp_dir)
+        legacy_dir = workspace / "memory" / "long_term"
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        legacy_path = legacy_dir / "memory.jsonl"
+        legacy_path.write_text(
+            '{"memory_id":"mem_1","memory_type":"fact","summary":"legacy","detail":"legacy"}\n',
+            encoding="utf-8",
+        )
+
+        store = MemoryStore(workspace)
+        rows = store.read_all()
+
+        assert len(rows) == 1
+        assert rows[0]["memory_id"] == "mem_1"
+        assert (workspace / "memory" / "memory.jsonl").exists()
+        assert not legacy_path.exists()
 
 
 def test_build_skill_hint_candidate_uses_formal_execution_schema() -> None:
@@ -94,6 +115,7 @@ def test_deep_reflection_event_block_includes_updates_and_state() -> None:
                 "turn_reflection": {
                     "summary": "正常寒暄。",
                     "problems": ["语气偏轻佻"],
+                    "needs_deep_reflection": True,
                     "user_updates": ["用户偏好中性开场。"],
                     "soul_updates": ["寒暄时避免过度拟人化。"],
                     "state_update": {
@@ -112,6 +134,7 @@ def test_deep_reflection_event_block_includes_updates_and_state() -> None:
     assert "emotion=开心" in block
     assert "user_updates=[" in block
     assert "soul_updates=[" in block
+    assert "needs_deep_reflection=true" in block
     assert "state_update=" in block
     assert '"should_apply": false' in block
 
@@ -157,3 +180,98 @@ def test_skill_materializer_accepts_formal_skill_hint_records() -> None:
         skill_files = list((workspace / "skills").rglob("SKILL.md"))
         assert len(skill_files) == 1
         assert result.created_count == 1
+
+
+class _StructuredDeepResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def model_dump(self):
+        return dict(self._payload)
+
+
+class _StructuredDeepLLM:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def with_structured_output(self, _schema):
+        return self
+
+    async def ainvoke(self, prompt):
+        assert "最近的认知事件：" in prompt
+        return _StructuredDeepResponse(self.payload)
+
+
+def test_deep_reflection_service_requires_real_model_result() -> None:
+    service = DeepReflectionService(llm=None)
+
+    try:
+        asyncio.run(
+            service.propose(
+                [
+                    {
+                        "id": "evt_1",
+                        "timestamp": "2026-03-14T17:00:00+08:00",
+                        "user_input": "完成一个复杂任务",
+                        "assistant_output": "任务已完成，我给你最终结果。",
+                        "turn_reflection": {"summary": "这轮有稳定模式。"},
+                        "task": {"state": "done", "result": "success"},
+                    }
+                ]
+            )
+        )
+    except DeepReflectionUnavailable as exc:
+        assert exc.reason == "deep_reflection_llm_unavailable"
+    else:
+        raise AssertionError("missing deep reflection llm should not fall back to templated memories")
+
+
+def test_deep_reflection_service_accepts_model_dump_response() -> None:
+    service = DeepReflectionService(
+        llm=_StructuredDeepLLM(
+            {
+                "summary": "近期复杂任务更适合先在内部收敛，再输出最终结果。",
+                "memory_candidates": [
+                    {
+                        "memory_type": "execution",
+                        "summary": "复杂任务优先走最终结果式执行",
+                        "detail": "当任务涉及多步分析和工具配合时，优先在 task 内部完成收敛，再把最终结果交回 left_brain。",
+                        "confidence": 0.88,
+                        "stability": 0.83,
+                        "tags": ["skill", "hint"],
+                        "metadata": {
+                            "subtype": "skill_hint",
+                            "importance": 7,
+                            "skill_id": "skill_final_result_execution",
+                            "skill_name": "final-result-execution",
+                            "trigger": "需要多步执行或工具组合时",
+                            "hint": "减少中间态汇报，优先收敛到最终结果。",
+                            "applies_to_tools": [],
+                        },
+                    }
+                ],
+                "user_updates": [],
+                "soul_updates": ["复杂任务中先收敛判断，再交给 task 执行。"],
+            }
+        )
+    )
+
+    proposal = asyncio.run(
+        service.propose(
+            [
+                {
+                    "id": "evt_1",
+                    "timestamp": "2026-03-14T17:00:00+08:00",
+                    "user_input": "完成一个复杂任务",
+                    "assistant_output": "任务已完成，我给你最终结果。",
+                    "turn_reflection": {"summary": "这轮有稳定模式。"},
+                    "task": {"state": "done", "result": "success"},
+                }
+            ]
+        )
+    )
+
+    assert proposal.summary == "近期复杂任务更适合先在内部收敛，再输出最终结果。"
+    assert len(proposal.memory_candidates) == 1
+    assert proposal.memory_candidates[0]["metadata"]["subtype"] == "skill_hint"
+    assert proposal.soul_updates == ["复杂任务中先收敛判断，再交给 task 执行。"]

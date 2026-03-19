@@ -127,6 +127,43 @@ def test_runtime_kernel_handles_direct_reply() -> None:
     asyncio.run(_exercise_kernel_direct_reply())
 
 
+async def _exercise_kernel_direct_reply_with_user_only_block() -> None:
+    transport = TransportBus()
+    left_brain_llm = _FakeLeftBrainLLM(
+        """####user####
+等于 2 呀……你是在故意逗我玩吗？
+"""
+    )
+    with TemporaryDirectory() as tmp_dir:
+        kernel = RuntimeKernel(
+            workspace=Path(tmp_dir),
+            transport=transport,
+            left_brain_llm=left_brain_llm,
+            context_builder=_FakeContextBuilder(),
+        )
+        try:
+            reply = await kernel.handle_user_message(
+                session_id="cli:direct",
+                channel="cli",
+                chat_id="direct",
+                sender_id="user",
+                message_id="msg_direct_partial",
+                content="1+1 = ?",
+                timeout_s=1.0,
+            )
+
+            assert reply.content == "等于 2 呀……你是在故意逗我玩吗？"
+            assert transport.outbound_size == 1
+            outbound = await transport.consume_outbound()
+            assert outbound.content == "等于 2 呀……你是在故意逗我玩吗？"
+        finally:
+            await kernel.stop()
+
+
+def test_runtime_kernel_handles_user_only_reply_block() -> None:
+    asyncio.run(_exercise_kernel_direct_reply_with_user_only_block())
+
+
 async def _exercise_kernel_async_right_brain_flow() -> None:
     transport = TransportBus()
     left_brain_llm = _FakeLeftBrainLLM(
@@ -286,5 +323,4 @@ async def _exercise_kernel_forwards_attachments_to_right_brain() -> None:
 
 def test_runtime_kernel_forwards_attachments_to_right_brain() -> None:
     asyncio.run(_exercise_kernel_forwards_attachments_to_right_brain())
-
 

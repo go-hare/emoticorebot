@@ -560,7 +560,16 @@ class SessionRuntime:
             kind = "status"
         elif event.event_type == EventType.RIGHT_EVENT_PROGRESS:
             message = str(getattr(payload, "summary", "") or "").strip()
-            kind = "tool" if str(getattr(payload, "metadata", {}).get("event", "") or "").strip() == "task.tool" else "progress"
+            metadata = dict(getattr(payload, "metadata", {}) or {})
+            event_name = str(metadata.get("event", "") or "").strip()
+            if event_name == "task.tool":
+                kind = "tool"
+            elif event_name == "task.trace":
+                nested = metadata.get("payload")
+                role = str(nested.get("role", "") or "").strip() if isinstance(nested, dict) else ""
+                kind = "message" if role == "assistant" else ("tool" if role == "tool" else "progress")
+            else:
+                kind = "progress"
         elif event.event_type == EventType.RIGHT_EVENT_JOB_REJECTED:
             message = str(getattr(payload, "reason", "") or "右脑拒绝执行当前请求。").strip()
             kind = "warning"

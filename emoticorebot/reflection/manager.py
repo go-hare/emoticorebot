@@ -70,6 +70,11 @@ class ReflectionManager:
             emotion=reflection_input["emotion"],
             execution=execution,
             source_type=str(reflection_input.get("source_type", "user_turn") or "user_turn"),
+            task=reflection_input.get("task") if isinstance(reflection_input.get("task"), dict) else {},
+            task_trace=[
+                item for item in list(reflection_input.get("task_trace", []) or []) if isinstance(item, dict)
+            ],
+            metadata=reflection_input.get("metadata") if isinstance(reflection_input.get("metadata"), dict) else {},
         )
         turn_reflection = dict(result.turn_reflection)
         cognitive_events = CognitiveEvent.build_turn_events(
@@ -109,7 +114,12 @@ class ReflectionManager:
         return await self._deep_reflection.propose(events)
 
     def append_deep_memories(self, proposal: DeepReflectionProposal) -> DeepReflectionResult:
-        memory_ids = self._memory_store.append_many(proposal.memory_candidates)
+        records = [
+            *list(proposal.memory_candidates),
+            *self._build_deep_update_records(target="user_model", updates=proposal.user_updates),
+            *self._build_deep_update_records(target="persona", updates=proposal.soul_updates),
+        ]
+        memory_ids = self._memory_store.append_many(records)
         skill_hint_count = sum(
             1
             for record in proposal.memory_candidates
@@ -128,6 +138,48 @@ class ReflectionManager:
             user_updates=list(proposal.user_updates),
             soul_updates=list(proposal.soul_updates),
         )
+
+    @staticmethod
+    def _build_deep_update_records(*, target: str, updates: list[str]) -> list[dict[str, Any]]:
+        normalized = ReflectionManager._normalize_text_list(updates)
+        if not normalized:
+            return []
+
+        if target == "user_model":
+            memory_type = "user_model"
+            confidence = 0.86
+            stability = 0.9
+            tags = ["user_model", "deep_reflection"]
+            subtype = "user_model"
+            importance = 7
+        else:
+            memory_type = "persona"
+            confidence = 0.84
+            stability = 0.92
+            tags = ["persona", "deep_reflection"]
+            subtype = "persona"
+            importance = 7
+
+        records: list[dict[str, Any]] = []
+        for text in normalized:
+            records.append(
+                {
+                    "memory_type": memory_type,
+                    "summary": text,
+                    "detail": text,
+                    "confidence": confidence,
+                    "stability": stability,
+                    "tags": tags,
+                    "source_module": "reflection_governor.deep_reflection",
+                    "metadata": {
+                        "subtype": subtype,
+                        "importance": importance,
+                        "scope": "deep",
+                        "source": "deep_reflection_updates",
+                    },
+                }
+            )
+        return records
 
     def recent_cognitive_events(self, *, limit: int) -> list[dict[str, Any]]:
         return CognitiveEvent.recent(self._workspace, limit=limit)
@@ -398,6 +450,4 @@ class ReflectionManager:
 
 
 __all__ = ["ReflectionManager", "TurnReflectionProposal"]
-
-
 

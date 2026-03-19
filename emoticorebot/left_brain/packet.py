@@ -114,7 +114,18 @@ def _parse_tagged_output(text: str) -> dict[str, Any] | None:
         body = text[start:end].strip()
         sections.append((name, body))
 
-    if [name for name, _body in sections] != ["user", "task"]:
+    section_names = [name for name, _body in sections]
+    if section_names == ["user"]:
+        user_text = str(sections[0][1] or "").strip()
+        if not user_text:
+            raise RuntimeError("Left-brain tagged output requires a non-empty ####user#### section")
+        return {
+            "task_action": "none",
+            "task_mode": "skip",
+            "final_message": user_text,
+        }
+
+    if section_names != ["user", "task"]:
         raise RuntimeError("Left-brain output must place ####user#### before ####task####")
 
     user_text = str(sections[0][1] or "").strip()

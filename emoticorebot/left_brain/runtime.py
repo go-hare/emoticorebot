@@ -380,6 +380,11 @@ class LeftBrainRuntime:
         delivery_mode = str(getattr(followup.delivery_target, "delivery_mode", "") or "").strip()
         if delivery_mode == "push":
             return False
+        metadata = dict(getattr(followup, "metadata", {}) or {})
+        if followup.source_event == str(EventType.RIGHT_EVENT_PROGRESS):
+            progress_event = str(metadata.get("event", "") or "").strip()
+            if progress_event in {"task.trace", "task.tool"}:
+                return False
         return followup.source_event in {
             str(EventType.RIGHT_EVENT_JOB_ACCEPTED),
             str(EventType.RIGHT_EVENT_PROGRESS),
@@ -1225,8 +1230,6 @@ class LeftBrainRuntime:
 
 
 __all__ = ["LeftBrainRuntime"]
-
-
 
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from langchain_core.messages import AIMessage
+
 from emoticorebot.right_brain.backend import build_prompt
 from emoticorebot.right_brain.executor import RightBrainExecutor
 
@@ -126,3 +128,50 @@ async def _exercise_invoke_agent_includes_memory_and_skill_hints() -> None:
 
 def test_invoke_agent_includes_memory_and_skill_hints() -> None:
     asyncio.run(_exercise_invoke_agent_includes_memory_and_skill_hints())
+
+
+class _StreamingAgent:
+    def __init__(self) -> None:
+        self.stream_mode = None
+
+    async def astream(self, payload, *, config=None, stream_mode=None, subgraphs=None):
+        del payload, config, subgraphs
+        self.stream_mode = stream_mode
+        yield ((), "updates", {"planner": {"messages": [AIMessage(content="先看一下")]}})
+        yield ((), "updates", {"planner": {"messages": [AIMessage(content="项目结构")]}})
+        yield ((), "values", {"control_state": "completed", "status": "success", "message": "done"})
+
+
+async def _exercise_invoke_agent_awaits_stream_and_emits_assistant_traces() -> None:
+    executor = _build_executor()
+    agent = _StreamingAgent()
+    trace_events: list[tuple[str, dict[str, object]]] = []
+
+    result = await executor._invoke_agent(
+        agent,
+        {
+            "request": "处理这个复杂任务",
+            "task_context": {},
+        },
+        "thread_stream_1",
+        "run_stream_1",
+        trace_reporter=lambda message, payload: _append_trace(trace_events, message, payload),
+    )
+
+    assert result["control_state"] == "completed"
+    assert [message for message, _payload in trace_events] == ["先看一下", "项目结构"]
+    assert agent.stream_mode == ["updates", "values"]
+    assert all(payload["event"] == "task.trace" for _, payload in trace_events)
+    assert all(payload["payload"]["role"] == "assistant" for _, payload in trace_events)
+
+
+async def _append_trace(
+    events: list[tuple[str, dict[str, object]]],
+    message: str,
+    payload: dict[str, object],
+) -> None:
+    events.append((message, payload))
+
+
+def test_invoke_agent_awaits_stream_and_emits_assistant_traces() -> None:
+    asyncio.run(_exercise_invoke_agent_awaits_stream_and_emits_assistant_traces())

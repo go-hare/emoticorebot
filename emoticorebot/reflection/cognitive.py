@@ -113,9 +113,11 @@ class CognitiveEvent:
                 "unknown": "未知",
             }.get(outcome_raw, outcome_raw or "未知")
             used_task = bool((row.get("task") or {}).get("used"))
+            needs_deep_reflection = bool(((row.get("turn_reflection") or {}).get("needs_deep_reflection", False)))
             importance = float((row.get("meta") or {}).get("importance", 0.5) or 0.5)
             mode = "执行" if used_task else "直答"
-            lines.append(f"- [{emotion}|{mode}|{outcome}|{importance:.2f}] {summary}")
+            deep_flag = "继续深反思" if needs_deep_reflection else "浅反思终结"
+            lines.append(f"- [{emotion}|{mode}|{outcome}|{deep_flag}|{importance:.2f}] {summary}")
 
         if not lines:
             return []
@@ -266,6 +268,7 @@ class CognitiveEvent:
             "resolution": str(value.get("resolution", "") or "").strip(),
             "outcome": str(value.get("outcome", "") or "").strip(),
             "next_hint": str(value.get("next_hint", "") or "").strip(),
+            "needs_deep_reflection": bool(value.get("needs_deep_reflection", False)),
             "user_updates": [
                 str(item).strip() for item in list(value.get("user_updates", []) or []) if str(item).strip()
             ],
@@ -318,4 +321,3 @@ class CognitiveEvent:
 
 
 __all__ = ["CognitiveEvent"]
-

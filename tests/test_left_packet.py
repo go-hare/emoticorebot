@@ -77,6 +77,20 @@ task_mode=skip
     }
 
 
+def test_user_only_tagged_reply_defaults_to_direct_answer() -> None:
+    payload = parse_decision_packet(
+        """####user####
+等于 2 呀……你是在故意逗我玩吗？
+"""
+    )
+
+    assert payload == {
+        "task_action": "none",
+        "task_mode": "skip",
+        "final_message": "等于 2 呀……你是在故意逗我玩吗？",
+    }
+
+
 def test_tagged_cancel_task_is_parsed() -> None:
     payload = parse_decision_packet(
         """####user####

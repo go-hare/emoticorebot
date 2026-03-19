@@ -63,7 +63,14 @@ class ExecTool(Tool):
         }
     
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
-        cwd = working_dir or self.working_dir or os.getcwd()
+        base_dir = Path(self.working_dir or os.getcwd()).resolve()
+        raw_working_dir = str(working_dir or "").strip()
+        if raw_working_dir:
+            requested_dir = Path(raw_working_dir).expanduser()
+            cwd_path = requested_dir.resolve() if requested_dir.is_absolute() else (base_dir / requested_dir).resolve()
+        else:
+            cwd_path = base_dir
+        cwd = str(cwd_path)
         
         # 安全检查
         guard_error = self._guard_command(command, cwd)

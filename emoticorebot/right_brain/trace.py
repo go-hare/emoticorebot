@@ -37,8 +37,6 @@ def parse_stream_item(item: Any) -> tuple[tuple[str, ...], str, Any]:
 
 def build_trace_records(*, mode: str, namespace: tuple[str, ...], data: Any) -> list[dict[str, Any]]:
     normalized = build_normalized_trace_messages(mode=mode, namespace=namespace, data=data)
-    if normalized:
-        return normalized
 
     base: dict[str, Any] = {
         "role": "assistant",
@@ -49,24 +47,31 @@ def build_trace_records(*, mode: str, namespace: tuple[str, ...], data: Any) -> 
     if namespace:
         base["namespace"] = list(namespace)
 
+    records = list(normalized)
     if mode == "updates" and isinstance(data, dict):
-        records: list[dict[str, Any]] = []
-        for node_name, node_data in data.items():
-            record = dict(base)
-            record["node"] = str(node_name)
-            record["content"] = summarize_trace_payload(node_data) or str(node_name)
-            records.append(record)
-        return records
-
-    if mode == "messages":
-        return build_message_trace_records(base, data)
-
-    if mode == "custom":
+        if not normalized:
+            for node_name, node_data in data.items():
+                record = dict(base)
+                record["node"] = str(node_name)
+                record["content"] = summarize_trace_payload(node_data) or str(node_name)
+                records.append(record)
+    elif mode == "messages":
+        records.extend(build_message_trace_records(base, data))
+    elif mode == "custom":
         record = dict(base)
         record["content"] = compact_trace_text(json_safe_dump(data), limit=240)
-        return [record]
+        records.append(record)
 
-    return []
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in records:
+        signature = str(record.get("trace_signature", "") or "").strip()
+        if signature:
+            if signature in seen:
+                continue
+            seen.add(signature)
+        deduped.append(record)
+    return deduped
 
 
 def build_normalized_trace_messages(
@@ -113,20 +118,22 @@ def message_to_conversation_records(message: Any) -> list[dict[str, Any]]:
 
     tool_calls = extract_message_attr(message, "tool_calls")
     normalized_calls = normalize_trace_tool_calls(tool_calls)
-    if normalized_calls:
-        assistant_record: dict[str, Any] = {
-            "role": "assistant",
-            "content": normalize_content_blocks(extract_message_attr(message, "content")),
-            "tool_calls": normalized_calls,
-            "timestamp": timestamp,
-        }
-        assistant_record["trace_signature"] = trace_signature(assistant_record)
-        records.append(assistant_record)
-
     tool_call_id = str(extract_message_attr(message, "tool_call_id") or "").strip()
     message_type = str(extract_message_attr(message, "type") or type(message).__name__ or "").lower()
     name = str(extract_message_attr(message, "name") or "").strip()
     content = normalize_content_blocks(extract_message_attr(message, "content"))
+    is_tool_message = bool(tool_call_id or message_type == "tool" or message_type.endswith("toolmessage"))
+    if normalized_calls or (content and not is_tool_message):
+        assistant_record: dict[str, Any] = {
+            "role": "assistant",
+            "content": content,
+            "timestamp": timestamp,
+        }
+        if normalized_calls:
+            assistant_record["tool_calls"] = normalized_calls
+        assistant_record["trace_signature"] = trace_signature(assistant_record)
+        records.append(assistant_record)
+
     if tool_call_id or message_type == "tool" or message_type.endswith("toolmessage"):
         tool_record: dict[str, Any] = {
             "role": "tool",
@@ -194,11 +201,19 @@ def build_message_trace_records(base: dict[str, Any], data: Any) -> list[dict[st
         if node_name:
             record_base["node"] = node_name
 
+    records: list[dict[str, Any]] = []
+    assistant_content = normalize_content_blocks(extract_message_attr(message_chunk, "content"))
+    if assistant_content:
+        record = dict(record_base)
+        record["role"] = "assistant"
+        record["content"] = assistant_content
+        record["trace_signature"] = trace_signature(record)
+        records.append(record)
+
     tool_call_chunks = extract_message_attr(message_chunk, "tool_call_chunks")
     if not isinstance(tool_call_chunks, list):
-        return []
+        return records
 
-    records: list[dict[str, Any]] = []
     for chunk in tool_call_chunks:
         if not isinstance(chunk, dict):
             continue
@@ -211,10 +226,9 @@ def build_message_trace_records(base: dict[str, Any], data: Any) -> list[dict[st
         if tool_name:
             record["tool_name"] = tool_name
         record["content"] = args_chunk or tool_name
+        record["trace_signature"] = trace_signature(record)
         records.append(record)
     return records
-
-
 def summarize_trace_payload(payload: Any) -> str:
     if isinstance(payload, dict):
         messages = payload.get("messages")
