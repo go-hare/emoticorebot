@@ -3,7 +3,7 @@
 这个模块负责装配系统主通路：
 1. 消息调度（接收消息、分发处理）
 2. 协调 transport、线程历史与新的 bus-driven runtime kernel
-3. 线程历史管理（加载/保存 `front` 与 `right` 原始记录）
+3. 线程历史管理（加载/保存 `left` 与 `right` 原始记录）
 4. 反思与后台服务调度
 """
 
@@ -19,10 +19,10 @@ from uuid import uuid4
 from loguru import logger
 
 from emoticorebot.adapters.conversation_gateway import ConversationGateway
-from emoticorebot.agent.tool import ToolManager
+from emoticorebot.tools.manager import ToolManager
 from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersConfig
-from emoticorebot.agent.context import ContextBuilder
-from emoticorebot.agent.model import LLMFactory
+from emoticorebot.left_brain.context import ContextBuilder
+from emoticorebot.providers.factory import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.memory.short_term import ShortTermMemoryStore
 from emoticorebot.protocol.envelope import BusEnvelope
@@ -45,8 +45,8 @@ class RuntimeHost:
         self,
         bus: TransportBus,
         workspace: Path,
-        worker_mode: "ModelModeConfig",
-        brain_mode: "ModelModeConfig",
+        right_brain_mode: "ModelModeConfig",
+        left_brain_mode: "ModelModeConfig",
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
@@ -61,9 +61,9 @@ class RuntimeHost:
 
         self.bus = bus
         self.workspace = workspace
-        self.worker_mode = worker_mode
-        self.brain_mode = brain_mode
-        self.memory_window = worker_mode.memory_window
+        self.right_brain_mode = right_brain_mode
+        self.left_brain_mode = left_brain_mode
+        self.memory_window = right_brain_mode.memory_window
         self.channels_config = channels_config
 
         self.thread_store = thread_store or ThreadStore(workspace)
@@ -77,11 +77,11 @@ class RuntimeHost:
 
         factory = LLMFactory(
             providers_config=providers_config,
-            worker_mode=worker_mode,
-            brain_mode=brain_mode,
+            right_brain_mode=right_brain_mode,
+            left_brain_mode=left_brain_mode,
         )
-        self.worker_llm = factory.get_worker()
-        self.brain_llm = factory.get_brain()
+        self.right_brain_llm = factory.get_right_brain()
+        self.left_brain_llm = factory.get_left_brain()
 
         self.tool_manager = ToolManager(
             workspace,
@@ -98,9 +98,9 @@ class RuntimeHost:
         self.kernel = RuntimeKernel(
             workspace=workspace,
             transport=self.bus,
-            brain_llm=self.brain_llm,
-            worker_llm=self.worker_llm,
-            reflection_llm=self.brain_llm,
+            left_brain_llm=self.left_brain_llm,
+            executor_llm=self.right_brain_llm,
+            reflection_llm=self.left_brain_llm,
             context_builder=self.context,
             tool_registry=self.tool_manager.get_registry(),
             emotion_manager=self.emotion_mgr,
@@ -280,7 +280,7 @@ class RuntimeHost:
     async def generate_proactive_message(self, prompt: str) -> str:
         """Generate a proactive user-facing message without entering the task pipeline."""
         fallback = "刚刚想到你了，就来打个招呼。"
-        model = self.brain_llm
+        model = self.left_brain_llm
         if model is None:
             return fallback
         try:
@@ -361,16 +361,14 @@ class RuntimeHost:
         latest_task = self.kernel.latest_task_for_session(session_id, include_terminal=True)
         if latest_task is not None and latest_task.turn_id == turn.turn_id:
             task_action = "create_task"
-        execution_summary = "brain/runtime kernel completed turn dispatch"
-        final_decision = "continue" if task_action != "none" else "answer"
+        execution_summary = "left/runtime kernel completed turn dispatch"
 
         final_state: dict[str, Any] = {
             "turn_id": turn.turn_id,
             "output": message,
             "execution_summary": execution_summary,
-            "brain": {
+            "left_brain": {
                 "task_action": task_action,
-                "final_decision": final_decision,
                 "execution_summary": execution_summary,
                 "reply_event_type": turn.event_type,
                 "turn_id": turn.turn_id,
@@ -406,27 +404,26 @@ class RuntimeHost:
             "source": source,
         }
 
-        brain_info = final_state.get("brain", {})
+        left_brain_info = final_state.get("left_brain", {})
         execution_summary = final_state.get("execution_summary", "")
-        task_action = str(brain_info.get("task_action", "none") or "none").strip() or "none"
+        task_action = str(left_brain_info.get("task_action", "none") or "none").strip() or "none"
         if task_action != "none":
             summary = str(execution_summary or final_state.get("output", "") or "").strip()
-            brain_record = {
+            left_brain_record = {
                 **base_record,
                 "job_id": str(((final_state.get("task") or {}).get("task_id", "") if isinstance(final_state.get("task"), dict) else "") or "").strip(),
                 "event_type": "job_requested",
                 "content": summary,
                 "metadata": {
-                    "brain": {
+                    "left_brain": {
                         "task_action": task_action,
-                        "final_decision": brain_info.get("final_decision", "answer"),
-                        "reply_event_type": brain_info.get("reply_event_type", ""),
-                        "turn_id": brain_info.get("turn_id", ""),
+                        "reply_event_type": left_brain_info.get("reply_event_type", ""),
+                        "turn_id": left_brain_info.get("turn_id", ""),
                         "execution_summary": execution_summary,
                     }
                 },
             }
-            records.append(brain_record)
+            records.append(left_brain_record)
 
         task_info = final_state.get("task")
         if task_info:
@@ -516,8 +513,19 @@ class RuntimeHost:
             )
         return self._compact_task_state_for_session(
             project_task_from_runtime_snapshot(
-                task.snapshot().model_dump(exclude_none=True),
+                {
+                    "task_id": task.task_id,
+                    "state": task.state.value,
+                    "result": task.result,
+                    "state_version": task.state_version,
+                    "title": task.title,
+                    "summary": task.summary,
+                    "error": task.error,
+                    "last_progress": task.last_progress,
+                    "updated_at": task.updated_at,
+                },
                 params=params,
+                trace=list(task.trace_log),
             )
         )
 
@@ -576,22 +584,10 @@ class RuntimeHost:
             "summary",
             "error",
             "stage",
-            "recommended_action",
-            "confidence",
-            "attempt_count",
         ):
             value = task_state.get(key)
             if value not in ("", None, [], {}):
                 compact[key] = value
-        missing = [str(item).strip() for item in list(task_state.get("missing", []) or []) if str(item).strip()]
-        if missing:
-            compact["missing"] = missing
-        input_request = task_state.get("input_request")
-        if isinstance(input_request, dict) and input_request:
-            compact["input_request"] = {
-                "field": str(input_request.get("field", "") or "").strip(),
-                "question": str(input_request.get("question", "") or "").strip(),
-            }
         task_trace = task_state.get("task_trace")
         if isinstance(task_trace, list) and task_trace:
             compact["task_trace"] = [item for item in task_trace if isinstance(item, dict)]
@@ -620,9 +616,9 @@ class RuntimeHost:
                 if summary:
                     return summary
 
-            brain = metadata.get("brain", {})
-            if isinstance(brain, dict):
-                return str(brain.get("execution_summary", "") or "").strip()
+            left_brain = metadata.get("left_brain", {})
+            if isinstance(left_brain, dict):
+                return str(left_brain.get("execution_summary", "") or "").strip()
 
         return ""
 
@@ -818,3 +814,4 @@ class RuntimeHost:
 
 
 __all__ = ["RuntimeHost"]
+

@@ -10,17 +10,17 @@ from uuid import uuid4
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.delivery.runtime import DeliveryRuntime
-from emoticorebot.front.controller import FrontRuntime
-from emoticorebot.io.normalizer import InputNormalizer
-from emoticorebot.memory.persona import GovernedWriteResult
+from emoticorebot.input.normalizer import InputNormalizer
+from emoticorebot.left_brain.runtime import LeftBrainRuntime
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.output.runtime import OutputRuntime
 from emoticorebot.protocol.contracts import ChannelKind, InputKind, SessionMode
 from emoticorebot.protocol.envelope import BusEnvelope
-from emoticorebot.protocol.events import DeliveryFailedPayload, RepliedPayload, ReplyReadyPayload
+from emoticorebot.protocol.events import DeliveryFailedPayload, OutputReadyPayloadBase, RepliedPayload
 from emoticorebot.protocol.topics import EventType
+from emoticorebot.reflection.persona import GovernedWriteResult
 from emoticorebot.reflection.runtime import ReflectionRuntime
-from emoticorebot.right.runtime import RightBrainRuntime
+from emoticorebot.right_brain.runtime import RightBrainRuntime
 from emoticorebot.runtime.transport_bus import TransportBus
 from emoticorebot.session.runtime import SessionRuntime
 
@@ -42,15 +42,15 @@ class _OpenInputStream:
 
 
 class RuntimeKernel:
-    """Owns the documented brain/runtime/agent/safety/delivery event graph."""
+    """Owns the documented left/right/runtime/reflection/delivery event graph."""
 
     def __init__(
         self,
         *,
         workspace: Path,
         transport: TransportBus | None = None,
-        brain_llm: object | None = None,
-        worker_llm: object | None = None,
+        left_brain_llm: object | None = None,
+        executor_llm: object | None = None,
         reflection_llm: object | None = None,
         context_builder: object | None = None,
         tool_registry: object | None = None,
@@ -58,21 +58,21 @@ class RuntimeKernel:
         memory_config: MemoryConfig | None = None,
         providers_config: ProvidersConfig | None = None,
     ) -> None:
-        self._brain_llm = brain_llm
+        self._left_brain_llm = left_brain_llm
         self._context_builder = context_builder
         self._bus = PriorityPubSubBus()
         self._input_normalizer = InputNormalizer()
         self._right_brain_runtime = RightBrainRuntime(
             bus=self._bus,
-            worker_llm=worker_llm,
+            executor_llm=executor_llm,
             context_builder=context_builder,
             tool_registry=tool_registry,
         )
         self._session = SessionRuntime(bus=self._bus, task_store=self._right_brain_runtime.task_store)
-        self._front = FrontRuntime(
+        self._left_brain = LeftBrainRuntime(
             bus=self._bus,
             task_store=self._right_brain_runtime.task_store,
-            brain_llm=brain_llm,
+            left_brain_llm=left_brain_llm,
             context_builder=context_builder,
             session_runtime=self._session,
         )
@@ -95,7 +95,7 @@ class RuntimeKernel:
 
         self._session.register()
         self._right_brain_runtime.register()
-        self._front.register()
+        self._left_brain.register()
         self._output_runtime = OutputRuntime(bus=self._bus)
         self._output_runtime.register()
         self._delivery_runtime = DeliveryRuntime(bus=self._bus, transport=transport, should_deliver=self._should_deliver_reply)
@@ -126,8 +126,8 @@ class RuntimeKernel:
         return self._right_brain_runtime
 
     @property
-    def front_runtime(self) -> FrontRuntime:
-        return self._front
+    def left_brain_runtime(self) -> LeftBrainRuntime:
+        return self._left_brain
 
     @property
     def reflection_runtime(self) -> ReflectionRuntime:
@@ -149,7 +149,7 @@ class RuntimeKernel:
         self._started = True
 
     async def stop(self) -> None:
-        await self._front.stop()
+        await self._left_brain.stop()
         await self._right_brain_runtime.stop()
         await self._reflection.stop()
         await self._bus.stop()
@@ -170,8 +170,8 @@ class RuntimeKernel:
         metadata: dict[str, object] | None = None,
         timeout_s: float = 30.0,
     ) -> TurnReply:
-        if self._brain_llm is None:
-            raise RuntimeError("RuntimeKernel.handle_user_message requires brain_llm")
+        if self._left_brain_llm is None:
+            raise RuntimeError("RuntimeKernel.handle_user_message requires left_brain_llm")
         await self.start()
         turn_id = f"turn_{uuid4().hex[:12]}"
         key = (session_id, turn_id)
@@ -277,8 +277,8 @@ class RuntimeKernel:
         metadata: dict[str, object] | None = None,
         timeout_s: float = 30.0,
     ) -> TurnReply:
-        if self._brain_llm is None:
-            raise RuntimeError("RuntimeKernel.commit_user_stream requires brain_llm")
+        if self._left_brain_llm is None:
+            raise RuntimeError("RuntimeKernel.commit_user_stream requires left_brain_llm")
         await self.start()
         self._require_open_input_stream(session_id=session_id, stream_id=stream_id)
 
@@ -375,7 +375,7 @@ class RuntimeKernel:
             reason=reason,
         )
 
-    async def _remember_reply_candidate(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
+    async def _remember_reply_candidate(self, event: BusEnvelope[OutputReadyPayloadBase]) -> None:
         if not self._should_deliver_reply(event):
             return
         stream_state = self._stream_state(event.payload)
@@ -385,10 +385,10 @@ class RuntimeKernel:
         future = self._pending_turns.get(key)
         if future is None or future.done():
             return
-        content = event.payload.reply.plain_text or "\n".join(
-            block.text or "" for block in event.payload.reply.content_blocks if block.type == "text"
+        content = event.payload.content.plain_text or "\n".join(
+            block.text or "" for block in event.payload.content.content_blocks if block.type == "text"
         ).strip()
-        reply_id = event.payload.reply.reply_id
+        reply_id = event.payload.content.reply_id
         self._pending_reply_ids_by_turn.setdefault(key, set()).add(reply_id)
         self._pending_reply_candidates[reply_id] = TurnReply(
             session_id=event.session_id or "",
@@ -452,8 +452,8 @@ class RuntimeKernel:
             self._pending_reply_candidates.pop(reply_id, None)
             self._pending_delivery_receipts.discard(reply_id)
 
-    def _should_deliver_reply(self, event: BusEnvelope[ReplyReadyPayload]) -> bool:
-        if event.event_type == EventType.OUTPUT_PUSH_READY or event.payload.delivery_mode == "push":
+    def _should_deliver_reply(self, event: BusEnvelope[OutputReadyPayloadBase]) -> bool:
+        if event.event_type == EventType.OUTPUT_PUSH_READY or event.payload.delivery_target.delivery_mode == "push":
             return True
         session_id = str(event.session_id or "").strip()
         turn_id = str(event.turn_id or "").strip()
@@ -465,8 +465,8 @@ class RuntimeKernel:
         return current_turn_id == turn_id
 
     @staticmethod
-    def _stream_state(payload: ReplyReadyPayload) -> str:
-        return str(payload.stream_state or "").strip()
+    def _stream_state(payload: OutputReadyPayloadBase) -> str:
+        return str(getattr(payload, "stream_state", "") or "").strip()
 
     def _require_open_input_stream(self, *, session_id: str, stream_id: str) -> _OpenInputStream:
         key = (str(session_id or "").strip(), str(stream_id or "").strip())

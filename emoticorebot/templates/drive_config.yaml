@@ -19,21 +19,5 @@ triggers:
 
 schedules:
   decay_minutes: 30
-  reflect_hours: 1
+  reflection_hours: 1
   proactive_check_minutes: 10
-
-orchestration:
-  weights:
-    emotion_intensity: 0.45
-    relationship_need: 0.35
-    inverse_task_strength: 0.20
-  thresholds:
-    brain_first_emotion: 0.70
-    central_first_urgency: 0.70
-    central_first_task: 0.55
-    high_central_weight: 0.70
-    high_brain_weight: 0.70
-  tool_budget:
-    high_central: 6
-    high_brain: 3
-    balanced: 4

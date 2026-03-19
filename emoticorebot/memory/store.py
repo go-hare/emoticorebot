@@ -163,7 +163,7 @@ class MemoryStore:
         self._record_vector_accesses(records=selected, vector_scores=vector_scores, vector_index=vector_index)
         return selected
 
-    def build_brain_context(self, *, query: str, limit: int = 8) -> str:
+    def build_left_brain_context(self, *, query: str, limit: int = 8) -> str:
         records = self.query(query, memory_types=tuple(BRAIN_MEMORY_TYPES), limit=limit)
         if not records:
             return ""
@@ -603,3 +603,4 @@ class MemoryStore:
 
 
 __all__ = ["MemoryStore"]
+

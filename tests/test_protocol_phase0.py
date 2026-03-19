@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from emoticorebot.protocol.commands import AssignAgentPayload, TaskCreatePayload
+from emoticorebot.protocol.commands import LeftReplyRequestPayload, RightBrainJobRequestPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.event_contracts import PAYLOAD_MODEL_BY_EVENT_TYPE
-from emoticorebot.protocol.events import ReplyReadyPayload, TurnInputPayload
+from emoticorebot.protocol.events import DeliveryTargetPayload, OutputInlineReadyPayload, TurnInputPayload
 from emoticorebot.protocol.priorities import EventPriority, priority_for
-from emoticorebot.protocol.task_models import MessageRef, ReplyDraft, TaskStateSnapshot
+from emoticorebot.protocol.task_models import MessageRef, ReplyDraft
 from emoticorebot.protocol.topics import EventType, Topic
 
 
@@ -33,28 +33,38 @@ def test_build_envelope_derives_topic_and_default_priority() -> None:
 
 
 def test_business_event_requires_session_id() -> None:
-    payload = TaskCreatePayload(command_id="cmd_1", request="write a report")
+    payload = RightBrainJobRequestPayload(
+        job_id="job_1",
+        job_action="create_task",
+        request_text="write a report",
+        delivery_target=DeliveryTargetPayload(delivery_mode="push", channel="cli", chat_id="direct"),
+    )
 
     with pytest.raises(ValueError):
         BusEnvelope(
-            topic=Topic.TASK_COMMAND,
-            event_type=EventType.TASK_CREATE,
+            topic=Topic.RIGHT_COMMAND,
+            event_type=EventType.RIGHT_COMMAND_JOB_REQUESTED,
             priority=EventPriority.P1,
-            source="brain",
-            target="runtime",
+            source="left_runtime",
+            target="right_runtime",
             payload=payload,
         )
 
 
 def test_nested_payloads_validate_against_document_models() -> None:
-    event = TaskCreatePayload.model_validate(
+    payload = RightBrainJobRequestPayload.model_validate(
         {
-            "command_id": "cmd_1",
-            "request": "write a report",
+            "job_id": "job_1",
+            "job_action": "create_task",
+            "request_text": "write a report",
             "goal": "produce a concise report",
+            "delivery_target": {
+                "delivery_mode": "push",
+                "channel": "cli",
+                "chat_id": "direct",
+            },
             "context": {
                 "title": "report",
-                "review_policy": "required",
                 "origin_message": {
                     "channel": "cli",
                     "chat_id": "direct",
@@ -64,52 +74,60 @@ def test_nested_payloads_validate_against_document_models() -> None:
         }
     )
 
-    assert event.request == "write a report"
-    assert event.context["origin_message"]["message_id"] == "msg_1"
+    assert payload.request_text == "write a report"
+    assert payload.delivery_target == DeliveryTargetPayload(delivery_mode="push", channel="cli", chat_id="direct")
+    assert payload.context["origin_message"]["message_id"] == "msg_1"
 
 
-def test_assign_agent_payload_uses_typed_nested_models() -> None:
-    payload = AssignAgentPayload.model_validate(
+def test_left_reply_request_uses_typed_nested_models() -> None:
+    payload = LeftReplyRequestPayload.model_validate(
         {
-            "assignment_id": "assign_1",
-            "task_id": "task_1",
-            "agent_role": "worker",
-            "task_state": {
-                "task_id": "task_1",
-                "state": "running",
-                "state_version": 2,
-            },
-            "task_request": {
-                "request": "fix the failing tests",
-                "constraints": ["keep changes small"],
+            "request_id": "left_req_1",
+            "turn_input": {
+                "input_id": "turn_1",
+                "input_mode": "turn",
+                "session_mode": "turn_chat",
+                "message": {
+                    "channel": "cli",
+                    "chat_id": "direct",
+                    "message_id": "msg_1",
+                },
+                "user_text": "fix the failing tests",
+                "metadata": {"channel_kind": "chat"},
             },
         }
     )
 
-    assert isinstance(payload.task_state, TaskStateSnapshot)
-    assert payload.task_request is not None
-    assert payload.task_request.constraints == ["keep changes small"]
+    assert isinstance(payload.turn_input, TurnInputPayload)
+    assert payload.turn_input.message.message_id == "msg_1"
+    assert payload.followup_context is None
 
 
 def test_safe_fallback_is_nested_inside_reply_draft() -> None:
-    payload = ReplyReadyPayload.model_validate(
+    payload = OutputInlineReadyPayload.model_validate(
         {
-            "reply": {
+            "output_id": "out_2",
+            "delivery_target": {
+                "delivery_mode": "inline",
+                "channel": "cli",
+                "chat_id": "direct",
+            },
+            "content": {
                 "reply_id": "reply_2",
                 "kind": "safety_fallback",
                 "plain_text": "I cannot share that.",
                 "safe_fallback": True,
-            }
+            },
         }
     )
 
-    assert payload.reply.safe_fallback is True
+    assert payload.content.safe_fallback is True
 
 
 def test_priority_mapping_matches_document_examples() -> None:
-    assert priority_for(EventType.TASK_CANCEL) == EventPriority.P0
-    assert priority_for(EventType.TASK_END) == EventPriority.P2
-    assert priority_for(EventType.MEMORY_WRITE_REQUEST) == EventPriority.P4
+    assert priority_for(EventType.CONTROL_STOP) == EventPriority.P0
+    assert priority_for(EventType.RIGHT_EVENT_RESULT_READY) == EventPriority.P2
+    assert priority_for(EventType.REFLECTION_WRITE_REQUEST) == EventPriority.P4
 
 
 def test_every_known_event_type_has_payload_contract() -> None:
@@ -128,9 +146,11 @@ def test_build_envelope_rejects_event_payload_type_mismatch() -> None:
 
     with pytest.raises(ValueError, match="does not match expected"):
         build_envelope(
-            event_type=EventType.TASK_CREATE,
-            source="brain",
-            target="runtime",
+            event_type=EventType.RIGHT_COMMAND_JOB_REQUESTED,
+            source="left_runtime",
+            target="right_runtime",
             session_id="sess_2",
             payload=wrong_payload,
         )
+
+

@@ -12,12 +12,8 @@ class Topic(StrEnum):
     RIGHT_COMMAND = "right.command"
     RIGHT_EVENT = "right.event"
     REFLECTION_EVENT = "reflection.event"
-    RUNTIME_COMMAND = "runtime.command"
-    TASK_COMMAND = "task.command"
-    TASK_REPORT = "task.report"
-    TASK_EVENT = "task.event"
+    REFLECTION_SIGNAL = "reflection.signal"
     OUTPUT_EVENT = "output.event"
-    MEMORY_SIGNAL = "memory.signal"
     CONTROL_COMMAND = "control.command"
     PERCEPTION_EVENT = "perception.event"
     SYSTEM_SIGNAL = "system.signal"
@@ -41,32 +37,8 @@ class EventType(StrEnum):
     RIGHT_EVENT_JOB_REJECTED = "right.event.job_rejected"
     RIGHT_EVENT_RESULT_READY = "right.event.result_ready"
 
-    TASK_CREATE = "task.command.create"
-    TASK_RESUME = "task.command.resume"
-    TASK_CANCEL = "task.command.cancel"
-
-    RUNTIME_ASSIGN_AGENT = "runtime.command.assign_agent"
-    RUNTIME_RESUME_AGENT = "runtime.command.resume_agent"
-    RUNTIME_CANCEL_AGENT = "runtime.command.cancel_agent"
-    RUNTIME_ARCHIVE_TASK = "runtime.command.archive_task"
-
-    TASK_REPORT_STARTED = "task.report.started"
-    TASK_REPORT_PROGRESS = "task.report.progress"
-    TASK_REPORT_NEED_INPUT = "task.report.need_input"
-    TASK_REPORT_PLAN_READY = "task.report.plan_ready"
-    TASK_REPORT_RESULT = "task.report.result"
-    TASK_REPORT_APPROVED = "task.report.approved"
-    TASK_REPORT_REJECTED = "task.report.rejected"
-    TASK_REPORT_FAILED = "task.report.failed"
-    TASK_REPORT_CANCELLED = "task.report.cancelled"
-
-    TASK_UPDATE = "task.event.update"
-    TASK_SUMMARY = "task.event.summary"
-    TASK_ASK = "task.event.ask"
-    TASK_END = "task.event.end"
-
-    REFLECT_LIGHT = "reflection.event.light"
-    REFLECT_DEEP = "reflection.event.deep"
+    REFLECTION_LIGHT = "reflection.event.light"
+    REFLECTION_DEEP = "reflection.event.deep"
 
     OUTPUT_INLINE_READY = "output.event.inline_ready"
     OUTPUT_PUSH_READY = "output.event.push_ready"
@@ -76,10 +48,10 @@ class EventType(StrEnum):
     OUTPUT_REPLIED = "output.event.replied"
     OUTPUT_DELIVERY_FAILED = "output.event.delivery_failed"
 
-    MEMORY_WRITE_REQUEST = "memory.signal.write_request"
-    MEMORY_WRITE_COMMITTED = "memory.signal.write_committed"
-    MEMORY_UPDATE_PERSONA = "memory.signal.update_persona"
-    MEMORY_UPDATE_USER_MODEL = "memory.signal.update_user_model"
+    REFLECTION_WRITE_REQUEST = "reflection.signal.write_request"
+    REFLECTION_WRITE_COMMITTED = "reflection.signal.write_committed"
+    REFLECTION_UPDATE_PERSONA = "reflection.signal.update_persona"
+    REFLECTION_UPDATE_USER_MODEL = "reflection.signal.update_user_model"
 
     CONTROL_SPEAK = "control.command.speak"
     CONTROL_MOVE = "control.command.move"
@@ -105,3 +77,4 @@ def topic_for(event_type: EventType | str) -> str:
 
 
 __all__ = ["EventType", "Topic", "topic_for"]
+

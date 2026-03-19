@@ -5,9 +5,9 @@ import asyncio
 import pytest
 
 from emoticorebot.bus import BackpressureController, BackpressureError, PriorityPubSubBus, block, redact
-from emoticorebot.protocol.commands import TaskCancelPayload
+from emoticorebot.protocol.commands import ControlCommandPayload
 from emoticorebot.protocol.envelope import build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload, SystemSignalPayload, TurnInputPayload
+from emoticorebot.protocol.events import DeliveryTargetPayload, OutputInlineReadyPayload, SystemSignalPayload, TurnInputPayload
 from emoticorebot.protocol.task_models import MessageRef, ReplyDraft
 from emoticorebot.protocol.topics import EventType, Topic
 
@@ -18,7 +18,11 @@ def _reply_event(*, reply_id: str, target: str = "broadcast", dedupe_key: str | 
         source="runtime",
         target=target,
         session_id="sess_1",
-        payload=ReplyReadyPayload(reply=ReplyDraft(reply_id=reply_id, kind="answer", plain_text=text)),
+        payload=OutputInlineReadyPayload(
+            output_id=f"out_{reply_id}",
+            delivery_target=DeliveryTargetPayload(delivery_mode="inline", channel="cli", chat_id="direct"),
+            content=ReplyDraft(reply_id=reply_id, kind="answer", plain_text=text),
+        ),
         dedupe_key=dedupe_key,
     )
 
@@ -31,8 +35,8 @@ def test_priority_bus_dispatches_higher_priority_first() -> None:
         async def handler(event):
             seen.append(event.event_type)
 
-        bus.subscribe(consumer="brain", handler=handler, topic=Topic.INPUT_EVENT)
-        bus.subscribe(consumer="runtime", handler=handler, topic=Topic.TASK_COMMAND)
+        bus.subscribe(consumer="left_runtime", handler=handler, topic=Topic.INPUT_EVENT)
+        bus.subscribe(consumer="runtime", handler=handler, topic=Topic.CONTROL_COMMAND)
 
         low = build_envelope(
             event_type=EventType.INPUT_TURN_RECEIVED,
@@ -48,18 +52,18 @@ def test_priority_bus_dispatches_higher_priority_first() -> None:
             ),
         )
         high = build_envelope(
-            event_type=EventType.TASK_CANCEL,
-            source="brain",
+            event_type=EventType.CONTROL_STOP,
+            source="left_runtime",
             target="runtime",
             session_id="sess_1",
-            payload=TaskCancelPayload(command_id="cmd_1", task_id="task_1"),
+            payload=ControlCommandPayload(command_id="cmd_1", action="stop"),
         )
 
         await bus.publish(low)
         await bus.publish(high)
         await bus.drain()
 
-        assert seen == [EventType.TASK_CANCEL, EventType.INPUT_TURN_RECEIVED]
+        assert seen == [EventType.CONTROL_STOP, EventType.INPUT_TURN_RECEIVED]
 
     asyncio.run(_run())
 
@@ -72,11 +76,11 @@ def test_target_routing_only_delivers_to_matching_consumer() -> None:
         async def worker_handler(event):
             seen.append(f"worker:{event.target}")
 
-        async def brain_handler(event):
-            seen.append(f"brain:{event.target}")
+        async def left_runtime_handler(event):
+            seen.append(f"left_runtime:{event.target}")
 
         bus.subscribe(consumer="worker", handler=worker_handler, topic=Topic.OUTPUT_EVENT)
-        bus.subscribe(consumer="brain", handler=brain_handler, topic=Topic.OUTPUT_EVENT)
+        bus.subscribe(consumer="left_runtime", handler=left_runtime_handler, topic=Topic.OUTPUT_EVENT)
 
         await bus.publish(_reply_event(reply_id="reply_1", target="worker"))
         await bus.drain()
@@ -93,13 +97,13 @@ def test_interceptor_can_redact_and_block() -> None:
         audits: list[str] = []
 
         async def delivery(event):
-            delivered.append(event.payload.reply.plain_text or "")
+            delivered.append(event.payload.content.plain_text or "")
 
         async def audit(event):
             audits.append(event.event_type)
 
         async def interceptor(outcome):
-            text = outcome.event.payload.reply.plain_text or ""
+            text = outcome.event.payload.content.plain_text or ""
             if "secret" in text:
                 audit_event = build_envelope(
                     event_type=EventType.SYSTEM_HEALTH_WARNING,
@@ -116,15 +120,7 @@ def test_interceptor_can_redact_and_block() -> None:
                 )
                 return block(outcome.event, audit_event)
             redacted_event = outcome.event.model_copy(
-                update={
-                    "payload": ReplyReadyPayload(
-                        reply=ReplyDraft(
-                            reply_id=outcome.event.payload.reply.reply_id,
-                            kind=outcome.event.payload.reply.kind,
-                            plain_text="[REDACTED]",
-                        )
-                    )
-                }
+                update={"payload": outcome.event.payload.model_copy(update={"content": outcome.event.payload.content.model_copy(update={"plain_text": "[REDACTED]"})})}
             )
             audit_event = build_envelope(
                 event_type=EventType.SYSTEM_WARNING,
@@ -161,7 +157,7 @@ def test_dedupe_key_drops_duplicates() -> None:
         seen: list[str] = []
 
         async def delivery(event):
-            seen.append(event.payload.reply.reply_id)
+            seen.append(event.payload.content.reply_id)
 
         bus.subscribe(consumer="delivery", handler=delivery, topic=Topic.OUTPUT_EVENT)
 
@@ -253,3 +249,4 @@ def test_subscriber_failure_emits_warning_and_bus_keeps_running() -> None:
             await bus.stop()
 
     asyncio.run(_run())
+

@@ -11,8 +11,9 @@ from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.protocol.commands import FollowupContextPayload, LeftReplyRequestPayload, RightBrainJobRequestPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.events import (
+    DeliveryTargetPayload,
     LeftReplyReadyPayload,
-    ReplyReadyPayload,
+    OutputReadyPayloadBase,
     RightBrainAcceptedPayload,
     RightBrainProgressPayload,
     RightBrainRejectedPayload,
@@ -24,17 +25,11 @@ from emoticorebot.protocol.events import (
     TurnInputPayload,
     InputSlots,
 )
-from emoticorebot.protocol.topics import EventType, Topic
-from emoticorebot.right.store import RightBrainStore
+from emoticorebot.protocol.topics import EventType
+from emoticorebot.right_brain.store import RightBrainStore
 
 from .models import SessionContext, SessionTaskView, SessionTraceRecord
 
-_RUNNING_EVENTS = {str(EventType.TASK_UPDATE), str(EventType.TASK_SUMMARY)}
-_TRACE_KINDS = {
-    str(EventType.TASK_UPDATE): "progress",
-    str(EventType.TASK_SUMMARY): "summary",
-    str(EventType.TASK_ASK): "ask",
-}
 _TRACE_LIMIT = 64
 
 
@@ -71,7 +66,6 @@ class SessionRuntime:
         self._bus.subscribe(consumer="session", event_type=EventType.OUTPUT_STREAM_OPEN, handler=self._on_reply_output)
         self._bus.subscribe(consumer="session", event_type=EventType.OUTPUT_STREAM_DELTA, handler=self._on_reply_output)
         self._bus.subscribe(consumer="session", event_type=EventType.OUTPUT_STREAM_CLOSE, handler=self._on_reply_output)
-        self._bus.subscribe(consumer="session", topic=Topic.TASK_EVENT, handler=self._on_task_event)
 
     def snapshot(self, session_id: str) -> SessionContext:
         context = self._get_or_create(session_id)
@@ -118,10 +112,6 @@ class SessionRuntime:
             return messages
         return messages[-limit:]
 
-    def latest_waiting_task_id(self, session_id: str) -> str:
-        context = self._get_or_create(session_id)
-        return context.waiting_task_ids[-1] if context.waiting_task_ids else ""
-
     def latest_active_task_id(self, session_id: str) -> str:
         context = self._get_or_create(session_id)
         return context.active_task_ids[-1] if context.active_task_ids else ""
@@ -140,7 +130,6 @@ class SessionRuntime:
         context = self._get_or_create(session_id)
         return (
             not context.active_task_ids
-            and not context.waiting_task_ids
             and not context.active_reply_stream_id
             and not context.active_input_stream_id
         )
@@ -162,7 +151,7 @@ class SessionRuntime:
                 context.active_reply_stream_id = None
             context.last_user_input = self._user_text(event.payload)
             if event.turn_id:
-                context.last_front_instance_id = f"front_{event.turn_id}"
+                context.last_left_brain_instance_id = f"left_{event.turn_id}"
             context.archived = self.should_archive(session_id)
             left_request = self._build_left_reply_request(event)
         if left_request is not None:
@@ -263,7 +252,7 @@ class SessionRuntime:
                     barge_in=barge_in,
                     message=context.active_input_stream_message.model_copy(deep=True),
                     user_text=committed_text,
-                    input_slots=InputSlots(user=committed_text, task=""),
+                    input_slots=InputSlots(),
                     metadata=turn_metadata,
                 ),
             )
@@ -286,12 +275,9 @@ class SessionRuntime:
     async def _on_left_reply_ready(self, event: BusEnvelope[LeftReplyReadyPayload]) -> None:
         if not event.payload.invoke_right_brain:
             return
-        strategy = str(event.payload.right_brain_strategy or "skip").strip()
-        if strategy not in {"sync", "async"}:
-            return
         request = dict(event.payload.right_brain_request or {})
         job_action = str(request.get("job_action", "") or "").strip()
-        if job_action not in {"create_task", "resume_task", "cancel_task"}:
+        if job_action not in {"create_task", "cancel_task"}:
             return
         job_id = str(request.get("job_id", "") or "").strip() or f"job_{uuid4().hex[:12]}"
         task_id = str(request.get("task_id", "") or event.payload.related_task_id or event.task_id or "").strip() or None
@@ -307,7 +293,6 @@ class SessionRuntime:
                 causation_id=event.event_id,
                 payload=RightBrainJobRequestPayload(
                     job_id=job_id,
-                    right_brain_strategy=strategy,
                     job_action=job_action,
                     job_kind=str(request.get("job_kind", "") or "").strip() or None,
                     source_text=str(request.get("source_text", "") or "").strip() or None,
@@ -320,7 +305,6 @@ class SessionRuntime:
                     metadata={
                         "left_request_id": event.payload.request_id,
                         "left_reply_kind": event.payload.reply_kind,
-                        "right_brain_strategy": strategy,
                     },
                 ),
             )
@@ -339,7 +323,7 @@ class SessionRuntime:
             context = self._get_or_create(session_id)
             self._apply_right_event(context, event)
             if event.task_id:
-                context.last_front_instance_id = f"front_followup_{event.task_id}"
+                context.last_left_brain_instance_id = f"left_followup_{event.task_id}"
             context.archived = self.should_archive(session_id)
             left_request = self._build_followup_reply_request(event)
         await self._bus.publish(left_request)
@@ -379,14 +363,14 @@ class SessionRuntime:
 
         context.rebuild_indexes()
 
-    async def _on_reply_output(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
+    async def _on_reply_output(self, event: BusEnvelope[OutputReadyPayloadBase]) -> None:
         session_id = str(event.session_id or "").strip()
         if not session_id:
             return
         async with self._session_lock(session_id):
             context = self._get_or_create(session_id)
             stream_state = self._reply_stream_state(event.payload)
-            stream_id = str(event.payload.stream_id or "").strip() or event.payload.reply.reply_id
+            stream_id = str(getattr(event.payload, "stream_id", "") or "").strip() or event.payload.content.reply_id
 
             if stream_state in {"open", "delta"}:
                 context.active_reply_stream_id = stream_id
@@ -406,68 +390,6 @@ class SessionRuntime:
             context.session_summary = text
             context.archived = self.should_archive(session_id)
 
-    async def _on_task_event(self, event: BusEnvelope[object]) -> None:
-        session_id = str(event.session_id or "").strip()
-        task_id = str(event.task_id or getattr(event.payload, "task_id", "") or "").strip()
-        if not session_id or not task_id:
-            return
-
-        async with self._session_lock(session_id):
-            context = self._get_or_create(session_id)
-            view = context.tasks.get(task_id)
-            if view is None:
-                view = SessionTaskView(task_id=task_id)
-                context.tasks[task_id] = view
-            context.trace_cursor.setdefault(task_id, "")
-
-            self._hydrate_task_view(view)
-            self._apply_task_event(context, view, event)
-            context.rebuild_indexes()
-            context.archived = self.should_archive(session_id)
-
-    def _apply_task_event(self, context: SessionContext, view: SessionTaskView, event: BusEnvelope[object]) -> None:
-        payload = event.payload
-        event_type = str(event.event_type)
-        event_updated_at = str(getattr(payload, "updated_at", "") or "").strip()
-        is_stale = self._is_stale_event(current_updated_at=view.updated_at, event_updated_at=event_updated_at)
-
-        question = str(getattr(payload, "question", "") or "").strip()
-        if question and self._should_update_latest_ask(current_updated_at=view.latest_ask_at, event_updated_at=event_updated_at):
-            view.latest_ask = question
-            view.latest_ask_field = str(getattr(payload, "field", "") or "").strip()
-            view.latest_ask_at = event_updated_at
-
-        if not is_stale:
-            summary = str(
-                getattr(payload, "summary", "")
-                or getattr(payload, "message", "")
-                or getattr(payload, "output", "")
-                or getattr(payload, "error", "")
-                or ""
-            ).strip()
-            if summary:
-                view.summary = summary
-
-            if event_updated_at:
-                view.updated_at = event_updated_at
-
-            if event_type == str(EventType.TASK_ASK):
-                view.state = "waiting"
-                view.result = "none"
-            elif event_type == str(EventType.TASK_END):
-                view.state = "done"
-                view.result = str(getattr(payload, "result", "none") or "none").strip() or "none"
-            elif event_type in _RUNNING_EVENTS:
-                view.state = "running"
-                view.result = "none"
-
-        traces = self._build_traces(event)
-        if traces:
-            view.trace.extend(traces)
-            view.trace.sort(key=lambda item: (item.ts, item.trace_id))
-            if len(view.trace) > _TRACE_LIMIT:
-                view.trace = view.trace[-_TRACE_LIMIT:]
-
     def _hydrate_task_view(self, view: SessionTaskView) -> None:
         task = self._task_store.get(view.task_id)
         if task is None:
@@ -478,115 +400,6 @@ class SessionRuntime:
             view.request = str(task.request.request or "").strip()
         if not view.updated_at:
             view.updated_at = str(task.updated_at or "").strip()
-
-    def _build_traces(self, event: BusEnvelope[object]) -> list[SessionTraceRecord]:
-        payload = event.payload
-        session_id = str(event.session_id or "").strip()
-        task_id = str(event.task_id or getattr(payload, "task_id", "") or "").strip()
-        if not task_id:
-            return []
-        raw_items = (
-            list(getattr(payload, "trace_final", []) or [])
-            if str(event.event_type) == str(EventType.TASK_END)
-            else list(getattr(payload, "trace_append", []) or [])
-        )
-        traces = [
-            trace
-            for index, item in enumerate(raw_items)
-            if (trace := self._trace_from_item(session_id=session_id, task_id=task_id, item=item, fallback_id=f"{event.event_id}:{index}"))
-            is not None
-        ]
-        if traces:
-            return traces
-        fallback = self._build_trace(event)
-        return [fallback] if fallback is not None else []
-
-    def _build_trace(self, event: BusEnvelope[object]) -> SessionTraceRecord | None:
-        payload = event.payload
-        task_id = str(event.task_id or getattr(payload, "task_id", "") or "").strip()
-        if not task_id:
-            return None
-        message = self._task_event_message(event)
-        if not message:
-            return None
-        return SessionTraceRecord(
-            trace_id=str(event.event_id or f"trace_{task_id}"),
-            task_id=task_id,
-            kind=self._trace_kind(event),
-            message=message,
-            ts=str(getattr(payload, "updated_at", "") or "").strip(),
-            data={},
-        )
-
-    @staticmethod
-    def _trace_from_item(
-        *,
-        session_id: str,
-        task_id: str,
-        item: object,
-        fallback_id: str,
-    ) -> SessionTraceRecord | None:
-        data: Mapping[str, Any] | None = None
-        if isinstance(item, Mapping):
-            trace_id = str(item.get("trace_id", "") or "").strip() or fallback_id
-            kind = str(item.get("kind", "") or "").strip()
-            message = str(item.get("message", "") or "").strip()
-            ts = str(item.get("ts", "") or "").strip()
-            raw_data = item.get("data", {})
-            if isinstance(raw_data, Mapping):
-                data = raw_data
-        else:
-            trace_id = str(getattr(item, "trace_id", "") or "").strip() or fallback_id
-            kind = str(getattr(item, "kind", "") or "").strip()
-            message = str(getattr(item, "message", "") or "").strip()
-            ts = str(getattr(item, "ts", "") or "").strip()
-            raw_data = getattr(item, "data", {})
-            if isinstance(raw_data, Mapping):
-                data = raw_data
-        if not message:
-            return None
-        payload = dict(data or {})
-        payload.setdefault("task_id", task_id)
-        if session_id:
-            payload.setdefault("session_id", session_id)
-        return SessionTraceRecord(
-            trace_id=trace_id,
-            task_id=task_id,
-            kind=kind or "info",
-            message=message,
-            ts=ts,
-            data=payload,
-        )
-
-    @staticmethod
-    def _task_event_message(event: BusEnvelope[object]) -> str:
-        payload = event.payload
-        event_type = str(event.event_type)
-        if event_type == str(EventType.TASK_UPDATE):
-            return str(getattr(payload, "message", "") or "").strip()
-        if event_type == str(EventType.TASK_SUMMARY):
-            return str(getattr(payload, "summary", "") or "").strip()
-        if event_type == str(EventType.TASK_ASK):
-            return str(getattr(payload, "question", "") or getattr(payload, "why", "") or "").strip()
-        if event_type == str(EventType.TASK_END):
-            return str(
-                getattr(payload, "summary", "")
-                or getattr(payload, "output", "")
-                or getattr(payload, "error", "")
-                or ""
-            ).strip()
-        return ""
-
-    @staticmethod
-    def _trace_kind(event: BusEnvelope[object]) -> str:
-        if str(event.event_type) != str(EventType.TASK_END):
-            return _TRACE_KINDS.get(str(event.event_type), "status")
-        result = str(getattr(event.payload, "result", "") or "").strip()
-        if result == "success":
-            return "summary"
-        if result == "cancelled":
-            return "warning"
-        return "error"
 
     @staticmethod
     def _unread_traces(*, context: SessionContext, view: SessionTaskView) -> list[SessionTraceRecord]:
@@ -622,21 +435,15 @@ class SessionRuntime:
         return event_updated_at < current_updated_at
 
     @staticmethod
-    def _should_update_latest_ask(*, current_updated_at: str, event_updated_at: str) -> bool:
-        if not current_updated_at or not event_updated_at:
-            return True
-        return event_updated_at >= current_updated_at
-
-    @staticmethod
-    def _reply_text(payload: ReplyReadyPayload) -> str:
-        if payload.reply.plain_text:
-            return str(payload.reply.plain_text).strip()
-        parts = [block.text for block in payload.reply.content_blocks if block.type == "text" and block.text]
+    def _reply_text(payload: OutputReadyPayloadBase) -> str:
+        if payload.content.plain_text:
+            return str(payload.content.plain_text).strip()
+        parts = [block.text for block in payload.content.content_blocks if block.type == "text" and block.text]
         return "\n".join(str(part).strip() for part in parts if str(part).strip()).strip()
 
     @staticmethod
-    def _reply_stream_state(payload: ReplyReadyPayload) -> str:
-        return str(payload.stream_state or "").strip()
+    def _reply_stream_state(payload: OutputReadyPayloadBase) -> str:
+        return str(getattr(payload, "stream_state", "") or "").strip()
 
     @staticmethod
     def _user_text(payload: TurnInputPayload) -> str:
@@ -674,7 +481,7 @@ class SessionRuntime:
         return build_envelope(
             event_type=EventType.LEFT_COMMAND_REPLY_REQUESTED,
             source="session",
-            target="brain",
+            target="left_runtime",
             session_id=event.session_id,
             turn_id=event.turn_id,
             task_id=event.task_id,
@@ -707,13 +514,13 @@ class SessionRuntime:
             next_step=str(getattr(payload, "next_step", "") or "").strip() or None,
             result_text=str(getattr(payload, "result_text", "") or "").strip() or None,
             reason=str(getattr(payload, "reason", "") or "").strip() or None,
-            preferred_delivery_mode=self._followup_delivery_mode(task_id=event.task_id, payload=payload),
+            delivery_target=self._followup_delivery_target(task_id=event.task_id, payload=payload),
             metadata=dict(getattr(payload, "metadata", {}) or {}),
         )
         return build_envelope(
             event_type=EventType.LEFT_COMMAND_REPLY_REQUESTED,
             source="session",
-            target="brain",
+            target="left_runtime",
             session_id=event.session_id,
             turn_id=event.turn_id,
             task_id=event.task_id,
@@ -726,15 +533,15 @@ class SessionRuntime:
             ),
         )
 
-    def _followup_delivery_mode(self, *, task_id: str | None, payload: object) -> str:
+    def _followup_delivery_target(self, *, task_id: str | None, payload: object) -> DeliveryTargetPayload:
         delivery_target = getattr(payload, "delivery_target", None)
         if delivery_target is None:
-            task = self._task_store.get(str(task_id or "").strip())
-            if task is not None and task.preferred_delivery_mode in {"inline", "push", "stream"}:
-                return task.preferred_delivery_mode
-            return "push"
-        delivery_mode = str(getattr(delivery_target, "delivery_mode", "") or "").strip()
-        return delivery_mode if delivery_mode in {"inline", "push", "stream"} else "push"
+            raise RuntimeError(f"right followup event requires delivery_target: task_id={str(task_id or '').strip()}")
+        return self._normalize_delivery_target(delivery_target)
+
+    @staticmethod
+    def _normalize_delivery_target(value: object) -> DeliveryTargetPayload:
+        return DeliveryTargetPayload.model_validate(value)
 
     def _build_right_trace(
         self,

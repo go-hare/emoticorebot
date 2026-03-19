@@ -3,20 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from emoticorebot.agent.cognitive import CognitiveEvent
-from emoticorebot.agent.reflection.turn import TurnReflectionService
+from emoticorebot.reflection.cognitive import CognitiveEvent
+from emoticorebot.reflection.turn import TurnReflectionService
 from emoticorebot.models.emotion_state import EmotionStateManager
 
-def test_build_turn_event_persists_full_brain_emotion_snapshot() -> None:
+def test_build_turn_event_persists_full_left_brain_emotion_snapshot() -> None:
     events = CognitiveEvent.build_turn_events(
         reflection_input={
             "message_id": "msg_test",
             "session_id": "cli:direct",
             "user_input": "真棒",
             "assistant_output": "知道就好。",
-            "brain": {
+            "left_brain": {
                 "intent": "respond_to_praise",
-                "final_decision": "answer",
             },
             "emotion": {
                 "emotion_label": "兴奋",
@@ -30,11 +29,11 @@ def test_build_turn_event_persists_full_brain_emotion_snapshot() -> None:
     )
 
     assert len(events) == 1
-    brain_state = events[0].brain_state
-    assert brain_state["emotion"] == "兴奋"
-    assert brain_state["pad"] == {"pleasure": 0.6, "arousal": 0.9, "dominance": 0.5}
-    assert brain_state["drives"] == {"social": 100.0, "energy": 98.0}
-    assert brain_state["emotion_prompt"] == "[当前情绪: 兴奋] 非常兴奋，话比较多，喜欢感叹号"
+    left_brain_state = events[0].left_brain_state
+    assert left_brain_state["emotion"] == "兴奋"
+    assert left_brain_state["pad"] == {"pleasure": 0.6, "arousal": 0.9, "dominance": 0.5}
+    assert left_brain_state["drives"] == {"social": 100.0, "energy": 98.0}
+    assert left_brain_state["emotion_prompt"] == "[当前情绪: 兴奋] 非常兴奋，话比较多，喜欢感叹号"
 
 
 def test_build_turn_event_projects_task_to_three_state_view() -> None:
@@ -47,28 +46,26 @@ def test_build_turn_event_projects_task_to_three_state_view() -> None:
             "task": {
                 "task_id": "task_1",
                 "title": "创建 add.py",
-                "state": "waiting",
+                "state": "running",
                 "result": "none",
-                "summary": "等待用户补充路径",
+                "summary": "继续执行中",
             },
             "execution": {
                 "invoked": True,
-                "status": "waiting_input",
-                "summary": "需要补充路径",
-                "missing": ["path"],
+                "status": "running",
+                "summary": "继续执行中",
             },
         },
         importance=0.6,
-        turn_reflection={"summary": "任务仍在等待输入。"},
+        turn_reflection={"summary": "任务仍在执行。"},
     )
 
     assert len(events) == 1
     assert events[0].task == {
         "used": True,
-        "state": "waiting",
+        "state": "running",
         "result": "none",
-        "summary": "等待用户补充路径",
-        "missing": ["path"],
+        "summary": "继续执行中",
     }
 
 
@@ -273,10 +270,8 @@ def test_turn_reflection_memory_candidates_use_formal_long_term_schema() -> None
                     }
                 ],
                 "execution_review": {
-                    "attempt_count": 1,
                     "effectiveness": "high",
                     "main_failure_reason": "",
-                    "missing_inputs": [],
                     "next_execution_hint": "",
                 },
             },
@@ -291,11 +286,7 @@ def test_turn_reflection_memory_candidates_use_formal_long_term_schema() -> None
                 "invoked": True,
                 "status": "done",
                 "summary": "已完成",
-                "missing": [],
-                "confidence": 0.9,
-                "attempt_count": 1,
                 "failure_reason": "",
-                "recommended_action": "",
             },
         )
 

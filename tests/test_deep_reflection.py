@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from emoticorebot.agent.cognitive import CognitiveEvent
-from emoticorebot.agent.reflection.deep import DeepReflectionService
-from emoticorebot.agent.reflection.memory_candidates import build_skill_hint_candidate
+from emoticorebot.reflection.cognitive import CognitiveEvent
+from emoticorebot.reflection.deep import DeepReflectionService
+from emoticorebot.reflection.candidates import build_skill_hint_candidate
 from emoticorebot.config.schema import MemoryConfig, MemoryVectorConfig
 from emoticorebot.memory.crystallizer import SkillMaterializer
 from emoticorebot.memory import MemoryStore
@@ -86,7 +86,7 @@ def test_deep_reflection_event_block_includes_updates_and_state() -> None:
                 "timestamp": "2026-03-14T17:00:00+08:00",
                 "user_input": "你好",
                 "assistant_output": "你好。",
-                "brain_state": {
+                "left_brain_state": {
                     "emotion": "开心",
                     "pad": {"pleasure": 0.7, "arousal": 0.4, "dominance": 0.5},
                     "drives": {"social": 60.0, "energy": 80.0},

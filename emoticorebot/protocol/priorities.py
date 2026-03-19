@@ -17,7 +17,6 @@ class EventPriority(IntEnum):
 
 PRIORITY_BY_EVENT_TYPE: dict[str, EventPriority] = {
     EventType.CONTROL_STOP: EventPriority.P0,
-    EventType.TASK_CANCEL: EventPriority.P0,
     EventType.INPUT_TURN_RECEIVED: EventPriority.P1,
     EventType.INPUT_STREAM_STARTED: EventPriority.P1,
     EventType.INPUT_STREAM_CHUNK: EventPriority.P1,
@@ -32,21 +31,14 @@ PRIORITY_BY_EVENT_TYPE: dict[str, EventPriority] = {
     EventType.RIGHT_EVENT_PROGRESS: EventPriority.P2,
     EventType.RIGHT_EVENT_JOB_REJECTED: EventPriority.P2,
     EventType.RIGHT_EVENT_RESULT_READY: EventPriority.P2,
-    EventType.TASK_CREATE: EventPriority.P1,
-    EventType.TASK_RESUME: EventPriority.P1,
-    EventType.TASK_ASK: EventPriority.P1,
-    EventType.TASK_END: EventPriority.P2,
     EventType.OUTPUT_INLINE_READY: EventPriority.P2,
     EventType.OUTPUT_PUSH_READY: EventPriority.P2,
     EventType.OUTPUT_STREAM_OPEN: EventPriority.P2,
     EventType.OUTPUT_STREAM_DELTA: EventPriority.P2,
     EventType.OUTPUT_STREAM_CLOSE: EventPriority.P2,
-    EventType.TASK_REPORT_PROGRESS: EventPriority.P3,
-    EventType.TASK_UPDATE: EventPriority.P3,
-    EventType.TASK_SUMMARY: EventPriority.P3,
-    EventType.REFLECT_LIGHT: EventPriority.P4,
-    EventType.REFLECT_DEEP: EventPriority.P4,
-    EventType.MEMORY_WRITE_REQUEST: EventPriority.P4,
+    EventType.REFLECTION_LIGHT: EventPriority.P4,
+    EventType.REFLECTION_DEEP: EventPriority.P4,
+    EventType.REFLECTION_WRITE_REQUEST: EventPriority.P4,
 }
 
 
@@ -55,3 +47,4 @@ def priority_for(event_type: EventType | str) -> EventPriority:
 
 
 __all__ = ["EventPriority", "PRIORITY_BY_EVENT_TYPE", "priority_for"]
+

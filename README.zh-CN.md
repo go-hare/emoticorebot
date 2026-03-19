@@ -4,18 +4,18 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-**emoticorebot** 是一个以陪伴为主线的个人 AI 助手，当前采用明确的 **`ExecutiveBrain + RuntimeKernel + AgentTeam`** 架构。
+**emoticorebot** 是一个以陪伴为主线的个人 AI 助手，当前采用明确的 **`Left Brain + Right Brain + RuntimeKernel`** 架构。
 
-- `ExecutiveBrain` 是唯一对外主体，负责理解用户、做出决策并完成最终表达
-- `RuntimeKernel` 负责任务生命周期、状态机、恢复、调度与事件闭环
-- `AgentTeam` 由 `planner / worker / reviewer` 组成，负责内部任务执行
-- `SafetyGuard / DeliveryService / MemoryGovernor` 在总线上闭环输出安全、投递与反思沉淀
+- `LeftBrainRuntime` 是唯一对外主体，负责理解用户、做出决策并完成最终表达
+- `RightBrainRuntime` 负责任性执行、工具调用、审核钩子与结果回流
+- `RuntimeKernel` 负责事件闭环、投递整合与反思调度
+- `DeliveryRuntime / ReflectionGovernor / ReflectionRuntime` 在总线上闭环输出投递与长期沉淀
 
 详细文档：
 
-- [docs/final-brain-runtime-architecture.zh-CN.md](docs/final-brain-runtime-architecture.zh-CN.md)
-- [docs/companion-task-architecture.zh-CN.md](docs/companion-task-architecture.zh-CN.md)
-- [docs/dual-full-duplex-refactor.zh-CN.md](docs/dual-full-duplex-refactor.zh-CN.md)
+- [docs/companion-protocol-spec.zh-CN.md](docs/companion-protocol-spec.zh-CN.md)
+- [docs/companion-left-right-brain-architecture.zh-CN.md](docs/companion-left-right-brain-architecture.zh-CN.md)
+- [docs/companion-left-right-brain-module-contracts.zh-CN.md](docs/companion-left-right-brain-module-contracts.zh-CN.md)
 
 ---
 
@@ -50,11 +50,11 @@ emoticorebot onboard
   },
   "agents": {
     "defaults": {
-      "brainMode": {
+      "leftBrainMode": {
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       },
-      "workerMode": {
+      "rightBrainMode": {
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       }
@@ -89,16 +89,17 @@ Inbound Message
   -> ConversationGateway
   -> RuntimeKernel
   -> PriorityPubSubBus
-  -> ExecutiveBrain
-  -> RuntimeService / TaskStore
-  -> Planner / Worker / Reviewer
-  -> SafetyGuard
-  -> DeliveryService
+  -> InputNormalizer
+  -> SessionRuntime
+  -> LeftBrainRuntime
+  -> RightBrainRuntime (optional)
+  -> OutputRuntime
+  -> DeliveryRuntime
   -> TransportBus
-  -> ReflectionCoordinator / MemoryGovernor (async)
+  -> ReflectionRuntime / ReflectionGovernor (async)
 ```
 
-只有 `ExecutiveBrain` 可以决定最终回复。`planner / worker / reviewer` 都只是内部执行角色，不是第二人格。
+只有 `LeftBrainRuntime` 可以决定最终回复。右脑只是内部执行链路，不是第二人格。
 
 `TransportBus` 只是渠道 I/O 桥接层；真正的内部业务事件总线仍然只有 `PriorityPubSubBus`。
 
@@ -106,43 +107,45 @@ Inbound Message
 
 | 组件 | 职责 |
 |------|------|
-| `ExecutiveBrain` | 判断本轮是直接回复、追问、创建任务、恢复任务还是取消任务，并生成最终对外表达 |
-| `RuntimeKernel` | 持有任务状态机、任务表、分配策略、恢复逻辑与调度入口 |
+| `LeftBrainRuntime` | 收敛 `right_brain_strategy`，解析内部 `####task#### / ####user####` 输出，并生成最终对外表达 |
+| `RightBrainRuntime` | 承接右脑执行 run，管理受理 / 进展 / 结果 / 取消的生命周期 |
+| `RightBrainExecutor` | 单次执行内核，负责审核钩子、工具调用与结果整理 |
+| `RuntimeKernel` | 装配输入、会话、左脑、右脑、输出、投递与反思的事件闭环 |
 | `PriorityPubSubBus` | 提供带优先级的 typed pub/sub，总线支持扇出与 interceptor |
-| `AgentTeam` | 注册 `planner / worker / reviewer` 三类执行角色 |
-| `SafetyGuard` | 在真正投递前审核 `reply draft` 和敏感结果，执行 allow / redact / block |
-| `DeliveryService` | 唯一负责真正对外投递消息的组件 |
-| `MemoryGovernor` | 消费反思信号，治理长期记忆、人格与用户模型更新 |
+| `SessionRuntime` | 负责会话内 turn/stream 调度、右脑请求发起与状态视图 |
+| `OutputRuntime` | 将左脑事件统一收敛成 `inline / push / stream` 输出事件 |
+| `DeliveryRuntime` | 唯一负责真正对外投递消息的组件 |
+| `ReflectionGovernor` | 消费反思信号，治理长期记忆、人格与用户模型更新 |
 | `ThreadStore` | 持久化对话历史与内部记录 |
 
 ### 事件闭环
 
-1. 渠道输入先进入 `TransportBus`，再由 `ConversationGateway` 桥接成内部 `input.event.user_message`。
-2. `ExecutiveBrain` 发布 `brain.command.reply`、`brain.command.ask_user`、`brain.command.create_task` 或 `brain.command.resume_task`。
-3. `RuntimeKernel` 持久化任务并发布 `runtime.command.assign_agent` / `runtime.command.resume_agent`。
-4. `planner / worker / reviewer` 发布 `task.report.*`，runtime 再归一化为 `task.event.*`。
-5. `RuntimeService` 把 `brain.command.reply` / `brain.command.ask_user` 转成 `output.event.reply_ready`。
-6. `SafetyGuard` 审核后发布 `output.event.reply_approved`、`output.event.reply_redacted` 或 `output.event.reply_blocked`。
-7. `DeliveryService` 只消费已放行的回复并完成投递。
-8. 首响之后再异步触发 `memory.signal.*`、`turn_reflection` 与更深层的治理逻辑。
+1. 渠道输入先进入 `TransportBus`，再由 `ConversationGateway` 桥接成内部输入。
+2. `InputNormalizer` 把原始输入统一成 `input.event.turn_received / stream_started / stream_chunk / stream_committed / stream_interrupted`。
+3. `SessionRuntime` 先发出 `left.command.reply_requested`。
+4. `LeftBrainRuntime` 在内部调用 LLM，输出 `####task#### / ####user####`，并发出 `left.event.reply_ready / followup_ready / stream_delta_ready`。
+5. 如果左脑决定启动右脑，`SessionRuntime` 再发出 `right.command.job_requested`。
+6. `RightBrainRuntime` 执行一次右脑 run，并发出 `right.event.job_accepted / progress / job_rejected / result_ready`。
+7. `OutputRuntime` 把左脑结果统一收敛成 `output.event.inline_ready / push_ready / stream_*`。
+8. `DeliveryRuntime` 完成真正投递；随后 `ReflectionRuntime / ReflectionGovernor` 异步处理反思与长期沉淀。
 
 ### 数据与持久化
 
 | 层级 | 文件 / 目录 | 用途 |
 |------|-------------|------|
-| 对话历史 | `sessions/<session_key>/dialogue.jsonl` | 用户可见的对话记录 |
-| 内部历史 | `sessions/<session_key>/internal.jsonl` | `brain` 决策摘要、任务状态与规范化执行事实 |
-| 执行断点 | `sessions/_checkpoints/worker.pkl` | `worker` 执行恢复状态 |
-| 长期记忆 | `memory/memory.jsonl` | 长期记忆唯一事实源 |
-| 向量镜像 | 本地向量索引 | `memory.jsonl` 的检索镜像，而非事实源 |
+| 对话历史 | `session/<session_id>/left.jsonl` | `用户 <-> 左脑` 原始记录 |
+| 内部历史 | `session/<session_id>/right.jsonl` | `左脑 <-> 右脑` 原始记录 |
+| 短期记忆 | `memory/short_term/` | 会话级工作态与轮摘要 |
+| 长期记忆 | `memory/long_term/memory.jsonl` | 长期记忆唯一事实源 |
+| 向量镜像 | `memory/vector/` | 长期记忆的检索镜像，而非事实源 |
 | 工作区技能 | `skills/<name>/SKILL.md` | 工作流沉淀与执行提示 |
 
 ### 工具、执行与反思
 
-- `worker` 当前通过 `DeepAgentExecutor` 执行复杂任务，但这只是执行内核实现细节，外围协议已经切到 `brain + runtime + agent team`。
+- `RightBrainExecutor` 当前负责右脑单次执行，但这只是执行内核实现细节，外围协议已经收敛到 `left_brain + right_brain + runtime kernel`。
 - 执行层可组合工具注册表、MCP 工具、工作区 `skills/` 与内置技能。
 - `SubconsciousDaemon` 继续负责 PAD 衰减、周期性反思和主动消息机会检测。
-- `MemoryGovernor` 与反思层只消费规范化输入，不再依赖旧 runtime 的旁路事件。
+- `ReflectionGovernor` 与反思层只消费规范化输入，不依赖旧任务系统旁路事件。
 
 ---
 
@@ -164,54 +167,74 @@ emoticorebot channels status
 ```text
 emoticorebot/
 ├── adapters/            # 渠道入口、会话网关、出站分发
-├── agent/
-│   ├── context.py       # prompt 与记忆上下文构建
-│   ├── reflection/      # 反思协调、记忆沉淀、技能物化
-│   └── tool/            # 工具注册与执行层
 ├── background/          # 潜意识守护、周期反思、心跳任务
 ├── bootstrap.py         # RuntimeHost，系统装配宿主
-├── brain/
-│   ├── decision_packet.py
-│   ├── dialogue_policy.py
-│   ├── executive.py
-│   ├── reply_builder.py
-│   └── task_policy.py
+├── left/
+│   ├── context.py
+│   ├── packet.py
+│   ├── reply_policy.py
+│   └── runtime.py
+├── right/
+│   ├── backend.py
+│   ├── executor.py
+│   ├── hooks.py
+│   ├── runtime.py
+│   ├── skills.py
+│   ├── state.py
+│   ├── store.py
+│   └── trace.py
 ├── bus/                 # 优先级总线、路由、订阅、interceptor
 ├── delivery/
+│   ├── runtime.py
 │   └── service.py
-├── execution/
-│   ├── backend.py
-│   ├── deep_agent_executor.py
-│   ├── executor_context.py
-│   ├── skills.py
-│   ├── stream.py
-│   ├── team.py
-│   └── tool_runtime.py
 ├── memory/
-│   └── governor.py
-├── protocol/            # envelope / commands / events / task results
+│   ├── crystallizer.py
+│   ├── retrieval.py
+│   ├── short_term.py
+│   ├── store.py
+│   └── vector_index.py
+├── protocol/            # envelope / commands / events / models
+│   ├── commands.py
+│   ├── contracts.py
+│   ├── envelope.py
+│   ├── event_contracts.py
+│   ├── events.py
+│   ├── reflection_models.py
+│   ├── priorities.py
+│   ├── task_models.py
+│   └── topics.py
 ├── runtime/
-│   ├── assignment.py
-│   ├── input_gate.py
 │   ├── kernel.py
-│   ├── recovery.py
-│   ├── running_task.py
-│   ├── scheduler.py
-│   ├── service.py
-│   ├── state_machine.py
-│   ├── task_store.py
-│   ├── transport_bus.py
-│   └── task_state.py
+│   └── transport_bus.py
 ├── safety/
 │   └── guard.py
 ├── session/
+│   ├── models.py
+│   ├── runtime.py
 │   ├── history_store.py
 │   └── thread_store.py
 ├── channels/
 ├── tools/
+│   ├── manager.py
+│   └── mcp.py
 ├── config/
+├── cron/
+├── models/
+├── providers/
+│   └── factory.py
 ├── skills/
 ├── templates/
+├── reflection/
+│   ├── candidates.py
+│   ├── cognitive.py
+│   ├── deep.py
+│   ├── governor.py
+│   ├── input.py
+│   ├── manager.py
+│   ├── persona.py
+│   ├── runtime.py
+│   └── turn.py
+├── utils/
 └── tests/
 ```
 
@@ -221,7 +244,7 @@ emoticorebot/
 
 当前版本的核心一句话是：
 
-`ExecutiveBrain 负责决策，RuntimeKernel 负责任务闭环，ThreadStore / MemoryGovernor 负责沉淀。`
+`LeftBrainRuntime 负责决策与最终表达，RuntimeKernel 负责事件闭环，ThreadStore / ReflectionGovernor 负责沉淀。`
 
 ---
 
@@ -232,3 +255,5 @@ emoticorebot/
 ## 许可证
 
 MIT。
+
+

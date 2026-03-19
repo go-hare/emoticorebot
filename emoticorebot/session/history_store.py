@@ -139,9 +139,9 @@ def normalize_message_payload(message: dict[str, Any], *, default_message_id: st
     if isinstance(namespace, list) and namespace:
         payload["namespace"] = [str(item).strip() for item in namespace if str(item).strip()]
 
-    brain = message.get("brain")
-    if isinstance(brain, dict) and brain:
-        payload["brain"] = brain
+    left_brain = message.get("left_brain")
+    if isinstance(left_brain, dict) and left_brain:
+        payload["left_brain"] = left_brain
 
     metadata = message.get("metadata")
     if not isinstance(metadata, dict):
@@ -230,3 +230,4 @@ class HistoryStore:
 
 
 __all__ = ["HistoryStore", "normalize_message_payload"]
+

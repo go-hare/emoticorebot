@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from emoticorebot.agent.context import ContextBuilder
+from emoticorebot.left_brain.context import ContextBuilder
 
 
 def test_brain_decision_system_prompt_uses_slim_soul_and_user_context() -> None:
@@ -79,14 +79,14 @@ def test_brain_decision_system_prompt_uses_slim_soul_and_user_context() -> None:
         builder = ContextBuilder(workspace)
         captured: dict[str, object] = {}
 
-        def _build_brain_context(*, query: str, limit: int) -> str:
+        def _build_left_brain_context(*, query: str, limit: int) -> str:
             captured["query"] = query
             captured["limit"] = limit
             return "## 长期记忆\n\n- 记忆A"
 
-        builder.memory = SimpleNamespace(build_brain_context=_build_brain_context)
+        builder.memory = SimpleNamespace(build_left_brain_context=_build_left_brain_context)
 
-        prompt = builder.build_brain_decision_system_prompt(query="创建 add.py")
+        prompt = builder.build_left_brain_decision_system_prompt(query="创建 add.py")
 
         assert "## 核心人格" in prompt
         assert "## 价值观" in prompt
@@ -104,3 +104,4 @@ def test_brain_decision_system_prompt_uses_slim_soul_and_user_context() -> None:
         assert "[当前情绪: 平静]" in prompt
         assert "| 维度 | 数值 |" not in prompt
         assert captured == {"query": "创建 add.py", "limit": 4}
+

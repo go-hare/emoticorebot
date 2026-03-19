@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.protocol.envelope import BusEnvelope
-from emoticorebot.protocol.memory_models import ReflectSignalPayload
+from emoticorebot.protocol.reflection_models import ReflectionSignalPayload
 from emoticorebot.protocol.task_models import ProtocolModel
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.reflection.runtime import ReflectionRuntime
@@ -33,10 +33,10 @@ async def _exercise_reflection_runtime_owns_periodic_deep_timer(workspace: Path)
 
     captured: list[BusEnvelope[ProtocolModel]] = []
 
-    async def _capture(event: BusEnvelope[ReflectSignalPayload]) -> None:
+    async def _capture(event: BusEnvelope[ReflectionSignalPayload]) -> None:
         captured.append(event)
 
-    bus.subscribe(consumer="memory_governor", event_type=EventType.REFLECT_DEEP, handler=_capture)
+    bus.subscribe(consumer="reflection_governor", event_type=EventType.REFLECTION_DEEP, handler=_capture)
 
     try:
         await runtime.start()
@@ -49,7 +49,7 @@ async def _exercise_reflection_runtime_owns_periodic_deep_timer(workspace: Path)
     assert captured
     first = captured[0]
     assert first.source == "reflection"
-    assert first.target == "memory_governor"
+    assert first.target == "reflection_governor"
     assert first.payload.reason == "periodic_signal"
     assert first.payload.metadata["trigger"] == "timer"
     assert first.payload.metadata["warm_limit"] == 9
@@ -58,3 +58,6 @@ async def _exercise_reflection_runtime_owns_periodic_deep_timer(workspace: Path)
 def test_reflection_runtime_owns_periodic_deep_timer() -> None:
     with TemporaryDirectory() as tmp_dir:
         asyncio.run(_exercise_reflection_runtime_owns_periodic_deep_timer(Path(tmp_dir)))
+
+
+

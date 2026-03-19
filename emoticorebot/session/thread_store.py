@@ -1,4 +1,4 @@
-"""Thread persistence layer for raw front/right session histories."""
+"""Thread persistence layer for raw left/right session histories."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ class ThreadStore:
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.threads_dir = workspace / "session"
-        self.front_store = HistoryStore(self.threads_dir, "front.jsonl")
+        self.left_store = HistoryStore(self.threads_dir, "left.jsonl")
         self.right_store = HistoryStore(self.threads_dir, "right.jsonl")
         self._cache: dict[str, ConversationThread] = {}
 
@@ -119,7 +119,7 @@ class ThreadStore:
 
     def save(self, thread: ConversationThread) -> None:
         thread.updated_at = datetime.now()
-        self.front_store.write_messages(thread.thread_id, thread.messages)
+        self.left_store.write_messages(thread.thread_id, thread.messages)
         self._cache[thread.thread_id] = thread
 
     def invalidate(self, thread_id: str) -> None:
@@ -127,9 +127,9 @@ class ThreadStore:
 
     def list_threads(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        for path in self.front_store.iter_thread_dirs():
-            front_path = path / "front.jsonl"
-            messages = HistoryStore.read_jsonl(front_path)
+        for path in self.left_store.iter_thread_dirs():
+            left_path = path / "left.jsonl"
+            messages = HistoryStore.read_jsonl(left_path)
             created_at = self._infer_created_at(messages)
             updated_at = self._infer_updated_at(messages)
             records.append(
@@ -137,17 +137,17 @@ class ThreadStore:
                     "thread_id": path.name,
                     "created_at": created_at.isoformat() if created_at else "",
                     "updated_at": updated_at.isoformat() if updated_at else "",
-                    "path": str(front_path),
+                    "path": str(left_path),
                 }
             )
         return sorted(records, key=lambda item: item.get("updated_at", ""), reverse=True)
 
     def _load(self, thread_id: str) -> ConversationThread | None:
-        front_path = self.front_store.path_for(thread_id)
-        if not front_path.exists():
+        left_path = self.left_store.path_for(thread_id)
+        if not left_path.exists():
             return None
         try:
-            messages = HistoryStore.read_jsonl(front_path)
+            messages = HistoryStore.read_jsonl(left_path)
             return self._thread_from_payload(
                 thread_id=thread_id,
                 messages=messages,

@@ -10,8 +10,8 @@ from emoticorebot.protocol.events import (
     LeftFollowupReadyPayload,
     LeftReplyReadyPayload,
     LeftStreamDeltaPayload,
+    OutputReadyPayloadBase,
     ReplyBlockedPayload,
-    ReplyReadyPayload,
 )
 from emoticorebot.protocol.task_models import MessageRef
 from emoticorebot.protocol.topics import EventType
@@ -73,7 +73,11 @@ class OutputRuntime:
         await self._publish_guarded(output_event)
 
     async def _on_left_followup_ready(self, event: BusEnvelope[LeftFollowupReadyPayload]) -> None:
+        if self._should_skip_reply_output(event.payload.metadata):
+            return
         delivery_target = event.payload.delivery_target
+        stream_id = self._followup_stream_id(event.payload) if delivery_target.delivery_mode == "stream" else None
+        stream_state = "close" if delivery_target.delivery_mode == "stream" else None
         output_event = self._build_reply_event(
             session_id=event.session_id or "",
             turn_id=event.turn_id,
@@ -85,14 +89,21 @@ class OutputRuntime:
             reply_kind=event.payload.reply_kind,
             delivery_mode=delivery_target.delivery_mode,
             reply_metadata=dict(event.payload.metadata or {}),
+            stream_id=stream_id,
+            stream_state=stream_state,
             channel_override=delivery_target.channel,
             chat_id_override=delivery_target.chat_id,
         )
         await self._publish_guarded(output_event)
 
-    def _build_from_left_reply(self, event: BusEnvelope[LeftReplyReadyPayload]) -> BusEnvelope[ReplyReadyPayload]:
+    def _build_from_left_reply(self, event: BusEnvelope[LeftReplyReadyPayload]) -> BusEnvelope[OutputReadyPayloadBase]:
         delivery_target = event.payload.delivery_target
         delivery_mode = self._left_reply_delivery_mode(event.payload)
+        stream_id = event.payload.stream_id
+        stream_state = event.payload.stream_state
+        if delivery_mode == "stream" and stream_state is None:
+            stream_id = stream_id or self._left_reply_stream_id(event.payload, turn_id=event.turn_id)
+            stream_state = "close"
         return self._build_reply_event(
             session_id=event.session_id or "",
             turn_id=event.turn_id,
@@ -104,11 +115,11 @@ class OutputRuntime:
             reply_kind=event.payload.reply_kind,
             delivery_mode=delivery_mode,
             reply_metadata=dict(event.payload.metadata or {}),
-            stream_id=event.payload.stream_id,
-            stream_state=event.payload.stream_state,
+            stream_id=stream_id,
+            stream_state=stream_state,
             stream_index=event.payload.stream_index,
-            channel_override=delivery_target.channel if delivery_target is not None else None,
-            chat_id_override=delivery_target.chat_id if delivery_target is not None else None,
+            channel_override=delivery_target.channel,
+            chat_id_override=delivery_target.chat_id,
         )
 
     def _build_reply_event(
@@ -130,26 +141,8 @@ class OutputRuntime:
         channel_override: str | None = None,
         chat_id_override: str | None = None,
         safe_fallback: bool = False,
-    ) -> BusEnvelope[ReplyReadyPayload]:
+    ) -> BusEnvelope[OutputReadyPayloadBase]:
         metadata = self._reply_metadata(reply_metadata)
-        if reply_kind == "ask_user":
-            return self._builder.ask_user(
-                session_id=session_id,
-                turn_id=turn_id,
-                text=text,
-                origin_message=origin_message,
-                related_task_id=related_task_id,
-                causation_id=causation_id,
-                correlation_id=correlation_id,
-                safe_fallback=safe_fallback,
-                delivery_mode=delivery_mode,
-                stream_id=stream_id,
-                stream_state=stream_state,
-                stream_index=stream_index,
-                reply_metadata=metadata,
-                channel_override=channel_override,
-                chat_id_override=chat_id_override,
-            )
         return self._builder.reply(
             session_id=session_id,
             turn_id=turn_id,
@@ -169,20 +162,20 @@ class OutputRuntime:
             chat_id_override=chat_id_override,
         )
 
-    async def _publish_guarded(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
+    async def _publish_guarded(self, event: BusEnvelope[OutputReadyPayloadBase]) -> None:
         guarded = self._reply_guard.guard_reply_event(event)
         if guarded.event is not None:
             await self._bus.publish(guarded.event)
             return
-        if guarded.blocked is None or event.payload.reply.safe_fallback:
+        if guarded.blocked is None or event.payload.content.safe_fallback:
             return
         await self._bus.publish(self._build_safe_fallback(event, guarded.blocked))
 
     def _build_safe_fallback(
         self,
-        event: BusEnvelope[ReplyReadyPayload],
+        event: BusEnvelope[OutputReadyPayloadBase],
         blocked: ReplyBlockedPayload,
-    ) -> BusEnvelope[ReplyReadyPayload]:
+    ) -> BusEnvelope[OutputReadyPayloadBase]:
         return self._build_reply_event(
             session_id=event.session_id or "",
             turn_id=event.turn_id,
@@ -194,8 +187,8 @@ class OutputRuntime:
             reply_kind="answer",
             delivery_mode=self._fallback_delivery_mode(event),
             reply_metadata=self._fallback_reply_metadata(event),
-            channel_override=event.payload.channel_override,
-            chat_id_override=event.payload.chat_id_override,
+            channel_override=event.payload.delivery_target.channel,
+            chat_id_override=event.payload.delivery_target.chat_id,
             safe_fallback=True,
         )
 
@@ -212,10 +205,7 @@ class OutputRuntime:
     def _left_reply_delivery_mode(payload: LeftReplyReadyPayload) -> str:
         if payload.stream_state is not None:
             return "stream"
-        target = payload.delivery_target
-        if target is None:
-            return "inline"
-        mode = str(target.delivery_mode or "").strip()
+        mode = str(payload.delivery_target.delivery_mode or "").strip()
         return mode if mode in {"inline", "push", "stream"} else "inline"
 
     @staticmethod
@@ -223,15 +213,27 @@ class OutputRuntime:
         return dict(extra or {})
 
     @staticmethod
-    def _fallback_delivery_mode(event: BusEnvelope[ReplyReadyPayload]) -> str:
-        if event.payload.stream_state is not None:
+    def _left_reply_stream_id(payload: LeftReplyReadyPayload, *, turn_id: str | None) -> str:
+        return str(payload.stream_id or payload.request_id or turn_id or "stream_reply").strip() or "stream_reply"
+
+    @staticmethod
+    def _followup_stream_id(payload: LeftFollowupReadyPayload) -> str:
+        metadata = dict(payload.metadata or {})
+        stream_id = str(metadata.get("stream_id", "") or "").strip()
+        if stream_id:
+            return stream_id
+        return f"stream_followup_{payload.job_id}"
+
+    @staticmethod
+    def _fallback_delivery_mode(event: BusEnvelope[OutputReadyPayloadBase]) -> str:
+        if getattr(event.payload, "stream_state", None) is not None:
             return "inline"
-        delivery_mode = str(event.payload.delivery_mode or "").strip()
+        delivery_mode = str(event.payload.delivery_target.delivery_mode or "").strip()
         return delivery_mode if delivery_mode in {"inline", "push"} else "inline"
 
     @staticmethod
-    def _fallback_reply_metadata(event: BusEnvelope[ReplyReadyPayload]) -> dict[str, Any]:
-        metadata = dict(event.payload.reply.metadata or {})
+    def _fallback_reply_metadata(event: BusEnvelope[OutputReadyPayloadBase]) -> dict[str, Any]:
+        metadata = dict(event.payload.content.metadata or {})
         fallback: dict[str, Any] = {}
         if metadata.get("suppress_delivery"):
             fallback["suppress_delivery"] = True

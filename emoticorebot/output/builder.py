@@ -6,7 +6,15 @@ from typing import Any
 from uuid import uuid4
 
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import ReplyReadyPayload
+from emoticorebot.protocol.events import (
+    DeliveryTargetPayload,
+    OutputInlineReadyPayload,
+    OutputPushReadyPayload,
+    OutputReadyPayloadBase,
+    OutputStreamClosePayload,
+    OutputStreamDeltaPayload,
+    OutputStreamOpenPayload,
+)
 from emoticorebot.protocol.task_models import MessageRef, ReplyDraft, ReplyKind
 from emoticorebot.protocol.topics import EventType
 
@@ -38,7 +46,7 @@ class OutputEventBuilder:
         reply_metadata: dict[str, Any] | None = None,
         channel_override: str | None = None,
         chat_id_override: str | None = None,
-    ) -> BusEnvelope[ReplyReadyPayload]:
+    ) -> BusEnvelope[OutputReadyPayloadBase]:
         metadata = dict(reply_metadata or {})
         event_type = self._event_type(delivery_mode=delivery_mode, stream_state=stream_state)
         resolved_delivery_mode = self._delivery_mode(event_type=event_type, delivery_mode=delivery_mode)
@@ -50,6 +58,11 @@ class OutputEventBuilder:
             reply_to_message_id=(origin_message.message_id if origin_message is not None else None),
             metadata=metadata,
         )
+        delivery_target = DeliveryTargetPayload(
+            delivery_mode=resolved_delivery_mode,
+            channel=channel_override or (origin_message.channel if origin_message is not None else None),
+            chat_id=chat_id_override or (origin_message.chat_id if origin_message is not None else None),
+        )
         return build_envelope(
             event_type=event_type,
             source="output_runtime",
@@ -59,25 +72,61 @@ class OutputEventBuilder:
             task_id=related_task_id,
             correlation_id=correlation_id or related_task_id or turn_id,
             causation_id=causation_id,
-            payload=ReplyReadyPayload(
+            payload=self._payload_for_event(
+                event_type=event_type,
                 reply=reply,
-                related_task_id=related_task_id,
+                delivery_target=delivery_target,
+                causation_id=causation_id,
                 origin_message=origin_message,
-                related_event_id=causation_id,
-                channel_override=channel_override,
-                chat_id_override=chat_id_override,
-                delivery_mode=resolved_delivery_mode,
+                related_task_id=related_task_id,
                 stream_id=stream_id,
                 stream_state=stream_state,
                 stream_index=stream_index,
             ),
         )
 
-    def reply(self, **kwargs: object) -> BusEnvelope[ReplyReadyPayload]:
+    def reply(self, **kwargs: object) -> BusEnvelope[OutputReadyPayloadBase]:
         return self.build(**kwargs)
 
-    def ask_user(self, **kwargs: object) -> BusEnvelope[ReplyReadyPayload]:
-        return self.build(kind="ask_user", **kwargs)
+    @staticmethod
+    def _payload_for_event(
+        *,
+        event_type: str,
+        reply: ReplyDraft,
+        delivery_target: DeliveryTargetPayload,
+        causation_id: str | None,
+        origin_message: MessageRef | None,
+        related_task_id: str | None,
+        stream_id: str | None,
+        stream_state: str | None,
+        stream_index: int | None,
+    ) -> OutputReadyPayloadBase:
+        common = {
+            "output_id": _new_id("out"),
+            "delivery_target": delivery_target,
+            "content": reply,
+            "origin_message": origin_message,
+            "related_task_id": related_task_id,
+            "related_event_id": causation_id,
+            "metadata": dict(reply.metadata or {}),
+        }
+        if event_type == EventType.OUTPUT_INLINE_READY:
+            return OutputInlineReadyPayload(**common)
+        if event_type == EventType.OUTPUT_PUSH_READY:
+            return OutputPushReadyPayload(**common)
+        stream_common = {
+            **common,
+            "stream_id": stream_id,
+            "stream_state": stream_state,
+            "stream_index": stream_index,
+        }
+        if event_type == EventType.OUTPUT_STREAM_OPEN:
+            return OutputStreamOpenPayload(**stream_common)
+        if event_type == EventType.OUTPUT_STREAM_DELTA:
+            return OutputStreamDeltaPayload(**stream_common)
+        if event_type == EventType.OUTPUT_STREAM_CLOSE:
+            return OutputStreamClosePayload(**stream_common)
+        raise ValueError(f"unsupported output event type: {event_type!r}")
 
     @staticmethod
     def _event_type(*, delivery_mode: str, stream_state: str | None) -> str:

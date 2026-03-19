@@ -1,4 +1,4 @@
-"""Reflection runtime around the memory governor."""
+"""Reflection runtime around the reflection governor."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from uuid import uuid4
 
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
-from emoticorebot.memory.governor import MemoryGovernor
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.protocol.envelope import build_envelope
-from emoticorebot.protocol.memory_models import ReflectSignalPayload
+from emoticorebot.protocol.reflection_models import ReflectionSignalPayload
 from emoticorebot.protocol.topics import EventType
+from emoticorebot.reflection.governor import ReflectionGovernor
 
 
 class ReflectionRuntime:
@@ -35,7 +35,7 @@ class ReflectionRuntime:
         deep_warm_limit: int = 15,
     ) -> None:
         self._bus = bus
-        self._governor = MemoryGovernor(
+        self._governor = ReflectionGovernor(
             bus=bus,
             workspace=workspace,
             emotion_manager=emotion_manager,
@@ -80,7 +80,7 @@ class ReflectionRuntime:
         return await self._governor.rollback_anchor(**kwargs)
 
     @property
-    def governor(self) -> MemoryGovernor:
+    def governor(self) -> ReflectionGovernor:
         return self._governor
 
     @property
@@ -91,22 +91,22 @@ class ReflectionRuntime:
         try:
             while True:
                 await asyncio.sleep(self._deep_interval_seconds)
-                await self._publish_periodic_deep_signal()
+                await self._publish_periodic_deep_reflection_signal()
         except asyncio.CancelledError:
             raise
 
-    async def _publish_periodic_deep_signal(self) -> None:
+    async def _publish_periodic_deep_reflection_signal(self) -> None:
         scheduled_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         await self._bus.publish(
             build_envelope(
-                event_type=EventType.REFLECT_DEEP,
+                event_type=EventType.REFLECTION_DEEP,
                 source="reflection",
-                target="memory_governor",
+                target="reflection_governor",
                 session_id=self._SYSTEM_SESSION_ID,
                 turn_id="turn_background_reflection",
                 correlation_id="background_reflection",
-                payload=ReflectSignalPayload(
-                    trigger_id=f"reflect_timer_{uuid4().hex[:12]}",
+                payload=ReflectionSignalPayload(
+                    trigger_id=f"reflection_timer_{uuid4().hex[:12]}",
                     reason="periodic_signal",
                     recent_context_ids=[],
                     metadata={
@@ -120,3 +120,8 @@ class ReflectionRuntime:
 
 
 __all__ = ["ReflectionRuntime"]
+
+
+
+
+

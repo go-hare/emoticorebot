@@ -6,7 +6,7 @@
 
 **emoticorebot** is a companion AI architecture built around a **single subject with Left Brain / Right Brain / Memory / Reflection** design.
 
-The system has one outward-facing self. `Left Brain` handles front-stage expression and companionship, `Right Brain` handles async reasoning and execution, and `Memory` plus `Reflection` keep the relationship continuous over time.
+The system has one outward-facing self. `Left Brain` handles user-facing expression and companionship, `Right Brain` handles async reasoning and execution, and `Memory` plus `Reflection` keep the relationship continuous over time.
 
 Detailed architecture design:
 
@@ -49,11 +49,11 @@ This creates `~/.emoticorebot/` with default config, `SOUL.md` (persona), `USER.
   },
   "agents": {
     "defaults": {
-      "brainMode": {
+      "leftBrainMode": {
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       },
-      "workerMode": {
+      "rightBrainMode": {
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       }
@@ -105,7 +105,7 @@ Left Brain / Right Brain
 - The system exposes one continuous subject to the user.
 - Inputs are modeled only as `turn` or `stream`.
 - Deliveries are modeled only as `inline`, `push`, or `stream`.
-- `Left Brain` owns front-stage expression and companionship.
+- `Left Brain` owns user-facing expression and companionship.
 - `Right Brain` owns async reasoning, execution, tools, and long-running work.
 - `Memory` and `Reflection` keep long-term continuity.
 
@@ -123,7 +123,7 @@ Left Brain / Right Brain
 
 - `Right Brain` is the only background execution system.
 - `create_task` is interpreted as "submit a request to Right Brain for review and handling".
-- `Right Brain` may `accept`, `answer_only`, `clarify`, or `reject`.
+- `Right Brain` may `accept`, `answer_only`, or `reject`.
 - User-visible wording still returns through `Left Brain`.
 
 ---
@@ -138,13 +138,13 @@ Three concurrent `asyncio.Task` loops:
 | Loop | Interval | Behaviour |
 |------|----------|-----------|
 | `_decay_loop` | 30 min (configurable) | Gradually decays PAD drive values toward neutral |
-| `_reflect_loop` | 1 h (configurable) | Triggers periodic `deep_reflection` through `ReflectionEngine` |
+| `_reflection_loop` | 1 h (configurable) | Triggers periodic `deep_reflection` through `RuntimeHost.run_deep_reflection()` |
 | `_proactive_loop` | 10 min (configurable) | Randomly initiates a message to the user when idle |
 
-#### ReflectionEngine (meta-cognition)
-Called by the subconscious reflect loop. It runs `deep_reflection` with a periodic signal and may:
+#### Deep Reflection
+Called by the subconscious reflection loop. It runs `deep_reflection` with a periodic signal and may:
 
-- append stable memories into `memory/memory.jsonl`
+- append stable memories into `memory/long_term/memory.jsonl`
 - rewrite `SOUL.md` when a stable self-pattern is confirmed
 - rewrite `USER.md` when a stable user-pattern is confirmed
 
@@ -249,7 +249,7 @@ emoticorebot uses **LangChain** adapters and **litellm** for broad model support
 | Groq | `langchain-groq` |
 | Ollama (local) | `langchain-ollama` |
 
-`brain` and `worker` can use different models through `agents.defaults.brainMode` and `agents.defaults.workerMode`.
+`left_brain` and `right_brain` can use different models through `agents.defaults.leftBrainMode` and `agents.defaults.rightBrainMode`.
 
 ---
 
@@ -325,69 +325,77 @@ emoticorebot channels status  # Show channel connection status
 ```text
 emoticorebot/
 ├── adapters/            # Conversation gateway / outbound dispatch
-├── agent/
-│   ├── context.py       # Brain prompt and memory context builder
-│   ├── reflection/      # Reflection coordination and memory persistence
-│   └── tool/            # Tool registry / execution wiring
 ├── background/          # Background daemon + periodic reflection entrypoints
 ├── bootstrap.py         # RuntimeHost, top-level assembly host
-├── brain/
-│   ├── decision_packet.py
-│   ├── dialogue_policy.py
-│   ├── executive.py
-│   ├── reply_builder.py
-│   └── task_policy.py
+├── left/
+│   ├── context.py
+│   ├── packet.py
+│   ├── reply_policy.py
+│   └── runtime.py
+├── right/
+│   ├── backend.py
+│   ├── executor.py
+│   ├── hooks.py
+│   ├── skills.py
+│   ├── runtime.py
+│   ├── state.py
+│   ├── store.py
+│   └── trace.py
 ├── bus/
 │   ├── interceptor.py
 │   ├── priority_queue.py
 │   ├── pubsub.py
 │   └── router.py
 ├── delivery/
+│   ├── runtime.py
 │   └── service.py
-├── execution/
-│   ├── backend.py
-│   ├── deep_agent_executor.py
-│   ├── executor_context.py
-│   ├── skills.py
-│   ├── stream.py
-│   ├── team.py
-│   └── tool_runtime.py
 ├── memory/
-│   └── governor.py
-├── protocol/            # Typed runtime submissions / events / task results
+│   ├── crystallizer.py
+│   ├── retrieval.py
+│   ├── short_term.py
+│   ├── store.py
+│   └── vector_index.py
+├── protocol/            # Typed runtime commands / events / models
 │   ├── commands.py
+│   ├── contracts.py
 │   ├── envelope.py
+│   ├── event_contracts.py
 │   ├── events.py
-│   ├── memory_models.py
-│   ├── safety_models.py
+│   ├── reflection_models.py
+│   ├── priorities.py
 │   ├── task_models.py
-│   ├── task_result.py
 │   └── topics.py
 ├── runtime/
-│   ├── assignment.py
-│   ├── input_gate.py
 │   ├── kernel.py
-│   ├── recovery.py
-│   ├── running_task.py
-│   ├── scheduler.py
-│   ├── service.py
-│   ├── state_machine.py
-│   ├── task_store.py
-│   ├── transport_bus.py
-│   └── task_state.py
+│   └── transport_bus.py
 ├── safety/
 │   └── guard.py
 ├── session/
+│   ├── models.py
+│   ├── runtime.py
 │   ├── history_store.py
 │   └── thread_store.py
 ├── tools/
+│   ├── manager.py
+│   └── mcp.py
 ├── channels/
 ├── providers/
+│   └── factory.py
 ├── cron/
 ├── models/
 ├── config/
 ├── skills/
 ├── templates/
+├── reflection/
+│   ├── candidates.py
+│   ├── cognitive.py
+│   ├── deep.py
+│   ├── governor.py
+│   ├── input.py
+│   ├── manager.py
+│   ├── persona.py
+│   ├── runtime.py
+│   └── turn.py
 ├── utils/
 └── cli/
 ```
@@ -401,3 +409,4 @@ See `COMMUNICATION.md`.
 ## License
 
 MIT.
+

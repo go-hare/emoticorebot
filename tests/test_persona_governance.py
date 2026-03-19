@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from emoticorebot.memory.persona import ManagedAnchorWriter
+from emoticorebot.reflection.persona import ManagedAnchorWriter
 
 
 def _history_rows(workspace: Path, *, target: str, scope: str) -> list[dict[str, object]]:

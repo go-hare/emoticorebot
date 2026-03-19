@@ -1,1581 +1,323 @@
-# 陪伴机器人模块契约与字段清单
+# Companion Left/Right Brain Module Contracts（当前版）
 
-## 1. 文档目的
+## 1. 总体边界
 
-本文是 [companion-left-right-brain-architecture.zh-CN.md](companion-left-right-brain-architecture.zh-CN.md) 的工程细化版。
-
-目标是把“左脑 / 右脑、双输入、三投递”的高层设计，落实成：
-
-- 公共字段定义
-- 模块输入输出契约
-- 状态字段
-- 事件载荷
-- 样例 JSON
-
-本文不是实现代码，而是未来代码重构时要尽量保持稳定的接口设计。
+- `left` 负责前台表达、动作判定、`task_mode` 判定
+- `session` 负责会话态和左右脑转发
+- `right` 负责后台审核、执行、结果回流
+- `output` 负责把左脑结果投递为 `inline / push / stream`
+- `delivery` 负责把 output 结果送到 transport，并回写送达状态
+- `reflection` 负责事后反思和长期更新
+- `memory` 负责长期记忆存储与读侧检索
 
 ---
 
-## 2. 设计边界
+## 2. `left` 模块契约
 
-### 2.1 对外只有一个主体
+文件：
 
-- 用户只面对一个陪伴主体。
-- 左脑和右脑都是内部模块，不直接暴露成两个角色。
-- 所有用户可见回复，最终都应带有统一主体口吻。
+- `emoticorebot/left_brain/packet.py`
+- `emoticorebot/left_brain/runtime.py`
+- `emoticorebot/left_brain/reply_policy.py`
 
-### 2.2 模块之间通过事件协作
+### 2.1 职责
 
-- 模块之间优先通过事件解耦。
-- 只读状态查询可以通过查询接口直接读取。
-- 跨模块不应直接依赖具体类名和内部方法。
+- 调用左脑 LLM
+- 解析 `####user#### / ####task####`
+- 把 `####user####` 做当前轮流式拆分
+- 构造当前轮 `delivery_target`
+- 根据 `action + task_mode` 构造右脑请求
+- 将右脑 followup 回流重新表达成统一主体口吻
 
-### 2.3 字段稳定优先
+### 2.2 左脑只决定什么
 
-后续可以更换：
+- 用户可见文本
+- `action=<none|create_task|cancel_task>`
+- `task_mode=<skip|sync|async>`
 
-- 小模型
-- 主模型
-- DeepAgent
-- 记忆实现
-- 交付通道
+### 2.3 左脑不再决定什么
 
-但尽量不随意更改本文里的字段语义。
+- 旧兼容协议字段
+- 输入层拆分
 
-### 2.4 唯一入口顺序
-
-- 所有原始输入先进入 `Session Supervisor`
-- `Session Supervisor` 必须先把输入交给左脑处理
-- 左脑必须先解析 `user/task` 双槽，再收敛本轮 `right_brain_strategy`
-- `task` 槽为空时，默认 `right_brain_strategy=skip`
-- `task` 槽非空时，左脑可选择 `sync/async` 并构造 `right_brain_request`
-- 左脑可按需启用内建评分辅助，但不是入口强依赖
-
----
-
-## 3. 公共枚举
-
-### 3.1 输入模式
-
-| 字段值 | 含义 |
-|------|------|
-| `turn` | 单轮输入 |
-| `stream` | 持续流输入 |
-
-### 3.2 投递模式
-
-| 字段值 | 含义 |
-|------|------|
-| `inline` | 当前轮直接返回 |
-| `push` | 当前轮结束后再推送 |
-| `stream` | 持续流式输出 |
-
-### 3.3 会话模式
-
-| 字段值 | 含义 |
-|------|------|
-| `turn_chat` | 单轮聊天模式 |
-| `realtime_chat` | 实时流式对话模式 |
-
-### 3.4 左脑路由建议
-
-| 字段值 | 含义 |
-|------|------|
-| `left_only` | 左脑直接处理 |
-| `left_with_right` | 左脑先处理，同时启动右脑 |
-| `right_review_first` | 先让右脑审看，再由左脑表达 |
-| `clarify_first` | 先追问 |
-| `safe_fallback` | 进入安全降级 |
-
-### 3.5 右脑受理结果
-
-| 字段值 | 含义 |
-|------|------|
-| `accept` | 接受并执行 |
-| `answer_only` | 不执行，只给左脑答案素材 |
-| `reject` | 不应处理或不能处理 |
-
-### 3.6 输出流状态
-
-| 字段值 | 含义 |
-|------|------|
-| `open` | 流开始 |
-| `delta` | 增量片段 |
-| `close` | 正常结束 |
-| `superseded` | 被中断或替换 |
-
-### 3.7 记忆类型
-
-| 字段值 | 含义 |
-|------|------|
-| `relationship` | 关系与偏好记忆 |
-| `fact` | 事实记忆 |
-| `working` | 工作态上下文 |
-| `execution` | 执行痕迹 |
-| `reflection` | 反思结论 |
-
----
-
-## 4. 公共标识字段
-
-所有模块都尽量复用下列公共 ID。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `user_id` | `string` | 跨通道稳定用户标识，没有时可为空 |
-| `session_id` | `string` | 当前会话标识 |
-| `turn_id` | `string` | 当前单轮处理标识 |
-| `stream_id` | `string` | 当前实时流标识 |
-| `job_id` | `string` | 右脑后台作业标识 |
-| `output_id` | `string` | 一次输出动作标识 |
-| `message_id` | `string` | 用户原始消息或系统投递消息标识 |
-| `correlation_id` | `string` | 跨模块关联追踪标识 |
-| `causation_id` | `string` | 引发当前事件的上游事件 ID |
-| `timestamp` | `string` | ISO 8601 时间戳 |
-
-建议：
-
-- `turn_id` 只在 `turn` 输入中稳定存在
-- `stream_id` 只在 `stream` 输入中稳定存在
-- `job_id` 只属于右脑后台作业
-
----
-
-## 5. 公共引用结构
-
-### 5.1 `MessageRef`
-
-```json
-{
-  "channel": "telegram",
-  "chat_id": "123456",
-  "sender_id": "user_1",
-  "message_id": "msg_abc",
-  "reply_to_message_id": "msg_prev",
-  "timestamp": "2026-03-18T12:00:00Z"
-}
-```
-
-字段：
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `channel` | `string` | 否 | 通道名 |
-| `chat_id` | `string` | 否 | 会话路由 ID |
-| `sender_id` | `string` | 否 | 发送者标识 |
-| `message_id` | `string` | 否 | 消息 ID |
-| `reply_to_message_id` | `string` | 否 | 回复目标 ID |
-| `timestamp` | `string` | 否 | 消息时间 |
-
-### 5.2 `ScoreBundle`
-
-```json
-{
-  "affective_score": 0.84,
-  "rational_score": 0.33,
-  "task_score": 0.18,
-  "urgency_score": 0.22,
-  "risk_score": 0.05,
-  "realtime_score": 0.71,
-  "confidence": 0.90
-}
-```
-
-所有评分约定：
-
-- 范围：`0.0 ~ 1.0`
-- 越大表示对应倾向越强
-- 不要求总和为 `1.0`
-
-### 5.3 `DeliveryTarget`
-
-```json
-{
-  "delivery_mode": "push",
-  "channel": "telegram",
-  "chat_id": "123456",
-  "thread_id": "",
-  "push_priority": "normal"
-}
-```
-
-字段：
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `delivery_mode` | `string` | 是 | `inline/push/stream` |
-| `channel` | `string` | 否 | 目标通道 |
-| `chat_id` | `string` | 否 | 目标会话 |
-| `thread_id` | `string` | 否 | 子线程或子房间 |
-| `push_priority` | `string` | 否 | `low/normal/high` |
-
----
-
-## 6. 可选辅助评分（左脑内建）
-
-### 6.1 定位
-
-这里描述的是左脑内建的可选评分能力，不是独立对外模块。
-
-它只看用户输入和最少量上下文，不负责生成最终回复，也不替代左脑最终裁决。
-
-### 6.2 输入
-
-#### 输入事件
-
-- `input.turn.received`
-- `input.stream.chunk`
-- `input.stream.committed`
-
-#### 输入载荷
-
-```json
-{
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "stream_id": "",
-  "input_mode": "turn",
-  "channel_kind": "chat",
-  "input_kind": "text",
-  "message": {
-    "channel": "telegram",
-    "chat_id": "123456",
-    "sender_id": "user_1",
-    "message_id": "msg_1"
-  },
-  "user_text": "我今天好累，不想做任何事。",
-  "input_slots": {
-    "user": "我今天好累，不想做任何事。",
-    "task": ""
-  },
-  "recent_summary": "用户最近压力较大，昨晚睡眠不好。",
-  "session_mode": "turn_chat"
-}
-```
-
-### 6.3 输出
-
-#### 输出方式
-
-- 不单独对外发布事件
-- 仅作为左脑内部辅助结果直接消费
-
-#### 输出结构
-
-```json
-{
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "stream_id": "",
-  "input_mode": "turn",
-  "scores": {
-    "affective_score": 0.92,
-    "rational_score": 0.18,
-    "task_score": 0.03,
-    "urgency_score": 0.27,
-    "risk_score": 0.22,
-    "realtime_score": 0.30,
-    "confidence": 0.91
-  },
-  "intent_tags": ["comfort", "emotion_disclosure"],
-  "emotion_tags": ["fatigue", "sadness"],
-  "route_hint": "left_only",
-  "input_slots": {
-    "user": "我今天好累，不想做任何事。",
-    "task": ""
-  },
-  "right_brain_strategy": "skip",
-  "invoke_right_brain": false,
-  "reason": "当前输入主要是情绪表达，不像执行请求。"
-}
-```
-
-### 6.4 左脑可消费字段
-
-该能力仅输出给左脑可消费的辅助字段：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `input_slots` | `object` | 推荐的 `user/task` 双槽结构 |
-| `right_brain_strategy` | `string` | 建议策略：`skip / sync / async` |
-| `invoke_right_brain` | `bool` | 建议是否触发右脑 |
-| `reason` | `string` | 说明文本，便于日志与调试 |
-
-入口调度规则：
-
-- 评分结果若存在，先交由左脑作为参考
-- `left.event.reply_ready` 才是 `Session Supervisor` 的正式调度依据
-- `invoke_right_brain=true` 时，发出 `right.command.job_requested`
-- 若左脑后续需要补充升级右脑策略，仍通过 `Session Supervisor` 二次发出右脑命令
-
-### 6.5 状态字段
-
-该能力不建议维护复杂状态，只保留轻量运行信息：
-
-| 字段 | 说明 |
-|------|------|
-| `model_name` | 当前使用的小模型名 |
-| `model_version` | 模型版本 |
-| `last_latency_ms` | 最近一次识别耗时 |
-| `fallback_mode` | 是否退化为规则模式 |
-
-### 6.6 判断边界
-
-该能力可以做：
-
-- 多维评分
-- 意图标签
-- 情绪标签
-- 左脑辅助建议
-- 路由提示
-
-该能力不应做：
-
-- 最终对用户说的话
-- 高价值执行决策
-- 深度安全结论
-- 长链推理
-
----
-
-## 7. 模块二：Left Brain
-
-### 7.1 定位
-
-`Left Brain` 是用户真正感知到的前台系统。
-
-职责重点：
-
-- 快
-- 稳
-- 有陪伴感
-- 统一人格
-
-### 7.2 输入
-
-#### 输入来源
-
-- `input.turn.received`
-- `input.stream.chunk`
-- `input.stream.committed`
-- `right.job.accepted`
-- `right.progress`
-- `right.result.ready`
-- `right.job.rejected`
-- `session.interrupt`
-
-#### 左脑输入结构
-
-推荐文本模板先解析为 `input_slots.user / input_slots.task`：
+### 2.4 内部输出契约
 
 ```text
-#######user#######
-你好
-#######task#######
-r任务相关
+####user####
+<给用户看的自然语言回复>
+
+####task####
+action=<none|create_task|cancel_task>
+task_mode=<skip|sync|async>
+task_id=<仅 cancel_task 时填写>
+reason=<可选>
 ```
 
-```json
-{
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "stream_id": "",
-  "input_mode": "turn",
-  "session_mode": "turn_chat",
-  "channel_kind": "chat",
-  "input_kind": "text",
-  "input_slots": {
-    "user": "你能帮我整理一下这份笔记吗？",
-    "task": "整理会议笔记，整理完成后通知我"
-  },
-  "left_brain_judgement": {
-    "right_brain_strategy": "async",
-    "invoke_right_brain": true,
-    "reason": "task 槽非空，且属于后台执行型请求。"
-  },
-  "user_text": "你能帮我整理一下这份笔记吗？",
-  "relationship_context": {
-    "tone_preference": "warm",
-    "familiarity_level": 0.72,
-    "recent_emotion": "neutral"
-  },
-  "memory_context": {
-    "user_preferences": ["不喜欢太官话", "偏好简洁"],
-    "recent_facts": ["用户本周在整理课程资料"]
-  }
-}
-```
+规则：
 
-### 7.3 输出
+- `action=none -> task_mode=skip`
+- `create_task/cancel_task -> task_mode=sync|async`
+- `####task####` 只允许紧凑 `key=value` 行
 
-左脑输出不是只有“回复文本”，而应包含：
+### 2.5 左脑如何使用入口环境
 
-- 对用户的话
-- 右脑参与方式
-- 推荐投递方式
-- 记忆写入候选
+左脑读取输入 `metadata` 中的这些事实：
 
-这里要注意：
+- `source_input_mode`
+- `current_delivery_mode`
+- `available_delivery_modes`
 
-- 左脑先给前台回复，再决定右脑参与方式
-- 左脑可以在当前轮补充升级右脑策略
-- 所有右脑启动都必须经 `Session Supervisor` 收束成正式右脑命令
+左脑必须自己判断：
 
-#### 左脑输出结构
-
-```json
-{
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "stream_id": "",
-  "reply_text": "可以，我先帮你整理，整理好后发给你。",
-  "reply_style": {
-    "warmth": 0.74,
-    "directness": 0.68,
-    "verbosity": 0.28
-  },
-  "delivery_plan": {
-    "delivery_mode": "inline"
-  },
-  "right_brain_strategy": "async",
-  "invoke_right_brain": true,
-  "right_brain_request": {
-    "job_kind": "execution_review",
-    "request_text": "帮用户整理这份笔记",
-    "expected_result_mode": "push"
-  },
-  "memory_candidate": {
-    "type": "working",
-    "summary": "用户请求整理一份笔记。"
-  }
-}
-```
-
-### 7.4 左脑核心字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `reply_text` | `string` | 当前要给用户的文本 |
-| `reply_blocks` | `array` | 多模态或分块内容 |
-| `reply_style` | `object` | 话术风格控制 |
-| `delivery_plan` | `object` | 当前回复投递方式 |
-| `right_brain_strategy` | `string` | 当前轮对右脑的最终策略收敛值 |
-| `invoke_right_brain` | `bool` | 是否确认或追加右脑参与 |
-| `right_brain_request` | `object` | 右脑受理请求 |
-| `memory_candidate` | `object` | 候选记忆摘要 |
-| `safety_level` | `string` | 当前回复安全等级 |
-
-### 7.5 `reply_style` 字段
-
-```json
-{
-  "warmth": 0.8,
-  "directness": 0.5,
-  "verbosity": 0.3,
-  "empathy": 0.9,
-  "rational_weight": 0.2
-}
-```
-
-字段说明：
-
-| 字段 | 范围 | 说明 |
-|------|------|------|
-| `warmth` | `0~1` | 温柔感 |
-| `directness` | `0~1` | 直接程度 |
-| `verbosity` | `0~1` | 详细程度 |
-| `empathy` | `0~1` | 共情程度 |
-| `rational_weight` | `0~1` | 回复中理性占比 |
-
-### 7.6 左脑状态字段
-
-建议 `Left Brain` 维护的运行状态：
-
-| 字段 | 说明 |
-|------|------|
-| `active_stream_id` | 当前活跃输出流 |
-| `last_reply_text` | 最近一次对用户可见回复 |
-| `last_reply_at` | 最近一次回复时间 |
-| `last_right_brain_job_id` | 最近触发的右脑作业 |
-| `pending_followup` | 是否存在待处理右脑回流 |
-
-### 7.7 左脑边界
-
-左脑可以：
-
-- 快速接住用户
-- 做情绪表达
-- 决定前台话术
-- 启动右脑
-- 将右脑结果包装后对外说出
-
-左脑不适合：
-
-- 独立长链执行
-- 重度工具操作
-- 长时间阻塞等待
-
-### 7.8 `turn` 模式下左脑对右脑的调用策略
-
-在 `turn` 模式下，左脑必须基于 `user/task` 双槽与上下文，为右脑收敛出以下三种策略之一：
-
-- `skip`
-- `sync`
-- `async`
-
-建议将其显式写入左脑输出。
-
-#### 新增字段：`right_brain_strategy`
-
-```json
-{
-  "right_brain_strategy": "sync"
-}
-```
-
-字段定义：
-
-| 字段值 | 含义 |
-|------|------|
-| `skip` | 当前轮不启动右脑 |
-| `sync` | 当前轮同步等待右脑轻量结果 |
-| `async` | 当前轮先结束，右脑后台继续 |
-
-#### 更新后的左脑输出结构
-
-```json
-{
-  "reply_text": "我先想一下。",
-  "delivery_plan": {
-    "delivery_mode": "inline"
-  },
-  "invoke_right_brain": true,
-  "right_brain_strategy": "sync",
-  "right_brain_request": {
-    "job_kind": "reasoning_review",
-    "request_text": "判断用户问题应如何回答"
-  }
-}
-```
-
-#### 选择规则
-
-- 简单陪聊：`skip`
-- 轻量分析：`sync`
-- 长耗时或执行型处理：`async`
-
-网页对话场景通常优先使用：
-
-- `skip`
-- `sync`
-
-只有在用户明确希望“处理完再通知我”时，才优先选择：
-
-- `async`
+- 当前请求是否只是直接回答
+- 是否需要右脑
+- 如果需要右脑，是沿当前会话收束，还是当前结束后再通知
 
 ---
 
-## 8. 模块三：Right Brain
+## 3. `session` 模块契约
 
-### 8.1 定位
+文件：
 
-`Right Brain` 是异步后台系统，可以使用 `DeepAgent` 作为执行引擎。
+- `emoticorebot/session/runtime.py`
+- `emoticorebot/session/models.py`
 
-右脑的本质是：
+### 3.1 职责
 
-- 理性处理
-- 执行受理
-- 工具和长耗时逻辑
+- 订阅输入事件
+- 维护 session 的活跃输入流、活跃回复流、任务视图、trace cursor
+- 把用户输入和右脑回流统一收敛成 `left.command.reply_requested`
+- 当左脑要求启动右脑时，发出 `right.command.job_requested`
 
-`RightBrainRuntime` 常驻存在，但不自己做外层裁决流。
+### 3.2 不做的事
 
-它负责：
-
-- 接收左脑提交的 `job`
-- 立即启动一次 `DeepAgent` run
-- 持有并控制 run 生命周期
-- 把关键进展持续回流给左脑
-
-`audit_tool` 只是 `DeepAgent` 内部的审核钩子，用来决定：
-
-- `accept`
-- `answer_only`
-- `reject`
-
-其中：
-
-- `accept` 的语义就是“任务可以开始”
-- `reject / answer_only` 由 `audit_tool` 直接发出终止信号
-- `RightBrainRuntime` 收到终止信号后，先回左脑，再关停当前 run
-
-### 8.2 输入
-
-#### 输入事件
-
-- `right.job.requested`
-
-#### 输入载荷
-
-```json
-{
-  "job_id": "job_1",
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "correlation_id": "corr_1",
-  "job_kind": "execution_review",
-  "request_text": "帮用户整理这份笔记",
-  "source_text": "你能帮我整理一下这份笔记吗？",
-  "scores": {
-    "affective_score": 0.22,
-    "rational_score": 0.61,
-    "task_score": 0.87,
-    "urgency_score": 0.31,
-    "risk_score": 0.06,
-    "realtime_score": 0.10,
-    "confidence": 0.90
-  },
-  "delivery_target": {
-    "delivery_mode": "push",
-    "channel": "telegram",
-    "chat_id": "123456"
-  },
-  "context": {
-    "recent_turns": [
-      {
-        "role": "user",
-        "content": "你能帮我整理一下这份笔记吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "可以，我先处理，过程中会继续告诉你进展。"
-      }
-    ],
-    "short_term_memory": ["用户本周在整理课程资料"],
-    "long_term_memory": ["用户偏好简洁提纲"],
-    "tool_context": {
-      "available_tools": ["read_note", "write_outline"],
-      "tool_constraints": ["不要直接面向用户输出"]
-    }
-  }
-}
-```
-
-补充约束：
-
-- `recent_turns` 建议最多只带最近 `10` 轮
-- 不要把整段历史原样灌给 `DeepAgent`
-- 工具信息只传当前 run 真正相关的工具摘要与约束
-- 短期记忆和长期记忆只传摘要或引用，不要求传全量原始内容
-
-### 8.3 右脑处理阶段
-
-建议右脑内部按统一阶段推进：
-
-| 阶段 | 含义 |
-|------|------|
-| `audit` | 审核钩子执行 |
-| `execute` | 执行 |
-| `done` | 完成 |
-| `rejected` | 拒绝 |
-
-### 8.4 右脑第一层输出：受理结果
-
-#### 事件
-
-- `right.job.accepted`
-- `right.job.rejected`
-
-#### `accepted` 载荷
-
-```json
-{
-  "job_id": "job_1",
-  "session_id": "sess_1",
-  "decision": "accept",
-  "reason": "audit_tool 返回任务可以开始。",
-  "stage": "execute",
-  "estimated_cost": "low",
-  "estimated_duration_s": 12
-}
-```
-
-#### `rejected` 载荷
-
-```json
-{
-  "job_id": "job_1",
-  "session_id": "sess_1",
-  "decision": "reject",
-  "reason": "当前请求缺少可供处理的内容源文件。",
-  "suggested_left_brain_mode": "answer_only"
-}
-```
-
-### 8.5 右脑第二层输出：过程进展
-
-#### 事件
-
-- `right.progress`
-
-#### `progress` 载荷
-
-```json
-{
-  "job_id": "job_1",
-  "session_id": "sess_1",
-  "decision": "accept",
-  "stage": "execute",
-  "summary": "已完成资料扫描，开始整理提纲。",
-  "progress": 0.35,
-  "next_step": "归类知识点"
-}
-```
-
-### 8.6 右脑第三层输出：最终结果
-
-#### 事件
-
-- `right.result.ready`
-
-#### 载荷
-
-```json
-{
-  "job_id": "job_1",
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "result_type": "execution_result",
-  "decision": "accept",
-  "summary": "笔记已经整理完成。",
-  "result_text": "我已经按知识点归类整理好了，一共分成 5 个部分。",
-  "artifacts": [
-    {
-      "artifact_id": "artifact_1",
-      "artifact_type": "text",
-      "name": "整理后的笔记",
-      "uri": ""
-    }
-  ],
-  "delivery_target": {
-    "delivery_mode": "push",
-    "channel": "telegram",
-    "chat_id": "123456"
-  },
-  "memory_candidate": {
-    "type": "execution",
-    "summary": "用户笔记整理请求已完成。"
-  }
-}
-```
-
-### 8.7 右脑核心字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `job_id` | `string` | 后台作业 ID |
-| `job_kind` | `string` | 作业类型 |
-| `decision` | `string` | `accept/answer_only/reject` |
-| `stage` | `string` | 当前处理阶段 |
-| `summary` | `string` | 对内部与左脑可读的摘要 |
-| `progress` | `float` | 进度百分比（0-1） |
-| `next_step` | `string` | 下一步计划 |
-| `result_text` | `string` | 最终结果文字 |
-| `artifacts` | `array` | 产物列表 |
-| `delivery_target` | `object` | 建议投递目标 |
-| `memory_candidate` | `object` | 候选记忆 |
-
-### 8.8 右脑状态字段
-
-| 字段 | 说明 |
-|------|------|
-| `job_queue_size` | 当前队列长度 |
-| `active_jobs` | 活跃作业数 |
-| `last_job_started_at` | 最近一次启动时间 |
-| `last_job_completed_at` | 最近一次完成时间 |
-| `per_session_job_counts` | 每个 session 的后台作业数 |
-
-### 8.9 右脑边界
-
-右脑可以：
-
-- 审查可做性
-- 工具调用
-- 长耗时处理
-- 给左脑补理性结果
-
-右脑不应：
-
-- 自己直接对用户说话
-- 绕过左脑发送最终回复
-- 维护“等待用户补充信息”的中间态
-- 把 `audit_tool` 变成外层流程系统
-- 在收到 `reject / answer_only` 终止信号后直接静默结束，不通知左脑
-
-### 8.10 `turn` 模式下右脑的正式行为
-
-#### 当 `right_brain_strategy = skip`
-
-- 右脑不启动
-- 不创建后台作业
-
-#### 当 `right_brain_strategy = sync`
-
-- 右脑启动一次 `DeepAgent` run
-- 左脑在当前轮等待该结果
-- 右脑的 `accepted / progress / rejected / result.ready` 都必须先回到左脑
-- 当前轮结果仍以 `inline` 或 `turn + stream` 返回
-
-#### 当 `right_brain_strategy = async`
-
-- 右脑启动同一种后台 `DeepAgent` run
-- 左脑当前轮先结束
-- 右脑继续把受理、进展、结果回流给左脑
-- 用户可基于这些状态随时停止当前 run
-
-### 8.11 DeepAgent 上下文与反思触发
-
-- `RightBrainRuntime` 构建 `DeepAgent` 时，只传最近 `10` 轮上下文、相关工具信息、短期记忆摘要、长期记忆摘要
-- 每次关键工具往返或阶段推进，都应回流左脑，让用户实时感知
-- `accept` 只是“任务可以开始”；runtime 不需要为它进入终止逻辑
-- `reject / answer_only` 是 `audit_tool` 直接发出的终止信号；runtime 必须先通知左脑，再关停 run
-- 任务完成或取消时，右脑只负责记录上下文摘要并触发反思
-- 反思模块异步自行拉取更多上下文，不要求右脑同步打包全部反思材料
+- 不做 LLM 决策
+- 不做用户表达
+- 不做同步/异步裁决
+- 不再读取任何旧兼容策略字段
 
 ---
 
-## 9. 模块四：Reflection
+## 4. `right` 模块契约
 
-### 9.1 定位
+文件：
 
-`Reflection` 是慢速、事后、长期的认知演化模块。
+- `emoticorebot/right_brain/runtime.py`
+- `emoticorebot/right_brain/store.py`
+- `emoticorebot/right_brain/executor.py`
+- `emoticorebot/right_brain/hooks.py`
+- `emoticorebot/right_brain/state.py`
 
-### 9.2 输入
+### 4.1 职责
 
-#### 输入事件
+- 接受 `right.command.job_requested`
+- 创建或取消右脑 run
+- 严格执行 `accept -> progress/result` 顺序
+- 发布 `accepted / progress / rejected / result`
+- 保存最小任务快照和 trace
 
-- `output.inline.ready`
-- `output.push.ready`
-- `output.stream.close`
-- `right.result.ready`
+### 4.2 强约束
 
-#### 输入载荷
+- 不能直接面向用户发言
+- 不支持等待用户补充信息
+- `delivery_target` 必须由上游显式给出
+- 不再自己 fallback 推断 delivery mode
+- `accepted / progress / rejected / result` 四类事件也必须显式带上 `delivery_target`
+- `reject / answer_only` 直接终止本次 run
 
-```json
-{
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "user_text": "我今天好累。",
-  "visible_reply": "听起来你今天真的消耗很大，要不要先歇一会儿？",
-  "right_brain_summary": "",
-  "relationship_snapshot": {
-    "familiarity_level": 0.72,
-    "trust_level": 0.66
-  }
-}
-```
+### 4.3 `task_mode` 到右脑投递的收敛
 
-### 9.3 输出
+当前实现中：
 
-#### 事件
-
-- `reflection.turn.requested`
-- `reflection.deep.requested`
-- `memory.write.requested`
-
-#### 反思输出结构
-
-```json
-{
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "reflection_type": "turn",
-  "insights": [
-    "用户在高压力下更偏好被先安抚，再讨论解决方案。"
-  ],
-  "memory_candidates": [
-    {
-      "type": "relationship",
-      "summary": "用户疲惫时更偏好温柔承接，不喜欢一上来分析。"
-    }
-  ],
-  "persona_adjustments": [
-    {
-      "field": "comfort_first",
-      "delta": 0.1
-    }
-  ]
-}
-```
-
-### 9.4 反思核心字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `reflection_type` | `string` | `turn/deep` |
-| `insights` | `array` | 反思结论 |
-| `memory_candidates` | `array` | 记忆写入建议 |
-| `persona_adjustments` | `array` | 人格调整建议 |
-| `confidence` | `float` | 反思置信度 |
-
-### 9.5 反思状态字段
-
-| 字段 | 说明 |
-|------|------|
-| `last_turn_reflection_at` | 最近一轮反思时间 |
-| `last_deep_reflection_at` | 最近一次深反思时间 |
-| `pending_reflection_count` | 待处理反思数量 |
+- `task_mode=sync` -> 右脑结果沿当前会话前台模式回流
+- `task_mode=async` -> 右脑结果回流目标固定为 `push`
 
 ---
 
-## 10. 模块五：Memory
+## 5. `output` 模块契约
 
-### 10.1 定位
+文件：
 
-`Memory` 保存对陪伴主体有价值的长期和工作态信息。
+- `emoticorebot/output/runtime.py`
+- `emoticorebot/output/builder.py`
 
-### 10.2 正式目录结构
+### 5.1 职责
 
-```text
-memory/
-  short_term/
-    <session_id>.jsonl
-  long_term/
-    memory.jsonl
-  vector/
-```
+- 将左脑结果转成：
+  - `output.event.inline_ready`
+  - `output.event.push_ready`
+  - `output.event.stream_open/delta/close`
+- 对回复做 safety guard
+- 处理 `suppress_output`
 
-字段语义：
+### 5.2 当前轮回复规则
 
-- `memory/short_term/`：会话级短期记忆，保存最近几轮摘要、工作态上下文、当前活跃任务上下文
-- `memory/long_term/`：长期记忆正式事实源
-- `memory/vector/`：向量索引区，不是事实源，可由长期记忆重建
-- `USER.md` / `SOUL.md`：只应视为投影视图，不应视为正式记忆事实源
+- `delivery_target.delivery_mode=inline` -> `inline`
+- `delivery_target.delivery_mode=push` -> `push`
+- `delivery_target.delivery_mode=stream` -> `stream`
+- 如果当前轮目标是 `stream`，但左脑本轮没有实际 token 流，output 仍会发一个 `stream_close` 完成收束
 
-### 10.3 读取接口
+### 5.3 followup 规则
 
-建议定义统一查询接口，不让左脑和右脑直接碰底层存储细节。
-
-#### 查询请求
-
-```json
-{
-  "session_id": "sess_1",
-  "user_id": "user_1",
-  "query_text": "用户当前为什么会情绪低落",
-  "memory_layers": ["short_term", "long_term"],
-  "memory_types": ["relationship", "fact"],
-  "limit": 5
-}
-```
-
-#### 查询响应
-
-```json
-{
-  "items": [
-    {
-      "memory_id": "mem_1",
-      "memory_layer": "long_term",
-      "memory_type": "relationship",
-      "summary": "用户最近两周工作压力偏高。",
-      "confidence": 0.86
-    }
-  ]
-}
-```
-
-### 10.4 写入接口
-
-#### 写入请求
-
-```json
-{
-  "memory_id": "mem_new_1",
-  "session_id": "sess_1",
-  "user_id": "user_1",
-  "memory_layer": "long_term",
-  "memory_type": "relationship",
-  "summary": "用户疲惫时更偏好被先安抚。",
-  "detail": "用户在高疲劳状态下，更希望先被安抚和承接，再讨论行动方案。",
-  "source_module": "reflection",
-  "confidence": 0.81,
-  "tags": ["comfort_preference", "stress"]
-}
-```
-
-### 10.5 短期记忆条目字段
-
-短期记忆用于保存当前会话工作态，不等于长期事实沉淀。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `memory_id` | `string` | 短期记忆 ID |
-| `session_id` | `string` | 所属会话 |
-| `user_id` | `string` | 用户标识 |
-| `turn_id` | `string` | 关联轮次 |
-| `memory_type` | `string` | `turn_summary / working_context / active_job_context` |
-| `summary` | `string` | 一句话摘要 |
-| `detail` | `string` | 更完整上下文 |
-| `raw_messages` | `array` | 原始证据消息列表 |
-| `source_event_ids` | `array` | 来源事件 ID |
-| `ttl_seconds` | `int` | 建议存活时间 |
-| `expires_at` | `string` | 过期时间 |
-| `created_at` | `string` | 创建时间 |
-| `updated_at` | `string` | 更新时间 |
-| `metadata` | `object` | 额外元数据 |
-
-#### `raw_messages` 子项字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `role` | `string` | 原始角色，必须按源消息原样保留，如 `user / assistant / tool / system` |
-| `content` | `string` | 原始纯文本主内容；纯文本场景必须原样保存 |
-| `content_blocks` | `array` | 原始多模态内容块；多模态场景必须保留 |
-| `message_id` | `string` | 原始消息 ID |
-| `turn_id` | `string` | 原始轮次 ID |
-| `job_id` | `string` | 若来自右脑链路则可填写 |
-| `created_at` | `string` | 原始记录时间 |
-
-### 10.6 长期记忆条目字段
-
-长期记忆保存稳定结论，不应退化为第二份会话流水。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `memory_id` | `string` | 长期记忆 ID |
-| `user_id` | `string` | 用户标识 |
-| `session_id` | `string` | 来源会话，可为空 |
-| `memory_type` | `string` | `relationship / fact / working / execution / reflection` |
-| `summary` | `string` | 一句话稳定结论 |
-| `detail` | `string` | 更完整提炼内容 |
-| `evidence_messages` | `array` | 原始证据片段 |
-| `source_module` | `string` | 产生该记忆的模块 |
-| `source_event_ids` | `array` | 来源事件 ID |
-| `confidence` | `float` | 可信度 |
-| `stability` | `float` | 稳定度 |
-| `tags` | `array` | 标签 |
-| `status` | `string` | `active / superseded / invalid` |
-| `created_at` | `string` | 创建时间 |
-| `updated_at` | `string` | 更新时间 |
-| `metadata` | `object` | 额外元数据 |
-
-#### `evidence_messages` 子项字段
-
-长期记忆中的原始证据至少必须保留原始 `role`，并按场景保留原始 `content` / `content_blocks`。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `role` | `string` | 原始角色 |
-| `content` | `string` | 原始纯文本主内容；有文本时应原样保存 |
-| `content_blocks` | `array` | 原始多模态内容块；多模态场景必须保留 |
-| `session_id` | `string` | 来源会话 ID |
-| `turn_id` | `string` | 来源轮次 ID |
-| `message_id` | `string` | 来源消息 ID |
-| `job_id` | `string` | 若来自右脑链路则可填写 |
-| `created_at` | `string` | 原始记录时间 |
-
-### 10.7 向量索引字段
-
-`memory/vector/` 只保存索引，不保存正式事实。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `vector_id` | `string` | 向量文档 ID |
-| `memory_id` | `string` | 对应记忆 ID |
-| `memory_layer` | `string` | `short_term / long_term` |
-| `text` | `string` | 用于嵌入的文本 |
-| `content_hash` | `string` | 内容哈希 |
-| `metadata` | `object` | 检索辅助元数据 |
-| `indexed_at` | `string` | 建索引时间 |
-
-补充约束：
-
-- `memory/vector/` 不是正式事实源
-- 向量索引应优先从 `memory/long_term/` 重建
-- 若确有需要，可为 `short_term` 建临时索引，但其生命周期不得反向定义正式记忆
-
-### 10.8 记忆状态字段
-
-| 字段 | 说明 |
-|------|------|
-| `relationship_memory_count` | 关系记忆数量 |
-| `fact_memory_count` | 事实记忆数量 |
-| `working_memory_count` | 工作态记忆数量 |
-| `execution_memory_count` | 执行记忆数量 |
-| `reflection_memory_count` | 反思记忆数量 |
-| `short_term_entry_count` | 短期记忆条目数量 |
-| `vector_doc_count` | 向量文档数量 |
-| `last_vector_rebuild_at` | 最近一次向量重建时间 |
+- `push` followup -> `push`
+- `inline` followup -> `inline`
+- `stream` followup -> 当前实现发一个 `stream_close` 单包收束
+- `accepted / progress` 在非 `push` 场景下可被 suppress
 
 ---
 
-## 11. 模块六：Session Supervisor
+## 6. `delivery` 模块契约
 
-### 11.1 定位
+文件：
 
-`Session Supervisor` 是每个会话的调度中心。
+- `emoticorebot/delivery/runtime.py`
+- `emoticorebot/delivery/service.py`
 
-它不负责“想什么”，只负责“谁先做、什么时候做、怎么投递”。
+### 6.1 职责
 
-### 11.2 原始记录目录
+- 订阅 `output.event.inline_ready / push_ready / stream_*`
+- 将 output 层已经确定好的结果发送给 transport
+- 成功后发布 `output.event.replied`
+- 失败时发布 `output.event.delivery_failed`
 
-```text
-session/
-  <session_id>/
-    front.jsonl
-    right.jsonl
-```
+### 6.2 强约束
 
-字段语义：
-
-- `front.jsonl`：保存 `用户 <-> 左脑` 原始记录
-- `right.jsonl`：保存 `左脑 <-> 右脑` 原始记录
-- `session/` 只保存原始流水，不负责做记忆提炼
-- 原始记录必须保留原始 `role`
-- 原始记录必须支持多模态：`content` 作为纯文本主内容，`content_blocks` 作为原始多模态载荷
-
-### 11.3 前台原始记录字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `record_id` | `string` | 原始记录 ID |
-| `session_id` | `string` | 会话 ID |
-| `user_id` | `string` | 用户 ID |
-| `turn_id` | `string` | 单轮 ID |
-| `message_id` | `string` | 消息 ID |
-| `role` | `string` | 原始角色，必须按源消息原样保留，如 `user / assistant / tool / system` |
-| `event_type` | `string` | `user_message / left_reply / stream_open / stream_delta / stream_close` |
-| `content` | `string` | 原始纯文本主内容 |
-| `content_blocks` | `array` | 原始多模态载荷 |
-| `reply_to_message_id` | `string` | 回复目标消息 |
-| `created_at` | `string` | 创建时间 |
-| `metadata` | `object` | 额外元数据 |
-
-### 11.4 后台原始记录字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `record_id` | `string` | 原始记录 ID |
-| `session_id` | `string` | 会话 ID |
-| `user_id` | `string` | 用户 ID |
-| `turn_id` | `string` | 单轮 ID |
-| `job_id` | `string` | 右脑作业 ID |
-| `role` | `string` | 原始角色，必须按源消息原样保留，如 `assistant / tool / system` |
-| `event_type` | `string` | `job_requested / job_accepted / progress / job_rejected / result_ready / cancelled` |
-| `content` | `string` | 原始纯文本主内容 |
-| `content_blocks` | `array` | 原始多模态载荷 |
-| `created_at` | `string` | 创建时间 |
-| `metadata` | `object` | 额外元数据 |
-
-### 11.5 核心状态字段
-
-```json
-{
-  "session_id": "sess_1",
-  "user_id": "user_1",
-  "session_mode": "realtime_chat",
-  "input_mode": "stream",
-  "active_turn_id": "",
-  "active_stream_id": "stream_1",
-  "active_left_output_id": "out_1",
-  "active_right_jobs": ["job_1"],
-  "pending_push_count": 1,
-  "archived": false
-}
-```
-
-字段说明：
-
-| 字段 | 说明 |
-|------|------|
-| `session_mode` | 当前会话模式 |
-| `input_mode` | 当前输入模式 |
-| `active_turn_id` | 当前单轮 ID |
-| `active_stream_id` | 当前流 ID |
-| `active_left_output_id` | 左脑当前输出 ID |
-| `active_right_jobs` | 活跃右脑作业列表 |
-| `pending_push_count` | 待推送数 |
-| `archived` | 是否已归档 |
-
-### 11.6 输入
-
-#### 会话监督器接收的事件
-
-- `input.turn.received`
-- `input.stream.started`
-- `input.stream.chunk`
-- `session.interrupt`
-- `right.job.accepted`
-- `right.progress`
-- `right.job.rejected`
-- `right.result.ready`
-- `output.stream.close`
-
-### 11.7 输出
-
-#### 会话监督器发出的事件
-
-- `left.reply.requested`
-- `right.job.requested`
-- `output.inline.ready`
-- `output.push.ready`
-- `output.stream.open/delta/close`
-
-### 11.8 监督器边界
-
-监督器可以：
-
-- 控并发
-- 控模式
-- 控中断
-- 决定投递路径
-
-监督器不应：
-
-- 自己写最终回复
-- 自己做深度推理
+- 不再改判 `task_mode`
+- 不再猜 `delivery_target`
+- 不再改写 reply 文本语义
+- stale stream 只发送 `superseded` 收束，不补正常完成态
+- `suppress_delivery` 时不走 transport，但仍发布可观测的 `output.event.replied`
 
 ---
 
-## 12. 模块七：Delivery Plane
+## 7. `reflection` 模块契约
 
-### 12.1 定位
+文件：
 
-`Delivery Plane` 统一负责把内部结果投递到外部通道。
+- `emoticorebot/reflection/runtime.py`
+- `emoticorebot/reflection/governor.py`
+- `emoticorebot/reflection/manager.py`
+- `emoticorebot/reflection/persona.py`
 
-### 12.2 输入
+### 7.1 职责
 
-#### 输入事件
+- 接受 `REFLECTION_LIGHT / REFLECTION_DEEP`
+- 执行 turn reflection 与 deep reflection
+- 接受 `REFLECTION_WRITE_REQUEST`
+- 持久化记忆并发布 `REFLECTION_WRITE_COMMITTED`
+- 当人格或用户模型被治理更新时，发布 `REFLECTION_UPDATE_PERSONA / REFLECTION_UPDATE_USER_MODEL`
 
-- `output.inline.ready`
-- `output.push.ready`
-- `output.stream.open`
-- `output.stream.delta`
-- `output.stream.close`
+### 7.2 强约束
 
-### 12.3 输出字段
-
-#### 统一投递请求
-
-```json
-{
-  "output_id": "out_1",
-  "session_id": "sess_1",
-  "delivery_mode": "push",
-  "message_ref": {
-    "channel": "telegram",
-    "chat_id": "123456"
-  },
-  "content": {
-    "text": "我整理好了，发你一版简洁提纲。",
-    "blocks": []
-  },
-  "stream_state": "",
-  "metadata": {
-    "from": "left_brain",
-    "job_id": "job_1"
-  }
-}
-```
-
-### 12.4 投递状态字段
-
-| 字段 | 说明 |
-|------|------|
-| `last_delivery_at` | 最近一次投递时间 |
-| `last_delivery_channel` | 最近投递通道 |
-| `delivery_fail_count` | 失败次数 |
-
-### 12.5 交付边界
-
-投递层可以：
-
-- 适配通道协议
-- 处理流状态
-
-投递层不应：
-
-- 修改回复语义
-- 决定是否执行右脑
+- reflection 只做事后反思与长期更新，不参与当前轮用户表达
+- periodic deep reflection 定时器只由 `reflection/runtime.py` 持有
+- 反思触发去重由 governor 负责，不由 left/right/session 自己处理
+- `ReflectionWriteRequestPayload.memory_type` 是反思写入请求类型，不等同于最终落盘 `memory_type`
 
 ---
 
-## 13. 建议事件清单与字段
+## 8. `memory` 模块契约
 
-说明：本节事件名以工程示例为主；代码层正式常量命名以
-`companion-protocol-spec.zh-CN.md` 的 `Topic/EventType` 定义为准。
+文件：
 
-### 13.1 `input.turn.received`
+- `emoticorebot/memory/store.py`
+- `emoticorebot/memory/retrieval.py`
 
-```json
-{
-  "event_type": "input.turn.received",
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "input_mode": "turn",
-  "channel_kind": "chat",
-  "input_kind": "text",
-  "message": {},
-  "user_text": "帮我整理一下这份笔记。",
-  "input_slots": {
-    "user": "帮我整理一下这份笔记。",
-    "task": "整理笔记并在完成后通知我"
-  },
-  "timestamp": "2026-03-18T12:00:00Z"
-}
-```
+### 8.1 职责
 
-### 13.2 `input.stream.chunk`
+- `MemoryStore` 作为长期记忆 append-only source of truth
+- `MemoryRetrieval` 作为左脑读侧 facade
+- 为左脑构造长期记忆上下文
+- 为右脑/任务执行构造 task memory bundle
 
-```json
-{
-  "event_type": "input.stream.chunk",
-  "session_id": "sess_1",
-  "stream_id": "stream_1",
-  "input_mode": "stream",
-  "chunk_index": 12,
-  "chunk_text": "我今天其实有点难受",
-  "is_commit_point": false
-}
-```
+### 8.2 当前正式存储面
 
-### 13.3 `scoring.result`（左脑内建，不对外发事件）
+- 长期记忆文件：`memory/long_term/memory.jsonl`
+- 当前落盘 schema：`memory.long_term.v1`
+- 正式存储 `memory_type`：
+  - `relationship`
+  - `fact`
+  - `working`
+  - `execution`
+  - `reflection`
 
-```json
-{
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "scores": {},
-  "intent_tags": [],
-  "emotion_tags": [],
-  "route_hint": "left_with_right"
-}
-```
+### 8.3 强约束
 
-### 13.4 `right.job.requested`
-
-```json
-{
-  "event_type": "right.job.requested",
-  "job_id": "job_1",
-  "session_id": "sess_1",
-  "turn_id": "turn_1",
-  "job_kind": "execution_review",
-  "request_text": "帮用户整理笔记",
-  "delivery_target": {}
-}
-```
-
-### 13.5 `right.progress`
-
-```json
-{
-  "event_type": "right.progress",
-  "job_id": "job_1",
-  "session_id": "sess_1",
-  "stage": "execute",
-  "summary": "已完成资料扫描，开始整理提纲。",
-  "progress": 0.35,
-  "next_step": "归类知识点"
-}
-```
-
-### 13.6 `right.result.ready`
-
-```json
-{
-  "event_type": "right.result.ready",
-  "job_id": "job_1",
-  "session_id": "sess_1",
-  "summary": "笔记整理完成",
-  "result_text": "我已经按 5 个知识点整理好了。",
-  "delivery_target": {}
-}
-```
-
-### 13.7 `output.push.ready`
-
-```json
-{
-  "event_type": "output.push.ready",
-  "output_id": "out_1",
-  "session_id": "sess_1",
-  "delivery_mode": "push",
-  "message_ref": {},
-  "content": {
-    "text": "我整理好了，发你一版简洁提纲。"
-  }
-}
-```
+- 左脑通过 `MemoryRetrieval` 读取，不直接耦合 `MemoryStore`
+- reflection 请求类型会先映射，再落入正式存储类型
+- memory 模块本身不决定人格治理，只提供存储与检索能力
 
 ---
 
-## 14. 三个典型样例
+## 9. 当前正式共享模型
 
-### 14.1 纯陪聊：左脑直接回复
+### 9.1 `protocol/contracts.py`
 
-用户输入：
+保留：
 
-```json
-{
-  "user_text": "我今天好累。"
-}
-```
+- `InputMode`
+- `DeliveryMode`
+- `RightBrainJobAction`
+- `RightBrainDecision`
+- `TaskMode`
 
-左脑判定：
+### 9.2 `protocol/events.py`
 
-```json
-{
-  "affective_score": 0.93,
-  "rational_score": 0.16,
-  "task_score": 0.01,
-  "input_slots": {
-    "user": "我今天好累。",
-    "task": ""
-  },
-  "right_brain_strategy": "skip"
-}
-```
+重点模型：
 
-左脑输出：
+- `TurnInputPayload`
+- `StreamStartPayload`
+- `StreamChunkPayload`
+- `StreamCommitPayload`
+- `StreamInterruptedPayload`
+- `LeftReplyReadyPayload`
+- `LeftStreamDeltaPayload`
+- `LeftFollowupReadyPayload`
+- `RightBrainAcceptedPayload`
+- `RightBrainProgressPayload`
+- `RightBrainRejectedPayload`
+- `RightBrainResultPayload`
+- `Output*Payload`
+- `SystemSignalPayload`
 
-```json
-{
-  "reply_text": "听起来你今天真的消耗很大，要不要先歇一会儿？",
-  "delivery_plan": {
-    "delivery_mode": "inline"
-  },
-  "invoke_right_brain": false
-}
-```
+### 9.3 `protocol/commands.py`
 
-### 14.2 单轮触发后台处理
+重点模型：
 
-用户输入：
+- `LeftReplyRequestPayload`
+- `FollowupContextPayload`
+- `RightBrainJobRequestPayload`
 
-```json
-{
-  "user_text": "你帮我整理好这份会议笔记，整理好后告诉我。"
-}
-```
+### 9.4 `protocol/reflection_models.py`
 
-左脑判定：
+重点模型：
 
-```json
-{
-  "affective_score": 0.10,
-  "rational_score": 0.58,
-  "task_score": 0.95,
-  "input_slots": {
-    "user": "你帮我整理好这份会议笔记，整理好后告诉我。",
-    "task": "整理会议笔记并完成后通知"
-  },
-  "right_brain_strategy": "async"
-}
-```
-
-左脑输出：
-
-```json
-{
-  "reply_text": "可以，我先整理，整理完发给你。",
-  "delivery_plan": {
-    "delivery_mode": "inline"
-  },
-  "invoke_right_brain": true,
-  "right_brain_request": {
-    "job_kind": "execution_review",
-    "expected_result_mode": "push"
-  }
-}
-```
-
-右脑完成后：
-
-```json
-{
-  "summary": "会议笔记整理完成",
-  "result_text": "我已经按议题、结论和待办整理好了。",
-  "delivery_target": {
-    "delivery_mode": "push"
-  }
-}
-```
-
-### 14.3 实时对话中右脑补理性
-
-用户输入流中某一段：
-
-```json
-{
-  "chunk_text": "我最近老睡不好，是不是作息出问题了"
-}
-```
-
-左脑判定（可选叠加小模型）：
-
-```json
-{
-  "affective_score": 0.61,
-  "rational_score": 0.74,
-  "task_score": 0.20,
-  "realtime_score": 0.91,
-  "input_slots": {
-    "user": "我最近老睡不好，是不是作息出问题了",
-    "task": ""
-  },
-  "right_brain_strategy": "sync"
-}
-```
-
-左脑先给实时回应：
-
-```json
-{
-  "reply_text": "嗯，我在听。睡不好这件事最近持续多久了？",
-  "delivery_plan": {
-    "delivery_mode": "stream"
-  },
-  "invoke_right_brain": true
-}
-```
-
-右脑稍后回流：
-
-```json
-{
-  "summary": "右脑判断应先做信息澄清，不应直接下结论。",
-  "decision": "answer_only"
-}
-```
+- `ReflectionSignalPayload`
+- `ReflectionWriteRequestPayload`
+- `ReflectionWriteCommittedPayload`
+- `ReflectionUpdatePayload`
 
 ---
 
-## 15. 推荐实现顺序
+## 10. 已删除或已废弃的旧概念
 
-1. 固定字段与事件名
-2. 先落地左脑 `user/task` 双槽解析
-3. 将前台表达明确实现为 `Left Brain`
-4. 将后台理性与执行明确实现为 `Right Brain`
-5. 在入口层显式实现 `turn / stream`
-6. 在投递层显式实现 `inline / push / stream`
-7. 左脑内建评分辅助作为可选优化接入
-
-### 15.4 第四阶段
-
-- 再做更细的实时流仲裁
-- 再做更细的反思和记忆治理
+- 旧兼容策略字段
+- 旧等待类状态
+- 旧多模式回复字段
+- 旧 `front/` 命名
+- 旧 `brain/` 命名
+- 旧通用 task 包装层
 
 ---
 
-## 16. 最终约束
+## 11. 一句话理解
 
-无论以后怎么改实现，都建议保持以下约束不变：
+- 入口给左脑环境事实
+- 左脑输出用户文本和 `task_mode`
+- session 只转发
+- 右脑只执行
+- output 只投递
+- delivery 只送达
+- reflection 只反思
+- memory 只存取
 
-1. 用户只面对一个主体
-2. 左脑始终负责前台表达
-3. 右脑始终负责异步理性与执行
-4. 左脑先解析 `user/task` 再决定右脑策略
-5. 小模型若使用，只做辅助评分与提示
-6. 反思不阻塞当前轮
-7. `turn / stream` 与 `inline / push / stream` 作为一级协议概念长期保留

@@ -4,18 +4,15 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-from emoticorebot.brain.decision_packet import BrainControlPacket, BrainFinalDecision, BrainTaskAction
-from emoticorebot.protocol.events import TaskEvent, TaskEventType
+from emoticorebot.left_brain.packet import DecisionPacket as LeftDecisionPacket, TaskAction as LeftTaskAction
+from emoticorebot.protocol.events import TaskEvent
 from emoticorebot.protocol.task_models import ReviewItem, ReviewSeverity, TraceItem
-from emoticorebot.protocol.task_result import TaskExecutionResult
 
 ReflectionSourceType = Literal["user_turn", "task_event", "internal_task_event"]  # 反思输入来源
 ExecutionStatus = Literal[
     "none",
     "done",
-    "need_more",
     "failed",
-    "waiting_input",
     "running",
     "partial",
     "completed",
@@ -39,11 +36,7 @@ class ExecutionInfo(TypedDict, total=False):
     invoked: bool  # 本轮是否发生执行
     status: ExecutionStatus  # 执行状态
     summary: str  # 一句话执行摘要
-    confidence: float  # 执行置信度
-    attempt_count: int  # 尝试次数
-    missing: list[str]  # 缺失输入
     failure_reason: str  # 失败原因
-    recommended_action: str  # 建议下一步
 
 
 class ReflectionInput(TypedDict, total=False):
@@ -59,7 +52,7 @@ class ReflectionInput(TypedDict, total=False):
     channel: str  # 渠道
     chat_id: str  # 聊天对象
     emotion: EmotionState  # 情绪快照
-    brain: BrainControlPacket  # 主脑决策包
+    left_brain: LeftDecisionPacket  # 左脑决策包
     execution: ExecutionInfo | None  # 标准化执行信息
     task: dict[str, Any]  # 任务快照
     task_trace: list[TraceItem]  # 执行追踪
@@ -67,7 +60,7 @@ class ReflectionInput(TypedDict, total=False):
 
 
 class StateUpdateDelta(TypedDict, total=False):
-    """主脑对本轮状态记录结果的判断。字段名保留 delta，但值表示判断后的状态值。"""
+    """左脑对本轮状态记录结果的判断。字段名保留 delta，但值表示判断后的状态值。"""
 
     should_apply: bool  # 是否建议同步到实时状态
     confidence: float  # 应用该更新的置信度
@@ -91,10 +84,8 @@ class MemoryCandidate(TypedDict, total=False):
 class ExecutionReview(TypedDict, total=False):
     """对执行过程的紧凑评价。"""
 
-    attempt_count: int  # 执行尝试次数
     effectiveness: ExecutionEffectiveness  # 执行有效性
     main_failure_reason: str  # 主要失败原因
-    missing_inputs: list[str]  # 缺失输入
     next_execution_hint: str  # 下次执行提示
 
 
@@ -107,7 +98,7 @@ class TurnReflectionOutput(TypedDict, total=False):
     outcome: Literal["success", "partial", "failed", "no_execution"]  # 本轮结果
     next_hint: str  # 下一轮承接提示
     user_updates: list[str]  # 用户画像更新候选
-    soul_updates: list[str]  # 主脑风格更新候选
+    soul_updates: list[str]  # 左脑风格更新候选
     state_update: StateUpdateDelta  # 状态记录判断
     memory_candidates: list[MemoryCandidate]  # 长期记忆候选
     execution_review: ExecutionReview  # 执行复盘
@@ -119,13 +110,12 @@ class DeepReflectionOutput(TypedDict, total=False):
     summary: str  # 这一阶段的高层总结
     memory_candidates: list[MemoryCandidate]  # 长期记忆候选
     user_updates: list[str]  # 用户画像更新
-    soul_updates: list[str]  # 主脑风格更新
+    soul_updates: list[str]  # 左脑风格更新
 
 
 __all__ = [
-    "BrainControlPacket",
-    "BrainFinalDecision",
-    "BrainTaskAction",
+    "LeftDecisionPacket",
+    "LeftTaskAction",
     "DeepReflectionOutput",
     "EmotionState",
     "ExecutionEffectiveness",
@@ -139,9 +129,8 @@ __all__ = [
     "ReviewItem",
     "ReviewSeverity",
     "StateUpdateDelta",
-    "TaskExecutionResult",
     "TaskEvent",
-    "TaskEventType",
     "TraceItem",
     "TurnReflectionOutput",
 ]
+

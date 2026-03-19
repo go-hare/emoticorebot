@@ -13,26 +13,15 @@ from .contracts import (
     ReplyDeliveryMode,
     RightBrainDecision,
     RightBrainJobAction,
-    RightBrainStrategy,
     SessionMode,
     StreamState,
-    TaskCommandType,
-    TaskEventType,
 )
 from .task_models import (
-    AgentRole,
     ContentBlock,
-    InputRequest,
     MessageRef,
     PerceptionData,
-    PlanStep,
     ProtocolModel,
     ReplyDraft,
-    ReviewItem,
-    TaskRequestSpec,
-    TaskStateSnapshot,
-    TaskVisibleResult,
-    TaskVisibleState,
     TraceItem,
 )
 
@@ -121,10 +110,9 @@ class MemoryCandidatePayload(ProtocolModel):
 class LeftReplyReadyPayload(ProtocolModel):
     request_id: str | None = None
     reply_text: str
-    reply_kind: Literal["answer", "ask_user", "status"] = "answer"
-    delivery_target: DeliveryTargetPayload | None = None
+    reply_kind: Literal["answer", "status"] = "answer"
+    delivery_target: DeliveryTargetPayload
     origin_message: MessageRef | None = None
-    right_brain_strategy: RightBrainStrategy = "skip"
     invoke_right_brain: bool = False
     right_brain_request: dict[str, Any] = Field(default_factory=dict)
     related_task_id: str | None = None
@@ -154,11 +142,10 @@ class LeftFollowupReadyPayload(ProtocolModel):
     source_event: FollowupSourceEvent
     source_decision: RightBrainDecision
     reply_text: str
-    reply_kind: Literal["answer", "ask_user", "status"] = "status"
+    reply_kind: Literal["answer", "status"] = "status"
     delivery_target: DeliveryTargetPayload
     origin_message: MessageRef | None = None
     related_task_id: str | None = None
-    memory_candidate: MemoryCandidatePayload | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -168,6 +155,7 @@ class RightBrainAcceptedPayload(ProtocolModel):
     stage: str | None = None
     reason: str | None = None
     estimated_duration_s: int | None = None
+    delivery_target: DeliveryTargetPayload
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -178,6 +166,7 @@ class RightBrainProgressPayload(ProtocolModel):
     summary: str
     progress: float | None = None
     next_step: str | None = None
+    delivery_target: DeliveryTargetPayload
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -185,6 +174,7 @@ class RightBrainRejectedPayload(ProtocolModel):
     job_id: str
     decision: Literal["reject"] = "reject"
     reason: str
+    delivery_target: DeliveryTargetPayload
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -194,159 +184,67 @@ class RightBrainResultPayload(ProtocolModel):
     summary: str | None = None
     result_text: str | None = None
     artifacts: list[ContentBlock] = Field(default_factory=list)
-    delivery_target: DeliveryTargetPayload | None = None
+    delivery_target: DeliveryTargetPayload
     memory_candidate: MemoryCandidatePayload | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class TaskStartedReportPayload(ProtocolModel):
-    task_id: str
-    agent_role: AgentRole
-    assignment_id: str
-    started_at: str | None = None
-    summary: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskProgressReportPayload(ProtocolModel):
-    task_id: str
-    agent_role: AgentRole
-    assignment_id: str
-    summary: str | None = None
-    detail: str | None = None
-    progress: float | None = None
-    current_step_id: str | None = None
-    next_step: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskNeedInputReportPayload(ProtocolModel):
-    task_id: str
-    agent_role: AgentRole
-    assignment_id: str
-    input_request: InputRequest
-    summary: str | None = None
-    partial_result: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskPlanReadyReportPayload(ProtocolModel):
-    task_id: str
-    assignment_id: str
-    plan_id: str
-    summary: str | None = None
-    steps: list[PlanStep] = Field(default_factory=list)
-    reviewer_hint: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskResultReportPayload(ProtocolModel):
-    task_id: str
-    agent_role: AgentRole
-    assignment_id: str
-    summary: str | None = None
-    result_text: str | None = None
-    result_blocks: list[ContentBlock] = Field(default_factory=list)
-    artifacts: list[ContentBlock] = Field(default_factory=list)
-    confidence: float | None = None
-    reviewer_required: bool | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskApprovedReportPayload(ProtocolModel):
-    task_id: str
-    review_id: str
-    summary: str | None = None
-    notes: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskRejectedReportPayload(ProtocolModel):
-    task_id: str
-    review_id: str
-    summary: str | None = None
-    rejection_reason: str | None = None
-    findings: list[ReviewItem] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskFailedReportPayload(ProtocolModel):
-    task_id: str
-    agent_role: AgentRole
-    assignment_id: str
-    reason: str | None = None
-    summary: str | None = None
-    retryable: bool | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskCancelledReportPayload(ProtocolModel):
-    task_id: str
-    agent_role: AgentRole
-    assignment_id: str
-    reason: str | None = None
-    cancelled_at: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskNotificationPayload(ProtocolModel):
-    task_id: str
-    state: TaskVisibleState
-    result: TaskVisibleResult = "none"
-    updated_at: str | None = None
-    trace_append: list[TraceItem] = Field(default_factory=list)
-
-
-class TaskUpdatePayload(TaskNotificationPayload):
-    state: Literal["running"] = "running"
-    message: str
-    progress: float | None = None
-    stage: str | None = None
-
-
-class TaskSummaryPayload(TaskNotificationPayload):
-    state: Literal["running"] = "running"
-    summary: str
-    stage: str | None = None
-    next_step: str | None = None
-
-
-class TaskAskPayload(TaskNotificationPayload):
-    state: Literal["waiting"] = "waiting"
-    question: str
-    field: str | None = None
-    why: str | None = None
-
-
-class TaskEndPayload(TaskNotificationPayload):
-    state: Literal["done"] = "done"
-    result: Literal["success", "failed", "cancelled"]
-    summary: str | None = None
-    output: str | None = None
-    error: str | None = None
-    trace_final: list[TraceItem] = Field(default_factory=list)
-
-
-class ReplyReadyPayload(ProtocolModel):
-    reply: ReplyDraft
+class OutputReadyPayloadBase(ProtocolModel):
+    output_id: str
+    delivery_target: DeliveryTargetPayload
+    content: ReplyDraft
     origin_message: MessageRef | None = None
     related_task_id: str | None = None
     related_event_id: str | None = None
-    channel_override: str | None = None
-    chat_id_override: str | None = None
-    delivery_mode: DeliveryMode = "inline"
-    stream_id: str | None = None
-    stream_state: StreamState | None = None
-    stream_index: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_stream_fields(self) -> "ReplyReadyPayload":
-        if self.delivery_mode == "stream" and self.stream_state is None:
-            raise ValueError("stream replies require stream_state")
-        if self.stream_state is not None and not self.stream_id:
-            raise ValueError("stream replies with stream_state require stream_id")
+    def validate_content(self) -> "OutputReadyPayloadBase":
+        if not str(self.output_id or "").strip():
+            raise ValueError("output events require output_id")
         return self
+
+
+class OutputInlineReadyPayload(OutputReadyPayloadBase):
+    @model_validator(mode="after")
+    def validate_delivery_mode(self) -> "OutputInlineReadyPayload":
+        if self.delivery_target.delivery_mode != "inline":
+            raise ValueError("inline output events require delivery_mode=inline")
+        return self
+
+
+class OutputPushReadyPayload(OutputReadyPayloadBase):
+    @model_validator(mode="after")
+    def validate_delivery_mode(self) -> "OutputPushReadyPayload":
+        if self.delivery_target.delivery_mode != "push":
+            raise ValueError("push output events require delivery_mode=push")
+        return self
+
+
+class OutputStreamPayloadBase(OutputReadyPayloadBase):
+    stream_id: str
+    stream_state: StreamState
+    stream_index: int | None = None
+
+    @model_validator(mode="after")
+    def validate_stream_fields(self) -> "OutputStreamPayloadBase":
+        if self.delivery_target.delivery_mode != "stream":
+            raise ValueError("stream output events require delivery_mode=stream")
+        if not str(self.stream_id or "").strip():
+            raise ValueError("stream output events require stream_id")
+        return self
+
+
+class OutputStreamOpenPayload(OutputStreamPayloadBase):
+    stream_state: Literal["open"] = "open"
+
+
+class OutputStreamDeltaPayload(OutputStreamPayloadBase):
+    stream_state: Literal["delta"] = "delta"
+
+
+class OutputStreamClosePayload(OutputStreamPayloadBase):
+    stream_state: Literal["close", "superseded"] = "close"
 
 
 class ReplyBlockedPayload(ProtocolModel):
@@ -400,6 +298,13 @@ __all__ = [
     "LeftReplyReadyPayload",
     "LeftStreamDeltaPayload",
     "MemoryCandidatePayload",
+    "OutputInlineReadyPayload",
+    "OutputPushReadyPayload",
+    "OutputReadyPayloadBase",
+    "OutputStreamClosePayload",
+    "OutputStreamDeltaPayload",
+    "OutputStreamOpenPayload",
+    "OutputStreamPayloadBase",
     "PerceptionEventPayload",
     "PerceptionType",
     "RightBrainAcceptedPayload",
@@ -407,9 +312,7 @@ __all__ = [
     "RightBrainJobAction",
     "RightBrainRejectedPayload",
     "RightBrainResultPayload",
-    "RightBrainStrategy",
     "ReplyBlockedPayload",
-    "ReplyReadyPayload",
     "RepliedPayload",
     "SessionMode",
     "SignalType",
@@ -418,22 +321,6 @@ __all__ = [
     "StreamInterruptedPayload",
     "StreamStartPayload",
     "SystemSignalPayload",
-    "TaskApprovedReportPayload",
-    "TaskAskPayload",
-    "TaskCancelledReportPayload",
-    "TaskCommandType",
-    "TaskEndPayload",
     "TaskEvent",
-    "TaskEventType",
-    "TaskFailedReportPayload",
-    "TaskNeedInputReportPayload",
-    "TaskNotificationPayload",
-    "TaskPlanReadyReportPayload",
-    "TaskProgressReportPayload",
-    "TaskRejectedReportPayload",
-    "TaskResultReportPayload",
-    "TaskStartedReportPayload",
-    "TaskSummaryPayload",
-    "TaskUpdatePayload",
     "TurnInputPayload",
 ]

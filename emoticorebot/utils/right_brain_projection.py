@@ -6,8 +6,6 @@ from typing import Any, Mapping
 
 def normalize_task_state(state: str) -> str:
     normalized = str(state or "").strip()
-    if normalized == "waiting":
-        return "waiting"
     if normalized == "done":
         return "done"
     if normalized == "running":
@@ -46,9 +44,6 @@ def project_task_from_runtime_snapshot(
         "error": str(payload.get("error", "") or "").strip(),
         "stage": str(payload.get("last_progress", "") or "").strip(),
     }
-    input_request = normalize_input_request(payload.get("input_request"))
-    if input_request:
-        task["input_request"] = input_request
     if params:
         task["params"] = dict(params)
     if trace:
@@ -84,14 +79,6 @@ def project_task_from_session_view(
         "summary": str(getattr(task_view, "summary", "") or "").strip(),
         "stage": str(getattr(task_view, "summary", "") or "").strip(),
     }
-    question = str(getattr(task_view, "latest_ask", "") or "").strip()
-    if question:
-        task["input_request"] = _drop_empty(
-            {
-                "field": str(getattr(task_view, "latest_ask_field", "") or "").strip(),
-                "question": question,
-            }
-        )
     if params:
         task["params"] = dict(params)
     if trace:
@@ -109,41 +96,24 @@ def project_task_for_memory(
     state = str(payload.get("state", "") or "").strip()
     if not state:
         state = _task_state_from_execution(execution_payload)
+    state = normalize_task_state(state)
     result = str(payload.get("result", "") or "").strip()
     if not result:
         result = _task_result_from_execution(execution_payload, state=state)
     summary = str(payload.get("summary", "") or execution_payload.get("summary", "") or "").strip()
-    raw_missing = list(payload.get("missing", []) or execution_payload.get("missing", []) or [])
-    missing = [str(item).strip() for item in raw_missing if str(item).strip()]
     return _drop_empty(
         {
             "used": bool(execution_payload.get("invoked")) or bool(payload),
             "state": state or "running",
             "result": result or "none",
             "summary": summary,
-            "missing": missing,
         }
     )
-
-
-def normalize_input_request(value: Any) -> dict[str, str] | None:
-    if isinstance(value, Mapping):
-        field = str(value.get("field", "") or "").strip()
-        question = str(value.get("question", "") or "").strip()
-    else:
-        field = str(getattr(value, "field", "") or "").strip()
-        question = str(getattr(value, "question", "") or "").strip()
-    if not field and not question:
-        return None
-    return _drop_empty({"field": field, "question": question})
-
 
 def _task_state_from_execution(execution: Mapping[str, Any]) -> str:
     status = str(execution.get("status", "") or "").strip()
     if status == "failed":
         return "done"
-    if status == "waiting_input":
-        return "waiting"
     if status in {"done", "completed", "success", "partial"}:
         return "done"
     if status == "none":
@@ -169,7 +139,6 @@ def _drop_empty(payload: dict[str, Any]) -> dict[str, Any]:
 __all__ = [
     "normalize_task_result",
     "normalize_task_state",
-    "normalize_input_request",
     "project_task_for_memory",
     "project_task_from_runtime_snapshot",
     "project_task_from_session_view",

@@ -21,6 +21,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from emoticorebot import __version__, __logo__
 from emoticorebot.config.schema import Config
+from emoticorebot.right_brain.state import TERMINAL_STATES, RightBrainState
 
 app = typer.Typer(
     name="emoticorebot",
@@ -149,7 +150,6 @@ def _is_one_shot_task_settled(agent_loop: object, task_id: str | None) -> bool:
     task = kernel.get_task(task_id)
     if task is None:
         return False
-    from emoticorebot.right.state_machine import TERMINAL_STATES, RightBrainState
 
     return task.state in TERMINAL_STATES or task.state is RightBrainState.DONE
 
@@ -331,8 +331,8 @@ def gateway(
     agent = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        worker_mode=config.agents.defaults.worker_mode,
-        brain_mode=config.agents.defaults.brain_mode,
+        right_brain_mode=config.agents.defaults.right_brain_mode,
+        left_brain_mode=config.agents.defaults.left_brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -439,8 +439,8 @@ def agent(
     agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        worker_mode=config.agents.defaults.worker_mode,
-        brain_mode=config.agents.defaults.brain_mode,
+        right_brain_mode=config.agents.defaults.right_brain_mode,
+        left_brain_mode=config.agents.defaults.left_brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -532,7 +532,7 @@ def agent(
                                         delay_s=0.2,
                                     )
                                 final_response[:] = [msg.content]
-                                if matched_task_id == awaited_task_id and reply_kind in {"answer", "ask_user"}:
+                                if matched_task_id == awaited_task_id and reply_kind in {"answer", "safety_fallback"}:
                                     completed.set()
                                     continue
                                 if awaited_task_id and not _is_one_shot_task_settled(agent_loop, awaited_task_id):
@@ -551,7 +551,7 @@ def agent(
                                 delay_s=0.2,
                             )
                         final_response[:] = [msg.content]
-                        if matched_task_id == awaited_task_id and reply_kind in {"answer", "ask_user"}:
+                        if matched_task_id == awaited_task_id and reply_kind in {"answer", "safety_fallback"}:
                             completed.set()
                             continue
                         if awaited_task_id and not _is_one_shot_task_settled(agent_loop, awaited_task_id):
@@ -1062,8 +1062,8 @@ def cron_run(
     agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        worker_mode=config.agents.defaults.worker_mode,
-        brain_mode=config.agents.defaults.brain_mode,
+        right_brain_mode=config.agents.defaults.right_brain_mode,
+        left_brain_mode=config.agents.defaults.left_brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -1114,7 +1114,7 @@ def cron_run(
                             delay_s=0.2,
                         )
                     final_response[:] = [msg.content]
-                    if task_id == awaited_task_id and reply_kind in {"answer", "ask_user"}:
+                    if task_id == awaited_task_id and reply_kind in {"answer", "safety_fallback"}:
                         completed.set()
                         continue
                     if awaited_task_id and not _is_one_shot_task_settled(agent_loop, awaited_task_id):
@@ -1193,8 +1193,8 @@ def status():
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
     if config_path.exists():
-        console.print(f"Brain Model: {config.agents.defaults.brain_mode.model}")
-        console.print(f"Worker Model: {config.agents.defaults.worker_mode.model}")
+        console.print(f"Left Brain Model: {config.agents.defaults.left_brain_mode.model}")
+        console.print(f"Right Brain Model: {config.agents.defaults.right_brain_mode.model}")
 
 
 if __name__ == "__main__":

@@ -6,14 +6,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-AgentRole = Literal["planner", "worker", "reviewer"]
-ReplyKind = Literal["answer", "ask_user", "safety_fallback", "status"]
-ReviewPolicy = Literal["skip", "optional", "required"]
+ReplyKind = Literal["answer", "safety_fallback", "status"]
 PlanStepStatus = Literal["pending", "running", "done", "failed", "skipped"]
 ReviewSeverity = Literal["low", "medium", "high", "critical"]
 ProvidedInputSource = Literal["user_message", "upload", "sensor", "system"]
-TaskVisibleState = Literal["running", "waiting", "done"]
-TaskVisibleResult = Literal["none", "success", "failed", "cancelled"]
 TraceItem = dict[str, Any]
 
 
@@ -50,26 +46,6 @@ class MessageRef(ProtocolModel):
     timestamp: str | None = None
 
 
-class InputRequest(ProtocolModel):
-    field: str | None = None
-    question: str | None = None
-    required: bool | None = None
-    expected_type: str | None = None
-    choices: list[str] = Field(default_factory=list)
-    validation_hint: str | None = None
-
-
-class PlanStep(ProtocolModel):
-    step_id: str | None = None
-    title: str | None = None
-    description: str | None = None
-    role: str | None = None
-    status: PlanStepStatus | None = None
-    depends_on: list[str] = Field(default_factory=list)
-    expected_output: str | None = None
-    tools: list[str] = Field(default_factory=list)
-
-
 class ReviewItem(ProtocolModel):
     item_id: str | None = None
     severity: ReviewSeverity | None = None
@@ -97,22 +73,6 @@ class ReplyDraft(ProtocolModel):
         return self
 
 
-class TaskStateSnapshot(ProtocolModel):
-    task_id: str
-    state: TaskVisibleState
-    result: TaskVisibleResult = "none"
-    state_version: int | None = None
-    title: str | None = None
-    summary: str | None = None
-    error: str | None = None
-    assignee: str | None = None
-    plan_id: str | None = None
-    review_required: bool | None = None
-    last_progress: str | None = None
-    input_request: InputRequest | None = None
-    updated_at: str | None = None
-
-
 class TaskRequestSpec(ProtocolModel):
     request: str
     title: str | None = None
@@ -124,8 +84,6 @@ class TaskRequestSpec(ProtocolModel):
     content_blocks: list[ContentBlock] = Field(default_factory=list)
     memory_refs: list[str] = Field(default_factory=list)
     skill_hints: list[str] = Field(default_factory=list)
-    review_policy: ReviewPolicy | None = None
-    preferred_agent: Literal["planner", "worker"] | None = None
 
 
 class ProvidedInputItem(ProtocolModel):
@@ -149,27 +107,6 @@ class ProvidedInputBundle(ProtocolModel):
     attachments: list[ContentBlock] = Field(default_factory=list)
     source_message: MessageRef | None = None
     source_event_id: str | None = None
-
-
-class AgentInputContext(ProtocolModel):
-    latest_user_message: MessageRef | None = None
-    latest_user_text: str | None = None
-    latest_attachments: list[ContentBlock] = Field(default_factory=list)
-    provided_inputs: ProvidedInputBundle | None = None
-    missing_fields: list[str] = Field(default_factory=list)
-    dialogue_summary: str | None = None
-
-
-class ReviewerContext(ProtocolModel):
-    review_id: str | None = None
-    review_policy: ReviewPolicy | None = None
-    candidate_summary: str | None = None
-    candidate_result_text: str | None = None
-    candidate_result_blocks: list[ContentBlock] = Field(default_factory=list)
-    candidate_artifacts: list[ContentBlock] = Field(default_factory=list)
-    candidate_confidence: float | None = None
-    acceptance_criteria: list[str] = Field(default_factory=list)
-    prior_findings: list[ReviewItem] = Field(default_factory=list)
 
 
 class ControlParameters(ProtocolModel):
@@ -197,14 +134,10 @@ class PerceptionData(ProtocolModel):
 
 
 __all__ = [
-    "AgentInputContext",
-    "AgentRole",
     "ContentBlock",
     "ControlParameters",
-    "InputRequest",
     "MessageRef",
     "PerceptionData",
-    "PlanStep",
     "PlanStepStatus",
     "ProtocolModel",
     "ProvidedInputBundle",
@@ -213,12 +146,7 @@ __all__ = [
     "ReplyDraft",
     "ReplyKind",
     "ReviewItem",
-    "ReviewPolicy",
     "ReviewSeverity",
-    "ReviewerContext",
     "TaskRequestSpec",
-    "TaskVisibleResult",
-    "TaskVisibleState",
-    "TaskStateSnapshot",
     "TraceItem",
 ]

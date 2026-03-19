@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from emoticorebot.io.normalizer import InputNormalizer
+from emoticorebot.input.normalizer import InputNormalizer
 from emoticorebot.protocol.priorities import EventPriority
 from emoticorebot.protocol.task_models import ContentBlock
 from emoticorebot.protocol.topics import EventType, Topic
@@ -28,8 +28,10 @@ def test_input_normalizer_emits_turn_received_event() -> None:
     assert event.payload.channel_kind == "chat"
     assert event.payload.input_kind == "text"
     assert event.payload.user_text == "你好"
-    assert event.payload.input_slots.user == "你好"
+    assert event.payload.input_slots.user == ""
     assert event.payload.input_slots.task == ""
+    assert event.payload.metadata["current_delivery_mode"] == "inline"
+    assert event.payload.metadata["available_delivery_modes"] == ["inline", "push"]
 
 
 def test_input_normalizer_preserves_barge_in_flag() -> None:
@@ -141,6 +143,8 @@ def test_input_normalizer_emits_stream_events() -> None:
     assert started.payload.metadata["channel_kind"] == "voice"
     assert started.payload.metadata["input_kind"] == "voice"
     assert started.payload.metadata["barge_in"] is True
+    assert started.payload.metadata["current_delivery_mode"] == "stream"
+    assert started.payload.metadata["available_delivery_modes"] == ["stream", "inline", "push"]
 
     assert chunk.event_type == EventType.INPUT_STREAM_CHUNK
     assert chunk.topic == Topic.INPUT_EVENT

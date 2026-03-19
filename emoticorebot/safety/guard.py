@@ -1,4 +1,4 @@
-"""Synchronous reply/task output safety filtering for the front/task pipeline."""
+"""Synchronous reply/task output safety filtering for the left/task pipeline."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from emoticorebot.protocol.envelope import BusEnvelope
-from emoticorebot.protocol.events import ReplyBlockedPayload, ReplyReadyPayload, TaskEndPayload
+from emoticorebot.protocol.events import OutputReadyPayloadBase, ReplyBlockedPayload
 from emoticorebot.protocol.task_models import ContentBlock, ReplyDraft
 from emoticorebot.protocol.topics import EventType
 
@@ -15,7 +15,7 @@ from emoticorebot.protocol.topics import EventType
 @dataclass(slots=True)
 class ReplyGuardResult:
     decision: str
-    event: BusEnvelope[ReplyReadyPayload] | None = None
+    event: BusEnvelope[OutputReadyPayloadBase] | None = None
     blocked: ReplyBlockedPayload | None = None
 
 
@@ -40,13 +40,13 @@ class SafetyGuard:
         re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     ]
 
-    def guard_reply_event(self, event: BusEnvelope[ReplyReadyPayload]) -> ReplyGuardResult:
+    def guard_reply_event(self, event: BusEnvelope[OutputReadyPayloadBase]) -> ReplyGuardResult:
         if str(event.event_type) not in self._READY_EVENT_TYPES:
             return ReplyGuardResult(decision="allow", event=event)
 
-        reply = event.payload.reply
+        reply = event.payload.content
         text = self._reply_surface_text(reply)
-        if event.payload.reply.safe_fallback:
+        if event.payload.content.safe_fallback:
             if self._contains_secret(text):
                 return ReplyGuardResult(
                     decision="block",
@@ -63,7 +63,7 @@ class SafetyGuard:
             return ReplyGuardResult(
                 decision="block",
                 blocked=ReplyBlockedPayload(
-                    reply=event.payload.reply,
+                    reply=event.payload.content,
                     block_reason="sensitive_material",
                     policy_name="secret_filter",
                     redaction_hint="请移除密钥、密码或私钥后再试。",
@@ -74,23 +74,10 @@ class SafetyGuard:
             reply = self._redact_reply(reply)
             return ReplyGuardResult(
                 decision="redact",
-                event=event.model_copy(update={"payload": event.payload.model_copy(update={"reply": reply})}),
+                event=event.model_copy(update={"payload": event.payload.model_copy(update={"content": reply})}),
             )
 
         return ReplyGuardResult(decision="allow", event=event)
-
-    def guard_task_event(self, event: BusEnvelope[TaskEndPayload]) -> BusEnvelope[TaskEndPayload]:
-        if event.event_type != EventType.TASK_END:
-            return event
-
-        payload = event.payload
-        text = self._task_surface_text(payload)
-
-        if not self._contains_secret(text):
-            return event
-
-        updated_payload = self._redact_task_payload(payload)
-        return event.model_copy(update={"payload": updated_payload})
 
     def _matches_block(self, text: str) -> bool:
         return any(pattern.search(text) for pattern in self._BLOCK_PATTERNS)
@@ -106,22 +93,6 @@ class SafetyGuard:
             else:
                 redacted = pattern.sub("[REDACTED]", redacted)
         return redacted
-
-    def _task_surface_text(self, payload: ProtocolModel) -> str:
-        parts: list[str] = []
-        for field in ("output", "error"):
-            value = getattr(payload, field, None)
-            if isinstance(value, str) and value.strip():
-                parts.append(value.strip())
-        return "\n".join(part for part in parts if part)
-
-    def _redact_task_payload(self, payload: ProtocolModel) -> ProtocolModel:
-        updates: dict[str, Any] = {}
-        for field in ("output", "error"):
-            value = getattr(payload, field, None)
-            if isinstance(value, str) and value:
-                updates[field] = self._redact_text(value)
-        return payload.model_copy(update=updates)
 
     def _reply_surface_text(self, reply: ReplyDraft) -> str:
         parts: list[str] = []

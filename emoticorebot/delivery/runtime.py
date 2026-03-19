@@ -7,7 +7,7 @@ from typing import Callable
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.delivery.service import DeliveryService
 from emoticorebot.protocol.envelope import BusEnvelope
-from emoticorebot.protocol.events import ReplyReadyPayload
+from emoticorebot.protocol.events import OutputReadyPayloadBase
 from emoticorebot.runtime.transport_bus import TransportBus
 
 
@@ -19,7 +19,7 @@ class DeliveryRuntime:
         *,
         bus: PriorityPubSubBus,
         transport: TransportBus | None = None,
-        should_deliver: Callable[[BusEnvelope[ReplyReadyPayload]], bool] | None = None,
+        should_deliver: Callable[[BusEnvelope[OutputReadyPayloadBase]], bool] | None = None,
     ) -> None:
         self._service = DeliveryService(bus=bus, transport=transport, should_deliver=should_deliver)
 

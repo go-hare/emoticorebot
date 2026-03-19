@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from emoticorebot.right.skills import BUILTIN_SKILLS_DIR
+from emoticorebot.right_brain.skills import BUILTIN_SKILLS_DIR
 
 from .store import MemoryStore
 
@@ -306,10 +306,10 @@ class SkillMaterializer:
                 "",
                 "## 执行流程",
                 "",
-                "1. 先读取 `brain` 传入的 `goal`、`request`、`constraints` 与 `success_criteria`。",
-                "2. 优先复用主脑传入的执行经验、工具经验和其他 `skill_hint`，不要自己检索长期 `memory`。",
-                "3. 尽量在一次执行内收敛，只有在真的被阻塞时才返回 `missing` 或 `pending_review`。",
-                "4. 最终按 task 协议返回结构化结果，交由 `brain` 做对外表达。",
+                "1. 先读取 `left_brain` 传入的 `goal`、`request`、`constraints` 与 `success_criteria`。",
+                "2. 优先复用左脑传入的执行经验、工具经验和其他 `skill_hint`，不要自己检索长期 `memory`。",
+                "3. 尽量在一次执行内收敛；如果前置条件不满足，就直接返回 `missing` 或明确失败原因。",
+                "4. 最终按 task 协议返回结构化结果，交由 `left_brain` 做对外表达。",
                 "",
                 "## 边界",
                 "",
@@ -330,3 +330,4 @@ class SkillMaterializer:
 
 
 __all__ = ["SkillMaterializationResult", "SkillMaterializer"]
+

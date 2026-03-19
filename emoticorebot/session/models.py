@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from emoticorebot.protocol.task_models import MessageRef
 
-TaskViewState = Literal["running", "waiting", "done"]
+TaskViewState = Literal["running", "done"]
 TaskViewResult = Literal["none", "success", "failed", "cancelled"]
 
 
@@ -29,9 +29,6 @@ class SessionTaskView:
     state: TaskViewState = "running"
     result: TaskViewResult = "none"
     summary: str = ""
-    latest_ask: str = ""
-    latest_ask_field: str = ""
-    latest_ask_at: str = ""
     updated_at: str = ""
     trace: list[SessionTraceRecord] = field(default_factory=list)
 
@@ -42,7 +39,7 @@ class SessionContext:
     channel_kind: str = "chat"
     session_summary: str = ""
     last_turn_id: str | None = None
-    last_front_instance_id: str | None = None
+    last_left_brain_instance_id: str | None = None
     active_input_stream_id: str | None = None
     active_input_stream_message: MessageRef | None = None
     active_input_stream_metadata: dict[str, Any] = field(default_factory=dict)
@@ -56,18 +53,15 @@ class SessionContext:
     tasks: dict[str, SessionTaskView] = field(default_factory=dict)
     trace_cursor: dict[str, str] = field(default_factory=dict)
     active_task_ids: list[str] = field(default_factory=list)
-    waiting_task_ids: list[str] = field(default_factory=list)
     done_task_ids: list[str] = field(default_factory=list)
     archived: bool = False
 
     def rebuild_indexes(self) -> None:
         ordered = sorted(self.tasks.values(), key=lambda item: (item.updated_at, item.task_id))
         self.active_task_ids = [item.task_id for item in ordered if item.state == "running"]
-        self.waiting_task_ids = [item.task_id for item in ordered if item.state == "waiting"]
         self.done_task_ids = [item.task_id for item in ordered if item.state == "done"]
         self.archived = (
             not self.active_task_ids
-            and not self.waiting_task_ids
             and not self.active_reply_stream_id
             and not self.active_input_stream_id
         )

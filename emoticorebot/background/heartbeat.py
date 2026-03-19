@@ -74,10 +74,10 @@ class HeartbeatService:
         return None
 
     async def _decide(self, content: str) -> tuple[str, str]:
-        """Phase 1：使用 worker 模型工具调用判断 skip/run。"""
+        """Phase 1：使用 right_brain 模型工具调用判断 skip/run。"""
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        resp = await self.runtime.worker_llm.ainvoke(
+        resp = await self.runtime.right_brain_llm.ainvoke(
             [
                 SystemMessage(
                     content="你是一个心跳检查代理。请调用 heartbeat 工具报告你的判断结果。"

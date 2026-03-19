@@ -8,9 +8,10 @@ from pathlib import Path
 from emoticorebot.cli import commands
 from emoticorebot.cli.commands import _is_one_shot_task_settled, _pick_one_shot_task_id
 from emoticorebot.config.schema import Config
+from emoticorebot.protocol.events import DeliveryTargetPayload
 from emoticorebot.protocol.task_models import TaskRequestSpec
-from emoticorebot.right.state_machine import RightBrainState
-from emoticorebot.right.store import RightBrainRecord, RightBrainStore
+from emoticorebot.right_brain.state import RightBrainState
+from emoticorebot.right_brain.store import RightBrainRecord, RightBrainStore
 from emoticorebot.runtime.transport_bus import OutboundMessage
 
 
@@ -22,6 +23,7 @@ def _task(task_id: str, *, state: RightBrainState, updated_at: str = "2026-03-16
         job_id=f"job_{task_id}",
         request=TaskRequestSpec(request="test"),
         title=task_id,
+        delivery_target=DeliveryTargetPayload(delivery_mode="push", channel="cli", chat_id="direct"),
         state=state,
         updated_at=updated_at,
         state_version=state_version,
@@ -68,8 +70,8 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
         workspace_path=tmp_path,
         agents=SimpleNamespace(
             defaults=SimpleNamespace(
-                worker_mode=SimpleNamespace(memory_window=0),
-                brain_mode=SimpleNamespace(memory_window=0),
+                right_brain_mode=SimpleNamespace(memory_window=0),
+                left_brain_mode=SimpleNamespace(memory_window=0),
             )
         ),
         providers=None,
@@ -186,7 +188,7 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
     assert printed_responses == ["任务已完成。"]
 
 
-def test_status_prints_brain_and_worker_models(monkeypatch, tmp_path) -> None:
+def test_status_prints_left_brain_and_right_brain_models(monkeypatch, tmp_path) -> None:
     printed: list[str] = []
     config_path = Path(tmp_path) / "config.json"
     config_path.write_text("{}", encoding="utf-8")
@@ -197,5 +199,5 @@ def test_status_prints_brain_and_worker_models(monkeypatch, tmp_path) -> None:
 
     commands.status()
 
-    assert any("Brain Model: anthropic/claude-opus-4-5" in line for line in printed)
-    assert any("Worker Model: anthropic/claude-opus-4-5" in line for line in printed)
+    assert any("Left Brain Model: anthropic/claude-opus-4-5" in line for line in printed)
+    assert any("Right Brain Model: anthropic/claude-opus-4-5" in line for line in printed)

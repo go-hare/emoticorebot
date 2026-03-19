@@ -5,10 +5,47 @@ import asyncio
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.delivery.service import DeliveryService
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import DeliveryFailedPayload, RepliedPayload, ReplyReadyPayload
+from emoticorebot.protocol.events import (
+    DeliveryFailedPayload,
+    DeliveryTargetPayload,
+    OutputInlineReadyPayload,
+    OutputStreamDeltaPayload,
+    OutputStreamOpenPayload,
+    RepliedPayload,
+)
 from emoticorebot.protocol.task_models import ContentBlock, MessageRef, ReplyDraft
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import TransportBus
+
+
+def _inline_payload(*, reply: ReplyDraft, message_id: str = "msg_1") -> OutputInlineReadyPayload:
+    return OutputInlineReadyPayload(
+        output_id=f"out_{reply.reply_id}",
+        delivery_target=DeliveryTargetPayload(delivery_mode="inline", channel="cli", chat_id="direct"),
+        content=reply,
+        origin_message=MessageRef(channel="cli", chat_id="direct", message_id=message_id),
+    )
+
+
+def _stream_payload(
+    *,
+    event_type: str,
+    reply: ReplyDraft,
+    stream_state: str,
+    stream_index: int,
+    message_id: str = "msg_1",
+) -> OutputStreamOpenPayload | OutputStreamDeltaPayload:
+    common = {
+        "output_id": f"out_{reply.reply_id}",
+        "delivery_target": DeliveryTargetPayload(delivery_mode="stream", channel="cli", chat_id="direct"),
+        "content": reply,
+        "origin_message": MessageRef(channel="cli", chat_id="direct", message_id=message_id),
+        "stream_id": "stream_turn_1",
+        "stream_index": stream_index,
+    }
+    if event_type == EventType.OUTPUT_STREAM_OPEN:
+        return OutputStreamOpenPayload(stream_state=stream_state, **common)
+    return OutputStreamDeltaPayload(stream_state=stream_state, **common)
 
 
 async def _exercise_delivery_success() -> None:
@@ -33,10 +70,7 @@ async def _exercise_delivery_success() -> None:
             turn_id="turn_1",
             task_id="task_1",
             correlation_id="task_1",
-            payload=ReplyReadyPayload(
-                reply=ReplyDraft(reply_id="reply_1", kind="answer", plain_text="done"),
-                origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
-            ),
+            payload=_inline_payload(reply=ReplyDraft(reply_id="reply_1", kind="answer", plain_text="done")),
         )
     )
     await bus.drain()
@@ -82,10 +116,7 @@ async def _exercise_delivery_without_transport() -> None:
             turn_id="turn_1",
             task_id="task_1",
             correlation_id="task_1",
-            payload=ReplyReadyPayload(
-                reply=ReplyDraft(reply_id="reply_1", kind="answer", plain_text="done"),
-                origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
-            ),
+            payload=_inline_payload(reply=ReplyDraft(reply_id="reply_1", kind="answer", plain_text="done")),
         )
     )
     await bus.drain()
@@ -119,10 +150,7 @@ async def _exercise_delivery_drops_stale_reply() -> None:
             target="broadcast",
             session_id="sess_1",
             turn_id="turn_stale",
-            payload=ReplyReadyPayload(
-                reply=ReplyDraft(reply_id="reply_stale", kind="answer", plain_text="old"),
-                origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
-            ),
+            payload=_inline_payload(reply=ReplyDraft(reply_id="reply_stale", kind="answer", plain_text="old")),
         )
     )
     await bus.drain()
@@ -158,14 +186,13 @@ async def _exercise_delivery_suppressed_reply_emits_replied_without_transport() 
             turn_id="turn_1",
             task_id="task_1",
             correlation_id="task_1",
-            payload=ReplyReadyPayload(
+            payload=_inline_payload(
                 reply=ReplyDraft(
                     reply_id="reply_suppressed",
                     kind="answer",
                     plain_text="done",
                     metadata={"suppress_delivery": True},
                 ),
-                origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
             ),
         )
     )
@@ -202,15 +229,13 @@ async def _exercise_delivery_stream_delta_skips_replied_event() -> None:
             target="broadcast",
             session_id="sess_1",
             turn_id="turn_1",
-            payload=ReplyReadyPayload(
+            payload=_stream_payload(
+                event_type=EventType.OUTPUT_STREAM_OPEN,
                 reply=ReplyDraft(
                     reply_id="reply_stream_1",
                     kind="answer",
                     plain_text="你",
                 ),
-                origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
-                delivery_mode="stream",
-                stream_id="stream_turn_1",
                 stream_state="open",
                 stream_index=1,
             ),
@@ -244,15 +269,13 @@ async def _exercise_delivery_stream_stale_reply_emits_superseded() -> None:
             target="broadcast",
             session_id="sess_1",
             turn_id="turn_1",
-            payload=ReplyReadyPayload(
+            payload=_stream_payload(
+                event_type=EventType.OUTPUT_STREAM_DELTA,
                 reply=ReplyDraft(
                     reply_id="reply_stream_stale",
                     kind="answer",
                     plain_text="旧内容",
                 ),
-                origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_1"),
-                delivery_mode="stream",
-                stream_id="stream_turn_1",
                 stream_state="delta",
                 stream_index=2,
             ),
@@ -283,7 +306,7 @@ async def _exercise_delivery_preserves_multimodal_blocks() -> None:
             target="broadcast",
             session_id="sess_media",
             turn_id="turn_media",
-            payload=ReplyReadyPayload(
+            payload=_inline_payload(
                 reply=ReplyDraft(
                     reply_id="reply_media",
                     kind="answer",
@@ -293,7 +316,7 @@ async def _exercise_delivery_preserves_multimodal_blocks() -> None:
                         ContentBlock(type="link", url="https://example.com/reference"),
                     ],
                 ),
-                origin_message=MessageRef(channel="cli", chat_id="direct", message_id="msg_media"),
+                message_id="msg_media",
             ),
         )
     )

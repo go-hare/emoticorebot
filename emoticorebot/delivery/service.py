@@ -7,7 +7,7 @@ from typing import Callable
 
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
-from emoticorebot.protocol.events import DeliveryFailedPayload, RepliedPayload, ReplyReadyPayload
+from emoticorebot.protocol.events import DeliveryFailedPayload, OutputReadyPayloadBase, OutputStreamPayloadBase, RepliedPayload
 from emoticorebot.protocol.task_models import MessageRef, ProtocolModel
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import OutboundMessage, TransportBus
@@ -21,7 +21,7 @@ class DeliveryService:
         *,
         bus: PriorityPubSubBus,
         transport: TransportBus | None = None,
-        should_deliver: Callable[[BusEnvelope[ReplyReadyPayload]], bool] | None = None,
+        should_deliver: Callable[[BusEnvelope[OutputReadyPayloadBase]], bool] | None = None,
     ) -> None:
         self._bus = bus
         self._transport = transport
@@ -34,20 +34,16 @@ class DeliveryService:
         self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_STREAM_DELTA, handler=self._deliver)
         self._bus.subscribe(consumer="delivery", event_type=EventType.OUTPUT_STREAM_CLOSE, handler=self._deliver)
 
-    async def _deliver(self, event: BusEnvelope[ReplyReadyPayload]) -> None:
+    async def _deliver(self, event: BusEnvelope[OutputReadyPayloadBase]) -> None:
         payload = event.payload
-        reply_metadata = dict(payload.reply.metadata or {})
+        reply_metadata = dict(payload.content.metadata or {})
         stream_state = self._stream_state(payload)
         origin = payload.origin_message or MessageRef()
-        channel = payload.channel_override or origin.channel
-        chat_id = payload.chat_id_override or origin.chat_id
+        channel = payload.delivery_target.channel or origin.channel
+        chat_id = payload.delivery_target.chat_id or origin.chat_id
         if self._should_deliver is not None and not self._should_deliver(event):
             if self._is_stream(payload):
-                await self._publish_superseded(
-                    event,
-                    channel=channel,
-                    chat_id=chat_id,
-                )
+                await self._publish_superseded(event, channel=channel, chat_id=chat_id)
                 return
             await self._publish_failed(event, reason="stale_reply_dropped")
             return
@@ -59,10 +55,10 @@ class DeliveryService:
                 event,
                 channel=channel,
                 chat_id=chat_id,
-                delivery_message_id=self._suppressed_message_id(payload.reply.reply_id),
+                delivery_message_id=self._suppressed_message_id(payload.content.reply_id),
                 delivery_mode="suppressed",
                 delivered_at=delivered_at,
-                reply_to_message_id=payload.reply.reply_to_message_id or origin.message_id,
+                reply_to_message_id=payload.content.reply_to_message_id or origin.message_id,
             )
             return
         if not channel or not chat_id:
@@ -72,25 +68,24 @@ class DeliveryService:
             await self._publish_failed(event, reason="delivery_transport_unavailable")
             return
 
-        delivery_message_id = self._delivery_message_id(payload.reply.reply_id)
-        content = self._render_text(payload)
+        delivery_message_id = self._delivery_message_id(payload.content.reply_id)
         outbound = OutboundMessage(
             channel=channel,
             chat_id=chat_id,
-            content=content,
+            content=self._render_text(payload),
             message_id=delivery_message_id,
-            reply_to=payload.reply.reply_to_message_id or origin.message_id,
+            reply_to=payload.content.reply_to_message_id or origin.message_id,
             media=self._render_media(payload),
             content_blocks=self._render_blocks(payload),
             metadata={
-                "reply_id": payload.reply.reply_id,
-                "reply_kind": payload.reply.kind,
+                "reply_id": payload.content.reply_id,
+                "reply_kind": payload.content.kind,
                 "session_id": event.session_id,
                 "task_id": event.task_id,
-                "_stream": bool(str(payload.stream_id or "").strip()) or stream_state in {"open", "delta", "close"},
-                "_stream_id": str(payload.stream_id or "").strip(),
+                "_stream": bool(str(getattr(payload, "stream_id", "") or "").strip()) or stream_state in {"open", "delta", "close"},
+                "_stream_id": str(getattr(payload, "stream_id", "") or "").strip(),
                 "_stream_state": stream_state,
-                "_stream_index": payload.stream_index,
+                "_stream_index": getattr(payload, "stream_index", None),
             },
         )
         try:
@@ -108,14 +103,14 @@ class DeliveryService:
             channel=channel,
             chat_id=chat_id,
             delivery_message_id=delivery_message_id,
-            delivery_mode=payload.delivery_mode,
+            delivery_mode=payload.delivery_target.delivery_mode,
             delivered_at=delivered_at,
-            reply_to_message_id=payload.reply.reply_to_message_id or origin.message_id,
+            reply_to_message_id=payload.content.reply_to_message_id or origin.message_id,
         )
 
     async def _publish_replied(
         self,
-        event: BusEnvelope[ReplyReadyPayload],
+        event: BusEnvelope[OutputReadyPayloadBase],
         *,
         channel: str | None,
         chat_id: str | None,
@@ -135,7 +130,7 @@ class DeliveryService:
                 correlation_id=event.correlation_id,
                 causation_id=event.event_id,
                 payload=RepliedPayload(
-                    reply_id=event.payload.reply.reply_id,
+                    reply_id=event.payload.content.reply_id,
                     delivery_message=MessageRef(
                         channel=channel,
                         chat_id=chat_id,
@@ -156,8 +151,8 @@ class DeliveryService:
         reason: str,
     ) -> None:
         payload = event.payload
-        reply = getattr(payload, "reply", None)
-        reply_id = getattr(reply, "reply_id", "")
+        content = getattr(payload, "content", None)
+        reply_id = getattr(content, "reply_id", "")
         await self._bus.publish(
             build_envelope(
                 event_type=EventType.OUTPUT_DELIVERY_FAILED,
@@ -173,16 +168,16 @@ class DeliveryService:
         )
 
     @staticmethod
-    def _render_text(payload: ReplyReadyPayload) -> str:
-        if payload.reply.plain_text:
-            return payload.reply.plain_text
-        parts = [block.text for block in payload.reply.content_blocks if block.type == "text" and block.text]
+    def _render_text(payload: OutputReadyPayloadBase) -> str:
+        if payload.content.plain_text:
+            return payload.content.plain_text
+        parts = [block.text for block in payload.content.content_blocks if block.type == "text" and block.text]
         return "\n".join(parts).strip()
 
     @staticmethod
-    def _render_media(payload: ReplyReadyPayload) -> list[str]:
+    def _render_media(payload: OutputReadyPayloadBase) -> list[str]:
         media: list[str] = []
-        for block in payload.reply.content_blocks:
+        for block in payload.content.content_blocks:
             if block.type == "text":
                 continue
             path = str(block.path or "").strip()
@@ -191,8 +186,8 @@ class DeliveryService:
         return media
 
     @staticmethod
-    def _render_blocks(payload: ReplyReadyPayload) -> list[dict[str, object]]:
-        return [block.model_dump(exclude_none=True) for block in payload.reply.content_blocks]
+    def _render_blocks(payload: OutputReadyPayloadBase) -> list[dict[str, object]]:
+        return [block.model_dump(exclude_none=True) for block in payload.content.content_blocks]
 
     @staticmethod
     def _delivery_message_id(reply_id: str) -> str:
@@ -207,27 +202,29 @@ class DeliveryService:
         return bool(reply_metadata.get("suppress_delivery"))
 
     @staticmethod
-    def _is_stream(payload: ReplyReadyPayload) -> bool:
-        if payload.stream_state is not None:
+    def _is_stream(payload: OutputReadyPayloadBase) -> bool:
+        if isinstance(payload, OutputStreamPayloadBase):
             return True
-        if payload.delivery_mode == "stream":
+        if payload.delivery_target.delivery_mode == "stream":
             return True
-        return bool(str(payload.stream_id or "").strip())
+        return bool(str(getattr(payload, "stream_id", "") or "").strip())
 
     @staticmethod
-    def _stream_state(payload: ReplyReadyPayload) -> str:
-        return str(payload.stream_state or "").strip()
+    def _stream_state(payload: OutputReadyPayloadBase) -> str:
+        if isinstance(payload, OutputStreamPayloadBase):
+            return str(payload.stream_state or "").strip()
+        return ""
 
     async def _publish_superseded(
         self,
-        event: BusEnvelope[ReplyReadyPayload],
+        event: BusEnvelope[OutputReadyPayloadBase],
         *,
         channel: str | None,
         chat_id: str | None,
     ) -> None:
         if self._transport is None or not channel or not chat_id:
             return
-        stream_id = str(event.payload.stream_id or "").strip()
+        stream_id = str(getattr(event.payload, "stream_id", "") or "").strip()
         if not stream_id:
             return
         await self._transport.publish_outbound(
@@ -235,17 +232,17 @@ class DeliveryService:
                 channel=channel,
                 chat_id=chat_id,
                 content="",
-                message_id=self._delivery_message_id(event.payload.reply.reply_id),
-                reply_to=event.payload.reply.reply_to_message_id or (event.payload.origin_message.message_id if event.payload.origin_message else None),
+                message_id=self._delivery_message_id(event.payload.content.reply_id),
+                reply_to=event.payload.content.reply_to_message_id or (event.payload.origin_message.message_id if event.payload.origin_message else None),
                 metadata={
-                    "reply_id": event.payload.reply.reply_id,
-                    "reply_kind": event.payload.reply.kind,
+                    "reply_id": event.payload.content.reply_id,
+                    "reply_kind": event.payload.content.kind,
                     "session_id": event.session_id,
                     "task_id": event.task_id,
                     "_stream": True,
                     "_stream_id": stream_id,
                     "_stream_state": "superseded",
-                    "_stream_index": event.payload.stream_index,
+                    "_stream_index": getattr(event.payload, "stream_index", None),
                 },
             )
         )
