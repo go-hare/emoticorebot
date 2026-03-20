@@ -1,4 +1,4 @@
-"""Minimal left-brain decision packet helpers."""
+"""Minimal main-brain decision packet helpers."""
 
 from __future__ import annotations
 
@@ -11,16 +11,6 @@ TaskAction = Literal["", "none", "create_task", "cancel_task"]
 
 
 class DecisionPacket(TypedDict, total=False):
-    """Structured left-brain output used by the runtime.
-
-    The left-brain model only decides:
-    - what to say to the user (`final_message`)
-    - whether the runtime should start or cancel a task (`task_action`)
-
-    Runtime-owned facts such as task ids, execution mode, and delivery targets
-    are derived outside the model.
-    """
-
     task_action: TaskAction
     task_mode: TaskMode
     task_reason: str
@@ -29,9 +19,8 @@ class DecisionPacket(TypedDict, total=False):
 
 
 def normalize_decision_packet(payload: Any, *, current_context: dict[str, Any]) -> DecisionPacket:
-    """Validate a minimal decision packet for the left-brain runtime."""
     if not isinstance(payload, dict):
-        raise RuntimeError("Left-brain model did not return a structured DecisionPacket")
+        raise RuntimeError("Main-brain model did not return a structured DecisionPacket")
 
     packet: DecisionPacket = {
         "task_action": str(payload.get("task_action", "none") or "none").strip(),
@@ -115,14 +104,14 @@ def _parse_tagged_output(text: str) -> dict[str, Any] | None:
         sections.append((name, body))
 
     if [name for name, _body in sections] != ["user", "task"]:
-        raise RuntimeError("Left-brain output must place ####user#### before ####task####")
+        raise RuntimeError("Main-brain output must place ####user#### before ####task####")
 
     user_text = str(sections[0][1] or "").strip()
     task_text = str(sections[1][1] or "").strip()
     if not user_text:
-        raise RuntimeError("Left-brain tagged output requires a non-empty ####user#### section")
+        raise RuntimeError("Main-brain tagged output requires a non-empty ####user#### section")
     if not task_text:
-        raise RuntimeError("Left-brain tagged output requires a non-empty ####task#### section")
+        raise RuntimeError("Main-brain tagged output requires a non-empty ####task#### section")
 
     task_fields: dict[str, str] = {}
     for raw in task_text.splitlines():
@@ -134,20 +123,16 @@ def _parse_tagged_output(text: str) -> dict[str, Any] | None:
         elif ":" in line:
             key, value = line.split(":", 1)
         else:
-            raise RuntimeError(f"Invalid left-brain task line: {line!r}")
+            raise RuntimeError(f"Invalid main-brain task line: {line!r}")
         key = key.strip().lower()
         value = value.strip()
         if key not in _SUPPORTED_TASK_FIELDS:
-            raise RuntimeError(f"Unsupported left-brain task field: {key!r}")
+            raise RuntimeError(f"Unsupported main-brain task field: {key!r}")
         task_fields[key] = value
 
-    action = str(task_fields.get("action", "") or "none").strip()
-    task_mode = str(task_fields.get("task_mode", "") or "").strip()
-    if not task_mode:
-        raise RuntimeError("Left-brain tagged output requires task_mode")
     payload: dict[str, Any] = {
-        "task_action": action,
-        "task_mode": task_mode,
+        "task_action": str(task_fields.get("action", "") or "none").strip(),
+        "task_mode": str(task_fields.get("task_mode", "") or "").strip(),
         "final_message": user_text,
     }
     reason = str(task_fields.get("reason", "") or "").strip()
@@ -160,32 +145,24 @@ def _parse_tagged_output(text: str) -> dict[str, Any] | None:
 
 
 def parse_decision_packet(result: Any) -> dict[str, Any]:
-    """Extract a DecisionPacket from tagged or structured left-brain output."""
     if _looks_like_decision_packet(result):
         return result
     if isinstance(result, dict):
         structured = result.get("structured_response")
         if _looks_like_decision_packet(structured):
             return structured
-        messages = result.get("messages", [])
-        for msg in reversed(messages):
+        for msg in list(result.get("messages", []) or []):
             if _looks_like_decision_packet(msg):
                 return msg
 
     text = _extract_response_text(result)
     if not text:
-        raise RuntimeError("Left-brain model returned empty content; cannot parse DecisionPacket")
+        raise RuntimeError("Main-brain model returned empty content; cannot parse DecisionPacket")
 
     tagged_payload = _parse_tagged_output(text)
-    if tagged_payload is not None:
-        return tagged_payload
+    if tagged_payload is None:
+        raise RuntimeError("Main-brain output must contain non-empty ####user#### and ####task#### blocks")
+    return tagged_payload
 
-    raise RuntimeError("Left-brain output must contain non-empty ####user#### and ####task#### blocks")
 
-
-__all__ = [
-    "DecisionPacket",
-    "TaskAction",
-    "normalize_decision_packet",
-    "parse_decision_packet",
-]
+__all__ = ["DecisionPacket", "TaskAction", "normalize_decision_packet", "parse_decision_packet"]

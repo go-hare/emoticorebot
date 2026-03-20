@@ -5,12 +5,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from emoticorebot.execution.hooks import RunHooks
 from emoticorebot.runtime.kernel import RuntimeKernel
 from emoticorebot.runtime.transport_bus import TransportBus
-from emoticorebot.right_brain.hooks import RunHooks
 
 
-class _FakeLeftBrainLLM:
+class _FakeMainBrainLLM:
     def __init__(self, response: str) -> None:
         self.response = response
         self.prompts: list[Any] = []
@@ -21,14 +21,18 @@ class _FakeLeftBrainLLM:
 
 
 class _FakeContextBuilder:
-    def build_left_brain_decision_system_prompt(self, *, query: str = "") -> str:
-        return f"decision system for: {query}"
+    def __init__(self) -> None:
+        self.last_query = ""
+        self.last_world_state = None
 
-    def build_left_brain_system_prompt(self, *, query: str = "") -> str:
-        return f"full system for: {query}"
+    def build_main_brain_system_prompt(self, *, query: str = "", world_state: Any | None = None) -> str:
+        self.last_query = query
+        self.last_world_state = world_state
+        phase = str(getattr(world_state, "conversation_phase", "") or "")
+        return f"main brain system for: {query} | phase={phase}"
 
 
-class _RightExecutor:
+class _ExecutionExecutor:
     def __init__(self) -> None:
         self.run_hooks = RunHooks()
         self.last_task_spec: dict[str, Any] | None = None
@@ -42,7 +46,7 @@ class _RightExecutor:
                 "已完成项目扫描。",
                 {
                     "event": "task.tool",
-                    "producer": "right_brain",
+                    "producer": "execution",
                     "phase": "tool",
                     "tool_name": "read_file",
                     "payload": {"progress": 0.5, "next_step": "整理输出"},
@@ -57,7 +61,7 @@ class _RightExecutor:
         }
 
 
-def _left_brain_packet(
+def _main_brain_packet(
     *,
     task_action: str = "none",
     task_mode: str = "skip",
@@ -91,8 +95,9 @@ async def _wait_for(predicate, *, timeout: float = 1.0) -> None:
 
 async def _exercise_kernel_direct_reply() -> None:
     transport = TransportBus()
-    left_brain_llm = _FakeLeftBrainLLM(
-        _left_brain_packet(
+    context_builder = _FakeContextBuilder()
+    main_brain_llm = _FakeMainBrainLLM(
+        _main_brain_packet(
             task_action="none",
             task_mode="skip",
             final_message="你好，我在。",
@@ -102,8 +107,8 @@ async def _exercise_kernel_direct_reply() -> None:
         kernel = RuntimeKernel(
             workspace=Path(tmp_dir),
             transport=transport,
-            left_brain_llm=left_brain_llm,
-            context_builder=_FakeContextBuilder(),
+            main_brain_llm=main_brain_llm,
+            context_builder=context_builder,
         )
         try:
             reply = await kernel.handle_user_message(
@@ -119,6 +124,12 @@ async def _exercise_kernel_direct_reply() -> None:
             assert transport.outbound_size == 1
             outbound = await transport.consume_outbound()
             assert outbound.content == "你好，我在。"
+            assert context_builder.last_query == "你好"
+            assert context_builder.last_world_state is not None
+            assert context_builder.last_world_state.session_id == "cli:direct"
+            assert context_builder.last_world_state.conversation_phase == "chat"
+            assert context_builder.last_world_state.active_topics == ["你好"]
+            assert context_builder.last_world_state.reply_strategy.delivery_mode == "inline"
         finally:
             await kernel.stop()
 
@@ -127,42 +138,42 @@ def test_runtime_kernel_handles_direct_reply() -> None:
     asyncio.run(_exercise_kernel_direct_reply())
 
 
-async def _exercise_kernel_async_right_brain_flow() -> None:
+async def _exercise_kernel_async_execution_flow() -> None:
     transport = TransportBus()
-    left_brain_llm = _FakeLeftBrainLLM(
-        _left_brain_packet(
+    main_brain_llm = _FakeMainBrainLLM(
+        _main_brain_packet(
             task_action="create_task",
             task_mode="async",
             final_message="已接收，开始处理。",
-            task_reason="需要右脑执行",
+            task_reason="需要 execution",
         )
     )
     with TemporaryDirectory() as tmp_dir:
         kernel = RuntimeKernel(
             workspace=Path(tmp_dir),
             transport=transport,
-            left_brain_llm=left_brain_llm,
+            main_brain_llm=main_brain_llm,
             context_builder=_FakeContextBuilder(),
         )
-        kernel.right_brain_runtime._executor = _RightExecutor()
+        kernel.execution_runtime._executor = _ExecutionExecutor()
         try:
             reply = await kernel.handle_user_message(
-                session_id="cli:right-flow",
+                session_id="cli:execution-flow",
                 channel="cli",
                 chat_id="direct",
                 sender_id="user",
-                message_id="msg_right_flow",
+                message_id="msg_execution_flow",
                 content="帮我整理一下项目结构",
             )
 
             assert "开始处理" in reply.content
 
             def _task_completed() -> bool:
-                task = kernel.latest_task_for_session("cli:right-flow", include_terminal=True)
+                task = kernel.latest_task_for_session("cli:execution-flow", include_terminal=True)
                 return task is not None and task.state.value == "done" and task.final_result_text == "产物已生成"
 
             await _wait_for(_task_completed, timeout=2.0)
-            task = kernel.latest_task_for_session("cli:right-flow", include_terminal=True)
+            task = kernel.latest_task_for_session("cli:execution-flow", include_terminal=True)
             assert task is not None
             assert task.delivery_target is not None
             assert task.delivery_target.channel == "cli"
@@ -177,43 +188,43 @@ async def _exercise_kernel_async_right_brain_flow() -> None:
             await kernel.stop()
 
 
-def test_runtime_kernel_runs_async_right_brain_flow() -> None:
-    asyncio.run(_exercise_kernel_async_right_brain_flow())
+def test_runtime_kernel_runs_async_execution_flow() -> None:
+    asyncio.run(_exercise_kernel_async_execution_flow())
 
 
-async def _exercise_kernel_sync_right_brain_flow() -> None:
+async def _exercise_kernel_sync_execution_flow() -> None:
     transport = TransportBus()
-    left_brain_llm = _FakeLeftBrainLLM(
-        _left_brain_packet(
+    main_brain_llm = _FakeMainBrainLLM(
+        _main_brain_packet(
             task_action="create_task",
             task_mode="sync",
             final_message="已接收，开始处理。",
-            task_reason="需要右脑执行",
+            task_reason="需要 execution",
         )
     )
     with TemporaryDirectory() as tmp_dir:
         kernel = RuntimeKernel(
             workspace=Path(tmp_dir),
             transport=transport,
-            left_brain_llm=left_brain_llm,
+            main_brain_llm=main_brain_llm,
             context_builder=_FakeContextBuilder(),
         )
-        kernel.right_brain_runtime._executor = _RightExecutor()
+        kernel.execution_runtime._executor = _ExecutionExecutor()
         try:
             stream_id = await kernel.open_user_stream(
-                session_id="cli:sync-right-flow",
+                session_id="cli:sync-execution-flow",
                 channel="cli",
                 chat_id="direct",
                 sender_id="user",
-                message_id="msg_sync_right_flow",
+                message_id="msg_sync_execution_flow",
             )
             reply = await kernel.commit_user_stream(
-                session_id="cli:sync-right-flow",
+                session_id="cli:sync-execution-flow",
                 stream_id=stream_id,
                 committed_text="帮我整理一下项目结构",
             )
 
-            task = kernel.latest_task_for_session("cli:sync-right-flow", include_terminal=True)
+            task = kernel.latest_task_for_session("cli:sync-execution-flow", include_terminal=True)
             assert task is not None
             assert task.delivery_target is not None
             assert task.delivery_target.delivery_mode == "stream"
@@ -222,7 +233,7 @@ async def _exercise_kernel_sync_right_brain_flow() -> None:
             assert "开始处理" in reply.content
 
             def _task_completed() -> bool:
-                latest = kernel.latest_task_for_session("cli:sync-right-flow", include_terminal=True)
+                latest = kernel.latest_task_for_session("cli:sync-execution-flow", include_terminal=True)
                 return latest is not None and latest.state.value == "done"
 
             await _wait_for(_task_completed, timeout=2.0)
@@ -236,14 +247,14 @@ async def _exercise_kernel_sync_right_brain_flow() -> None:
             await kernel.stop()
 
 
-def test_runtime_kernel_runs_sync_right_brain_flow() -> None:
-    asyncio.run(_exercise_kernel_sync_right_brain_flow())
+def test_runtime_kernel_runs_sync_execution_flow() -> None:
+    asyncio.run(_exercise_kernel_sync_execution_flow())
 
 
-async def _exercise_kernel_forwards_attachments_to_right_brain() -> None:
+async def _exercise_kernel_forwards_attachments_to_execution() -> None:
     transport = TransportBus()
-    left_brain_llm = _FakeLeftBrainLLM(
-        _left_brain_packet(
+    main_brain_llm = _FakeMainBrainLLM(
+        _main_brain_packet(
             task_action="create_task",
             task_mode="async",
             final_message="我先看看附件内容。",
@@ -254,11 +265,11 @@ async def _exercise_kernel_forwards_attachments_to_right_brain() -> None:
         kernel = RuntimeKernel(
             workspace=Path(tmp_dir),
             transport=transport,
-            left_brain_llm=left_brain_llm,
+            main_brain_llm=main_brain_llm,
             context_builder=_FakeContextBuilder(),
         )
-        executor = _RightExecutor()
-        kernel.right_brain_runtime._executor = executor
+        executor = _ExecutionExecutor()
+        kernel.execution_runtime._executor = executor
         try:
             await kernel.handle_user_message(
                 session_id="cli:attachment-flow",
@@ -284,7 +295,7 @@ async def _exercise_kernel_forwards_attachments_to_right_brain() -> None:
             await kernel.stop()
 
 
-def test_runtime_kernel_forwards_attachments_to_right_brain() -> None:
-    asyncio.run(_exercise_kernel_forwards_attachments_to_right_brain())
+def test_runtime_kernel_forwards_attachments_to_execution() -> None:
+    asyncio.run(_exercise_kernel_forwards_attachments_to_execution())
 
 

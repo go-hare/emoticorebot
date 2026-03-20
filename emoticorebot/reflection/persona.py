@@ -461,20 +461,20 @@ class PersonaManager:
         if not bool(update.get("should_apply", False)):
             return False, None
         pad_state = self.normalize_state_value_map(
-            update.get("pad_delta"),
+            update.get("pad_state"),
             allowed=("pleasure", "arousal", "dominance"),
             minimum=-1.0,
             maximum=1.0,
         )
-        drive_state = self.normalize_state_value_map(
-            update.get("drives_delta"),
+        drives_state = self.normalize_state_value_map(
+            update.get("drives_state"),
             allowed=("social", "energy"),
             minimum=0.0,
             maximum=100.0,
         )
         snapshot = self._emotion_mgr.apply_reflection_state_update(
-            pad_delta=pad_state,
-            drive_delta=drive_state,
+            pad_state=pad_state,
+            drives_state=drives_state,
         )
         return True, snapshot
 

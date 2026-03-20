@@ -1,4 +1,4 @@
-"""Agent wiring for the right-brain execution layer."""
+"""Agent wiring for the execution layer."""
 
 from __future__ import annotations
 
@@ -32,9 +32,7 @@ def backend_available() -> bool:
     return create_agent is not None
 
 
-def build_agent(
-    service: ExecutionAgentService,
-) -> Any:
+def build_agent(service: ExecutionAgentService) -> Any:
     if create_agent is None:
         raise RuntimeError("langchain create_agent is not available")
 
@@ -52,11 +50,9 @@ def build_agent(
         raise RuntimeError(f"create_agent API mismatch: {exc}") from exc
 
 
-def build_prompt(
-    service: ExecutionAgentService,
-) -> str:
+def build_prompt(service: ExecutionAgentService) -> str:
     workspace = Path(service.context.workspace).expanduser().resolve()
-    role = str(getattr(service, "assistant_role", "right_brain") or "right_brain").strip()
+    role = str(getattr(service, "assistant_role", "execution") or "execution").strip()
     return (
         f"你是 `{role}`，负责复杂问题的规划、执行与结果收口。\n"
         f"当前工作区目录是 `{workspace}`。\n\n"
@@ -81,13 +77,13 @@ def build_prompt(
         "1. 在真正开始执行前，必须先调用一次 `audit_tool`。\n"
         "2. 当你判断“任务可以开始”时，调用 `audit_tool(decision=\"accept\", ...)`。\n"
         "3. 当你判断“不应执行”时，调用 `audit_tool(decision=\"reject\", ...)`。\n"
-        "4. 当你判断“不需要执行，只需要给左脑理性答案素材”时，调用 `audit_tool(decision=\"answer_only\", ...)`。\n"
+        "4. 当你判断“不需要执行，只需要给主脑理性答案素材”时，调用 `audit_tool(decision=\"answer_only\", ...)`。\n"
         "5. 如果发现缺少继续执行所需的关键信息，不要返回中间等待态；直接调用 "
-        "`audit_tool(decision=\"reject\", reason=..., summary=...)`，把缺什么写清楚，交回左脑决定是否向用户补充信息。\n"
+        "`audit_tool(decision=\"reject\", reason=..., summary=...)`，把缺什么写清楚，交回主脑决定是否向用户补充信息。\n"
         "6. `reject / answer_only` 会直接终止本次 run，所以要把理由或答案素材写清楚。\n"
         "7. 不支持中途等待用户批准、补充或继续；当前 run 只能继续执行或直接结束。\n\n"
         "## 回传约束\n"
-        "1. 你的对话、工具调用和工具结果会被系统自动采集并回传给左脑。\n"
+        "1. 你的对话、工具调用和工具结果会被系统自动采集并回传给主脑。\n"
         "2. 不需要额外调用专门的阶段汇报工具。\n"
         "3. 正常推进执行，关键进展体现在你的实际操作和最终结构化结果里即可。\n\n"
         "## 收口原则\n"
@@ -114,9 +110,7 @@ def build_prompt(
     )
 
 
-def build_agent_tools(
-    service: ExecutionAgentService,
-) -> list[Any]:
+def build_agent_tools(service: ExecutionAgentService) -> list[Any]:
     tools: list[Any] = []
     audit_tool = build_audit_tool(service)
     if audit_tool is not None:
@@ -128,7 +122,6 @@ def build_agent_tools(
 
 
 def build_audit_tool(service: ExecutionAgentService) -> Any | None:
-    """构建右脑审核钩子，决定本次 run 是否继续执行。"""
     try:
         from langchain_core.tools import StructuredTool
         from pydantic import BaseModel, Field
@@ -138,8 +131,8 @@ def build_audit_tool(service: ExecutionAgentService) -> Any | None:
     class AuditArgs(BaseModel):
         decision: Literal["accept", "answer_only", "reject"] = Field(description="本次审核裁决。")
         reason: str = Field(default="", description="裁决理由。")
-        summary: str = Field(default="", description="给左脑看的紧凑摘要，可选。")
-        result_text: str = Field(default="", description="decision=answer_only 时返回给左脑的答案素材。")
+        summary: str = Field(default="", description="给主脑看的紧凑摘要，可选。")
+        result_text: str = Field(default="", description="decision=answer_only 时返回给主脑的答案素材。")
 
     async def audit_tool(decision: str, reason: str = "", summary: str = "", result_text: str = "") -> str:
         return await service.run_hooks.audit(
@@ -148,16 +141,16 @@ def build_audit_tool(service: ExecutionAgentService) -> Any | None:
             summary=summary,
             result_text=result_text,
             event="task.audit",
-            producer=str(getattr(service, "assistant_role", "right_brain") or "right_brain").strip(),
+            producer=str(getattr(service, "assistant_role", "execution") or "execution").strip(),
         )
 
     return StructuredTool.from_function(
         coroutine=audit_tool,
         name="audit_tool",
         description=(
-            "右脑审核钩子。必须在真正开始执行前先调用一次。"
+            "执行审核钩子。必须在真正开始执行前先调用一次。"
             "`accept` 表示任务可以开始；`reject` 表示不应执行；"
-            "`answer_only` 表示不需要执行，只返回理性答案素材给左脑。"
+            "`answer_only` 表示不需要执行，只返回理性答案素材给主脑。"
         ),
         args_schema=AuditArgs,
     )
@@ -207,7 +200,7 @@ def build_registry_tool(service: ExecutionAgentService, name: str) -> Any | None
         result = await service.tools.execute(name, kwargs)
         summary = summarize_tool_progress(name=name, result=result)
         if summary:
-            role = str(getattr(service, "assistant_role", "right_brain") or "right_brain").strip()
+            role = str(getattr(service, "assistant_role", "execution") or "execution").strip()
             await service.run_hooks.report_progress(
                 summary,
                 event="task.tool",
@@ -272,11 +265,11 @@ def summarize_tool_progress(*, name: str, result: Any) -> str:
 
 __all__ = [
     "ExecutionResultSchema",
+    "backend_available",
     "build_agent",
+    "build_agent_tools",
+    "build_audit_tool",
     "build_prompt",
     "build_registry_tool",
     "build_registry_tools",
-    "build_audit_tool",
-    "build_agent_tools",
-    "backend_available",
 ]

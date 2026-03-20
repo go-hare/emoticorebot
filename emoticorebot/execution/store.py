@@ -1,27 +1,26 @@
-"""In-memory state store for the right-brain runtime."""
+"""In-memory state store for the execution runtime."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Literal
-from typing import Any
+from typing import Any, Literal
 
 from emoticorebot.protocol.events import DeliveryTargetPayload
 from emoticorebot.protocol.task_models import MessageRef, TaskRequestSpec
 
-from .state import RightBrainState
+from .state import ExecutionState
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-RightBrainResult = Literal["none", "success", "failed", "cancelled"]
+ExecutionResult = Literal["none", "success", "failed", "cancelled"]
 
 
 @dataclass(slots=True)
-class RightBrainRecord:
+class ExecutionRecord:
     task_id: str
     session_id: str
     turn_id: str | None
@@ -30,8 +29,8 @@ class RightBrainRecord:
     title: str
     delivery_target: DeliveryTargetPayload
     origin_message: MessageRef | None = None
-    state: RightBrainState = RightBrainState.RUNNING
-    result: RightBrainResult = "none"
+    state: ExecutionState = ExecutionState.RUNNING
+    result: ExecutionResult = "none"
     state_version: int = 1
     summary: str = ""
     error: str = ""
@@ -58,13 +57,13 @@ class RightBrainRecord:
     def mark_done(
         self,
         *,
-        result: RightBrainResult,
+        result: ExecutionResult,
         summary: str | None = None,
         error: str | None = None,
         decision: str | None = None,
         result_text: str | None = None,
     ) -> None:
-        self.state = RightBrainState.DONE
+        self.state = ExecutionState.DONE
         self.result = result
         if summary is not None:
             self.summary = str(summary or "").strip()
@@ -93,51 +92,34 @@ class RightBrainRecord:
         )
 
 
-class RightBrainStore:
-    """Process-local store for right-brain records."""
-
+class ExecutionStore:
     def __init__(self) -> None:
-        self._tasks: dict[str, RightBrainRecord] = {}
+        self._tasks: dict[str, ExecutionRecord] = {}
 
-    def add(self, task: RightBrainRecord) -> RightBrainRecord:
+    def add(self, task: ExecutionRecord) -> ExecutionRecord:
         self._tasks[task.task_id] = task
         return task
 
-    def get(self, task_id: str) -> RightBrainRecord | None:
+    def get(self, task_id: str) -> ExecutionRecord | None:
         return self._tasks.get(task_id)
 
-    def require(self, task_id: str) -> RightBrainRecord:
-        task = self.get(task_id)
-        if task is None:
-            raise KeyError(f"unknown right brain task: {task_id}")
-        return task
-
-    def all(self) -> list[RightBrainRecord]:
+    def all(self) -> list[ExecutionRecord]:
         return list(self._tasks.values())
 
-    def for_session(self, session_id: str) -> list[RightBrainRecord]:
+    def for_session(self, session_id: str) -> list[ExecutionRecord]:
         wanted = str(session_id or "").strip()
-        if not wanted:
-            return []
-        return [task for task in self._tasks.values() if task.session_id == wanted]
+        return [task for task in self._tasks.values() if task.session_id == wanted] if wanted else []
 
-    def active_for_session(self, session_id: str) -> list[RightBrainRecord]:
-        return [task for task in self.for_session(session_id) if task.state is not RightBrainState.DONE]
+    def active_for_session(self, session_id: str) -> list[ExecutionRecord]:
+        return [task for task in self.for_session(session_id) if task.state is not ExecutionState.DONE]
 
-    def latest_for_session(
-        self,
-        session_id: str,
-        *,
-        include_terminal: bool = True,
-    ) -> RightBrainRecord | None:
+    def latest_for_session(self, session_id: str, *, include_terminal: bool = True) -> ExecutionRecord | None:
         tasks = self.for_session(session_id) if include_terminal else self.active_for_session(session_id)
-        if not tasks:
-            return None
-        return max(tasks, key=lambda task: (task.updated_at, task.state_version))
+        return max(tasks, key=lambda task: (task.updated_at, task.state_version)) if tasks else None
 
     def remove_session(self, session_id: str) -> None:
-        for task_id in [task.task_id for task in self.for_session(session_id)]:
-            self._tasks.pop(task_id, None)
+        for task in list(self.for_session(session_id)):
+            self._tasks.pop(task.task_id, None)
 
 
-__all__ = ["RightBrainRecord", "RightBrainStore", "utc_now"]
+__all__ = ["ExecutionRecord", "ExecutionStore", "utc_now"]

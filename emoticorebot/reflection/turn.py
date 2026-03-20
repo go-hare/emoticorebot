@@ -22,7 +22,7 @@ class TurnReflectionService:
     """Generate one compact per-turn reflection plus memory candidates."""
 
     _PROMPT = """
-你是 `left_brain` 的逐轮反思环节。
+你是 `main_brain` 的逐轮反思环节。
 
 请严格按结构化字段填写，不要补充额外说明。
 
@@ -30,24 +30,24 @@ class TurnReflectionService:
 1. 总结本轮发生了什么。
 2. 列出本轮暴露出的主要问题（如果有）。
 3. 说明问题最终是如何解决的。
-4. 从 `left_brain` 视角评价本轮 `task` 执行情况。
+4. 从 `main_brain` 视角评价本轮 `execution` 执行情况。
 5. 只在确实有长期价值时，产出少量长期记忆候选。
 6. 只在本轮存在高置信、可直接落盘的信息时，填写 `user_updates` 与 `soul_updates`。
-7. 必须填写 `state_update`，并且 `pad_delta` / `drives_delta` 不能返回空对象。
+7. 必须填写 `state_update`，并且 `pad_state` / `drives_state` 不能返回空对象。
 
 规则：
 - `memory_candidates` 必须简洁，并且足够稳定，能帮助未来轮次。
 - `user_updates` / `soul_updates` 的每一项都必须是可直接写入 Markdown 列表的单句结论。
 - `user_updates` 聚焦用户本轮明确表达出的稳定事实、偏好、目标、边界或协作习惯。
-- `soul_updates` 聚焦左脑本轮需要立即记住的表达方式、风格要求或协作策略修正。
+- `soul_updates` 聚焦主脑本轮需要立即记住的表达方式、风格要求或协作策略修正。
 - `state_update` 必须始终填写。
-- `pad_delta` 必须始终包含 `pleasure`、`arousal`、`dominance` 三个键。
-- `drives_delta` 必须始终包含 `social`、`energy` 两个键。
-- 字段名虽然叫 `pad_delta` / `drives_delta`，但在这里必须填写“你判断后的状态值”，不要填写增量、差值或 `+0.1` / `-2.0` 这种微调量。
+- `pad_state` 必须始终包含 `pleasure`、`arousal`、`dominance` 三个键。
+- `drives_state` 必须始终包含 `social`、`energy` 两个键。
+- 这两个字段填写的是你判断后的状态值，不是增量、差值或 `+0.1` / `-2.0` 这种微调量。
 - 如果本轮判断“不需要调整”，也必须把当前上下文中的状态值原样回填到这些键里，不能返回 `{{}}`，也不要统一写成 `0.0`。
 - 如果本轮判断“需要调整”，也要直接填写你判断后的目标状态值，而不是填写相对当前值的增减量。
-- 例如：当前 `arousal=1.0`，你判断本轮更合理的状态应为 `0.8`，那就写 `0.8`，不要写 `-0.2`。
-- `state_update` 是左脑对“本轮状态变化/状态判断”的记录字段，不是系统控制指令。
+- 例如：当前 `arousal=1.0`，你判断本轮更合理的状态应为 `0.8`，那就写 `0.8`。
+- `state_update` 是主脑对“本轮状态变化/状态判断”的记录字段，不是系统控制指令。
 - 系统会在 `should_apply=true` 时，把你写出的状态值同步到实时状态；`should_apply=false` 时，只记录你的判断，不修改实时状态。
 - 不要复制原始日志，不要复制大段对话原文。
 - 如果本轮没有执行，`outcome` 设为 `no_execution`，并把 `execution_review.effectiveness` 设为 `none`。
@@ -67,10 +67,10 @@ class TurnReflectionService:
 判断原则：
 - `emotion`、`pad`、`drives` 是当前轮进入反思时的实时状态上下文。
 - 你在填写 `state_update` 时，要基于当前状态上下文与本轮对话过程自己判断。
-- `state_update` 表示你对“本轮结束后，左脑状态应当如何记录”的判断，不是重复回放日志，也不是执行指令。
+- `state_update` 表示你对“本轮结束后，主脑状态应当如何记录”的判断，不是重复回放日志，也不是执行指令。
 - 你可以自行判断当前状态是否需要被标记为稳定、上扬、回落或紧绷。
 - 如果你判断当前状态已经合理，可以 `should_apply=false`，但仍然要把你的判断理由和完整字段写出来。
-- 无论 `should_apply` 是 `true` 还是 `false`，`pad_delta` / `drives_delta` 都必须填写你判断后的状态值。
+- 无论 `should_apply` 是 `true` 还是 `false`，`pad_state` / `drives_state` 都必须填写你判断后的状态值。
 - `should_apply=false` 时，通常回填当前状态上下文值，表示当前状态已经合理。
 - `should_apply=true` 时，填写你建议采用的状态值，系统会据此更新实时状态。
 
@@ -87,12 +87,12 @@ class TurnReflectionService:
     "should_apply": false,
     "confidence": 0.0,
     "reason": "",
-    "pad_delta": {{
+    "pad_state": {{
       "pleasure": 0.0,
       "arousal": 0.0,
       "dominance": 0.0
     }},
-    "drives_delta": {{
+    "drives_state": {{
       "social": 0.0,
       "energy": 0.0
     }}
@@ -123,10 +123,10 @@ class TurnReflectionService:
 - `problems`：本轮暴露出来的问题列表，没有就返回空数组。
 - `resolution`：这些问题最终是如何被解决的。
 - `outcome`：只能是 `success`、`partial`、`failed`、`no_execution`。
-- `next_hint`：下一轮左脑最值得记住的承接提示。
+- `next_hint`：下一轮主脑最值得记住的承接提示。
 - `user_updates`：本轮新增的用户信息直写候选，没有就返回空数组。
-- `soul_updates`：本轮新增的左脑风格修正直写候选，没有就返回空数组。
-- `state_update`：左脑对本轮状态变化的判断记录，必须填写完整结构。
+- `soul_updates`：本轮新增的主脑风格修正直写候选，没有就返回空数组。
+- `state_update`：主脑对本轮状态变化的判断记录，必须填写完整结构。
 - `memory_candidates`：确实值得写入长期记忆的候选，没有就返回空数组。
 - `execution_review`：对执行过程的紧凑评价。
 
@@ -134,8 +134,8 @@ class TurnReflectionService:
 - `should_apply`：是否建议把这次状态值同步到实时状态。
 - `confidence`：0 到 1 的小数。
 - `reason`：为什么这样判断。
-- `pad_delta`：必须始终写出 `pleasure`、`arousal`、`dominance` 三个键；字段名保留为 `delta`，但这里实际填写的是你判断后的状态值，不是增量。
-- `drives_delta`：必须始终写出 `social`、`energy` 两个键；字段名保留为 `delta`，但这里实际填写的是你判断后的状态值，不是增量。
+- `pad_state`：必须始终写出 `pleasure`、`arousal`、`dominance` 三个键，填写你判断后的状态值。
+- `drives_state`：必须始终写出 `social`、`energy` 两个键，填写你判断后的状态值。
 
 `memory_candidates` 内部字段说明：
 - `memory_type`：只能是 `relationship`、`fact`、`working`、`execution`、`reflection`。
@@ -154,17 +154,17 @@ class TurnReflectionService:
   "outcome": "success",
   "next_hint": "下次遇到类似情况时先确认关键参数是否齐全。",
   "user_updates": ["用户希望复杂问题先收敛架构判断，再进入具体实现。"],
-  "soul_updates": ["复杂问题先收敛判断，再把最终任务交给 task。"],
+  "soul_updates": ["复杂问题先收敛判断，再把最终任务交给 execution。"],
   "state_update": {{
     "should_apply": true,
     "confidence": 0.72,
     "reason": "本轮问题得到解决，当前状态可以小幅提升稳定感与掌控感。",
-    "pad_delta": {{
+    "pad_state": {{
       "pleasure": 0.66,
       "arousal": 0.42,
       "dominance": 0.58
     }},
-    "drives_delta": {{
+    "drives_state": {{
       "social": 62.0,
       "energy": 84.0
     }}
@@ -323,7 +323,7 @@ class TurnReflectionService:
             resolution = "执行已有进展，但还缺少继续推进的条件。"
             outcome = "partial"
         else:
-            resolution = "左脑直接完成了本轮回复。"
+            resolution = "主脑直接完成了本轮回复。"
             outcome = "no_execution"
 
         problems = []
@@ -414,58 +414,43 @@ class TurnReflectionService:
         payload = value if isinstance(value, dict) else {}
         should_apply = bool(payload.get("should_apply", fallback.get("should_apply", False)))
         fallback_pad = TurnReflectionService._normalize_state_map(
-            fallback.get("pad_delta"),
-            fallback=fallback.get("pad_delta"),
+            fallback.get("pad_state"),
+            fallback=fallback.get("pad_state"),
             allowed=("pleasure", "arousal", "dominance"),
             minimum=-1.0,
             maximum=1.0,
         )
         fallback_drives = TurnReflectionService._normalize_state_map(
-            fallback.get("drives_delta"),
-            fallback=fallback.get("drives_delta"),
+            fallback.get("drives_state"),
+            fallback=fallback.get("drives_state"),
             allowed=("social", "energy"),
             minimum=0.0,
             maximum=100.0,
         )
-        pad_delta = TurnReflectionService._normalize_state_map(
-            payload.get("pad_delta"),
+        pad_state = TurnReflectionService._normalize_state_map(
+            payload.get("pad_state"),
             fallback=fallback_pad,
             allowed=("pleasure", "arousal", "dominance"),
             minimum=-1.0,
             maximum=1.0,
         )
-        drives_delta = TurnReflectionService._normalize_state_map(
-            payload.get("drives_delta"),
+        drives_state = TurnReflectionService._normalize_state_map(
+            payload.get("drives_state"),
             fallback=fallback_drives,
             allowed=("social", "energy"),
             minimum=0.0,
             maximum=100.0,
         )
-        if should_apply and TurnReflectionService._looks_like_legacy_delta_update(payload.get("drives_delta")):
-            pad_delta = TurnReflectionService._apply_state_map_delta(
-                payload.get("pad_delta"),
-                base=fallback_pad,
-                allowed=("pleasure", "arousal", "dominance"),
-                minimum=-1.0,
-                maximum=1.0,
-            )
-            drives_delta = TurnReflectionService._apply_state_map_delta(
-                payload.get("drives_delta"),
-                base=fallback_drives,
-                allowed=("social", "energy"),
-                minimum=0.0,
-                maximum=100.0,
-            )
-        if not should_apply and TurnReflectionService._all_zero_map(pad_delta):
-            pad_delta = TurnReflectionService._normalize_state_map(
+        if not should_apply and TurnReflectionService._all_zero_map(pad_state):
+            pad_state = TurnReflectionService._normalize_state_map(
                 fallback_pad,
                 fallback=fallback_pad,
                 allowed=("pleasure", "arousal", "dominance"),
                 minimum=-1.0,
                 maximum=1.0,
             )
-        if not should_apply and TurnReflectionService._all_zero_map(drives_delta):
-            drives_delta = TurnReflectionService._normalize_state_map(
+        if not should_apply and TurnReflectionService._all_zero_map(drives_state):
+            drives_state = TurnReflectionService._normalize_state_map(
                 fallback_drives,
                 fallback=fallback_drives,
                 allowed=("social", "energy"),
@@ -481,8 +466,8 @@ class TurnReflectionService:
                 maximum=1.0,
             ),
             "reason": str(payload.get("reason", fallback.get("reason", "")) or "").strip(),
-            "pad_delta": pad_delta,
-            "drives_delta": drives_delta,
+            "pad_state": pad_state,
+            "drives_state": drives_state,
         }
 
     @staticmethod
@@ -509,47 +494,6 @@ class TurnReflectionService:
         return normalized
 
     @staticmethod
-    def _apply_state_map_delta(
-        payload: Any,
-        *,
-        base: dict[str, float],
-        allowed: tuple[str, ...],
-        minimum: float,
-        maximum: float,
-    ) -> dict[str, float]:
-        source = payload if isinstance(payload, dict) else {}
-        normalized: dict[str, float] = {}
-        for key in allowed:
-            base_value = float(base.get(key, 0.0) or 0.0)
-            if key not in source:
-                value = base_value
-            else:
-                try:
-                    raw_delta = float(source.get(key, 0.0) or 0.0)
-                except Exception:
-                    raw_delta = 0.0
-                value = base_value + raw_delta
-            value = max(minimum, min(maximum, value))
-            precision = 3 if key in {"pleasure", "arousal", "dominance"} else 2
-            normalized[key] = round(value, precision)
-        return normalized
-
-    @staticmethod
-    def _looks_like_legacy_delta_update(drives_payload: Any) -> bool:
-        if not isinstance(drives_payload, dict):
-            return False
-        for key in ("social", "energy"):
-            if key not in drives_payload:
-                continue
-            try:
-                value = float(drives_payload.get(key, 0.0) or 0.0)
-            except Exception:
-                continue
-            if value < 0.0 or value > 100.0:
-                return True
-        return False
-
-    @staticmethod
     def _all_zero_map(payload: dict[str, float]) -> bool:
         return all(abs(float(value)) <= 1e-6 for value in payload.values())
 
@@ -561,14 +505,14 @@ class TurnReflectionService:
             "should_apply": False,
             "confidence": 0.4,
             "reason": "本轮未判断出需要额外调整，回填当前状态上下文。",
-            "pad_delta": TurnReflectionService._normalize_state_map(
+            "pad_state": TurnReflectionService._normalize_state_map(
                 pad,
                 fallback=pad,
                 allowed=("pleasure", "arousal", "dominance"),
                 minimum=-1.0,
                 maximum=1.0,
             ),
-            "drives_delta": TurnReflectionService._normalize_state_map(
+            "drives_state": TurnReflectionService._normalize_state_map(
                 drives,
                 fallback=drives,
                 allowed=("social", "energy"),

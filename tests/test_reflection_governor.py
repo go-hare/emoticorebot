@@ -32,7 +32,7 @@ async def _exercise_turn_reflection_persistence(workspace: Path) -> None:
     await bus.publish(
         build_envelope(
             event_type=EventType.REFLECTION_LIGHT,
-            source="left_runtime",
+            source="main_brain",
             target="reflection_governor",
             session_id="sess_1",
             turn_id="turn_1",
@@ -66,12 +66,11 @@ async def _exercise_turn_reflection_persistence(workspace: Path) -> None:
     )
     await bus.drain()
 
-    assert len(committed) == 1
+    assert committed == []
     cognitive = (workspace / "memory" / "cognitive_events.jsonl").read_text(encoding="utf-8")
-    memories = (workspace / "memory" / "long_term" / "memory.jsonl").read_text(encoding="utf-8")
     assert "帮我分析一下这个问题" in cognitive
     assert "我先帮你拆一下结构" in cognitive
-    assert "执行已完成" in memories
+    assert not (workspace / "memory" / "memory.jsonl").exists()
 
 
 def test_reflection_governor_persists_turn_reflection_on_signal() -> None:
@@ -79,7 +78,7 @@ def test_reflection_governor_persists_turn_reflection_on_signal() -> None:
         asyncio.run(_exercise_turn_reflection_persistence(Path(tmp_dir)))
 
 
-async def _exercise_right_brain_reflection_without_delivery_gate(workspace: Path) -> None:
+async def _exercise_execution_reflection_without_delivery_gate(workspace: Path) -> None:
     bus = PriorityPubSubBus()
     governor = ReflectionGovernor(bus=bus, workspace=workspace)
     governor.register()
@@ -90,25 +89,25 @@ async def _exercise_right_brain_reflection_without_delivery_gate(workspace: Path
     await bus.publish(
         build_envelope(
             event_type=EventType.REFLECTION_LIGHT,
-            source="right_runtime",
+            source="execution_runtime",
             target="reflection_governor",
-            session_id="sess_right_1",
-            turn_id="turn_right_1",
-            task_id="task_right_1",
-            correlation_id="task_right_1",
+            session_id="sess_exec_1",
+            turn_id="turn_exec_1",
+            task_id="task_exec_1",
+            correlation_id="task_exec_1",
             payload=ReflectionSignalPayload(
-                trigger_id="reflection_right_1",
-                reason="right_brain_result",
-                source_event_id="evt_right_1",
-                task_id="task_right_1",
+                trigger_id="reflection_exec_1",
+                reason="execution_result",
+                source_event_id="evt_exec_1",
+                task_id="task_exec_1",
                 metadata={
-                    "right_brain_summary": {
-                        "session_id": "sess_right_1",
-                        "turn_id": "turn_right_1",
+                    "execution_summary": {
+                        "session_id": "sess_exec_1",
+                        "turn_id": "turn_exec_1",
                         "origin_message": {
                             "channel": "cli",
                             "chat_id": "direct",
-                            "message_id": "msg_right_1",
+                            "message_id": "msg_exec_1",
                         },
                         "request_text": "整理一下反思链路",
                         "summary": "反思链路已整理完成",
@@ -116,7 +115,7 @@ async def _exercise_right_brain_reflection_without_delivery_gate(workspace: Path
                         "result": "success",
                         "decision": "accept",
                         "task": {
-                            "task_id": "task_right_1",
+                            "task_id": "task_exec_1",
                             "state": "done",
                             "result": "success",
                             "summary": "反思链路已整理完成",
@@ -133,7 +132,7 @@ async def _exercise_right_brain_reflection_without_delivery_gate(workspace: Path
                         ],
                         "recent_turns": [
                             {"role": "user", "content": "看一下反思"},
-                            {"role": "assistant", "content": "我先核对右脑和 ReflectionGovernor 的链路。"},
+                            {"role": "assistant", "content": "我先核对 execution 和 ReflectionGovernor 的链路。"},
                         ],
                         "short_term_memory": ["用户要求严格按模块实现"],
                         "long_term_memory": ["用户不需要兼容旧架构"],
@@ -146,18 +145,17 @@ async def _exercise_right_brain_reflection_without_delivery_gate(workspace: Path
     )
     await bus.drain()
 
-    assert len(committed) == 1
+    assert committed == []
     assert warnings == []
     cognitive = (workspace / "memory" / "cognitive_events.jsonl").read_text(encoding="utf-8")
-    memories = (workspace / "memory" / "long_term" / "memory.jsonl").read_text(encoding="utf-8")
     assert "整理一下反思链路" in cognitive
     assert "已经按模块梳理了反思入口和职责" in cognitive
-    assert "read_file" in memories
+    assert not (workspace / "memory" / "memory.jsonl").exists()
 
 
-def test_reflection_governor_persists_right_brain_reflection_without_delivery_gate() -> None:
+def test_reflection_governor_persists_execution_reflection_without_delivery_gate() -> None:
     with TemporaryDirectory() as tmp_dir:
-        asyncio.run(_exercise_right_brain_reflection_without_delivery_gate(Path(tmp_dir)))
+        asyncio.run(_exercise_execution_reflection_without_delivery_gate(Path(tmp_dir)))
 
 
 async def _exercise_periodic_deep_reflection(workspace: Path) -> None:
@@ -193,7 +191,7 @@ async def _exercise_periodic_deep_reflection(workspace: Path) -> None:
         await bus.publish(
             build_envelope(
                 event_type=EventType.REFLECTION_LIGHT,
-                source="left_runtime",
+                source="main_brain",
                 target="reflection_governor",
                 session_id="sess_1",
                 turn_id=turn_id,
@@ -257,7 +255,7 @@ async def _exercise_deep_signal_runs_without_delivery_gate(workspace: Path) -> N
         await bus.publish(
             build_envelope(
                 event_type=EventType.REFLECTION_LIGHT,
-                source="left_runtime",
+                source="main_brain",
                 target="reflection_governor",
                 session_id="sess_seed",
                 turn_id=turn_id,
@@ -374,7 +372,7 @@ def test_reflection_governor_context_prefers_task_scope() -> None:
 
         event = build_envelope(
             event_type=EventType.REFLECTION_DEEP,
-            source="left_runtime",
+            source="main_brain",
             target="reflection_governor",
             session_id="sess_1",
             task_id="task_2",

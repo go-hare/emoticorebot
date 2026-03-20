@@ -20,8 +20,6 @@ class AuditSignal:
 
 
 class AuditInterrupt(RuntimeError):
-    """Raised to stop the current right-brain run after an audit terminal signal."""
-
     def __init__(self, signal: AuditSignal) -> None:
         self.signal = signal
         super().__init__(signal.reason or signal.summary or signal.decision)
@@ -29,8 +27,6 @@ class AuditInterrupt(RuntimeError):
 
 @dataclass
 class RunHooks:
-    """Holds callbacks for the current right-brain run."""
-
     reporter: DetailedProgressReporter | None = None
     audit_handler: AuditHandler | None = None
 
@@ -45,11 +41,11 @@ class RunHooks:
         self.audit_handler = None
 
     async def report_progress(self, message: str, **payload: Any) -> str:
+        if self.reporter is None:
+            raise RuntimeError("当前无法汇报进展（未绑定 runtime 回调）")
         text = str(message or "").strip()
         if not text:
-            return "汇报内容为空"
-        if self.reporter is None:
-            return "当前无法汇报（未在执行中）"
+            raise RuntimeError("汇报内容为空")
         await self.reporter(text, dict(payload))
         return f"已汇报: {text}"
 
@@ -62,6 +58,8 @@ class RunHooks:
         result_text: str = "",
         **metadata: Any,
     ) -> str:
+        if self.audit_handler is None:
+            raise RuntimeError("当前无法执行 audit_tool（未绑定 runtime 回调）")
         signal = AuditSignal(
             decision=decision,
             reason=str(reason or "").strip(),
@@ -69,8 +67,6 @@ class RunHooks:
             result_text=str(result_text or "").strip(),
             metadata=dict(metadata),
         )
-        if self.audit_handler is None:
-            raise RuntimeError("当前无法执行 audit_tool（未绑定 runtime 回调）")
         await self.audit_handler(signal)
         if signal.decision == "accept":
             return "任务可以开始"

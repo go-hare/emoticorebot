@@ -1,4 +1,4 @@
-"""Right-brain execution wrapper around the agent backend."""
+"""Execution wrapper around the agent backend."""
 
 from __future__ import annotations
 
@@ -8,21 +8,19 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from emoticorebot.right_brain import backend as right_backend
-from emoticorebot.right_brain import trace as right_trace
-from emoticorebot.right_brain.hooks import AuditInterrupt, DetailedProgressReporter, RunHooks
 from emoticorebot.utils.llm_utils import blocks_to_llm_content
 
+from . import backend as agent_backend
+from .hooks import AuditInterrupt, DetailedProgressReporter, RunHooks
+from . import trace as agent_trace
 
-RightBrainExecutionResult = dict[str, Any]
+ExecutionResult = dict[str, Any]
 
 
-class RightBrainExecutor:
-    """Runs a right-brain task spec against the agent backend without runtime coupling."""
-
+class ExecutionExecutor:
     DEFAULT_TASK_TIMEOUT_S = 120.0
     _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
-    assistant_role = "right_brain"
+    assistant_role = "execution"
 
     def __init__(self, executor_llm: Any, tool_registry: Any, context_builder: Any) -> None:
         self.run_hooks = RunHooks()
@@ -38,81 +36,50 @@ class RightBrainExecutor:
         task_id: str,
         progress_reporter: DetailedProgressReporter | None = None,
         trace_reporter: DetailedProgressReporter | None = None,
-    ) -> RightBrainExecutionResult:
-        if not right_backend.backend_available():
-            return self._build_result(
-                control_state="failed",
-                status="failed",
-                message="右脑执行器依赖当前不可用，无法执行内部任务。",
-                analysis="系统缺少 create_agent 执行能力",
-            )
+    ) -> ExecutionResult:
+        if not agent_backend.backend_available():
+            raise RuntimeError("execution backend is unavailable")
 
         request = str(task_spec.get("request", "") or "").strip()
         if not request:
-            return self._build_result(
-                control_state="failed",
-                status="failed",
-                message="右脑执行器未收到有效请求。",
-                analysis="任务请求为空",
-            )
+            raise RuntimeError("execution request is empty")
 
-        agent = right_backend.build_agent(self)
+        agent = agent_backend.build_agent(self)
         thread_id = self._build_thread_id(task_spec, task_id)
         run_id = f"run_{uuid4().hex[:12]}"
         self.run_hooks.bind_reporter(progress_reporter)
         self._trace_log = []
-
-        history = [item for item in list(task_spec.get("history") or []) if isinstance(item, dict)]
-        media = [str(item).strip() for item in list(task_spec.get("media") or []) if str(item).strip()]
-        task_context = dict(task_spec.get("task_context") or {})
-        agent_task: asyncio.Task[Any] | None = None
-
+        agent_task = asyncio.create_task(
+            self._invoke_agent(
+                agent,
+                task_spec,
+                thread_id,
+                run_id,
+                history=[item for item in list(task_spec.get("history") or []) if isinstance(item, dict)],
+                media=[str(item).strip() for item in list(task_spec.get("media") or []) if str(item).strip()],
+                task_context=dict(task_spec.get("task_context") or {}),
+                trace_reporter=trace_reporter,
+            ),
+            name=f"execution:{task_id}",
+        )
         try:
-            timeout_s = self._resolve_task_timeout(task_spec)
-            agent_task = asyncio.create_task(
-                self._invoke_agent(
-                    agent,
-                    task_spec,
-                    thread_id,
-                    run_id,
-                    history=history,
-                    media=media,
-                    task_context=task_context,
-                    trace_reporter=trace_reporter,
-                ),
-                name=f"right-brain:{task_id}",
-            )
-            try:
-                agent_result = await asyncio.wait_for(asyncio.shield(agent_task), timeout=timeout_s)
-            except asyncio.TimeoutError:
-                agent_task.cancel()
-                agent_task.add_done_callback(self._consume_background_task_result)
-                timeout_text = int(timeout_s) if float(timeout_s).is_integer() else round(timeout_s, 1)
-                return self._build_result(
-                    control_state="failed",
-                    status="failed",
-                    message=f"右脑执行器超时（{timeout_text}s），本次任务已终止。",
-                    analysis="右脑执行器在限定时间内未返回结果。",
-                )
-            return self._normalize_task_result(self._extract_structured_result(agent_result))
+            result = await asyncio.wait_for(asyncio.shield(agent_task), timeout=self._resolve_task_timeout(task_spec))
+            return self._normalize_task_result(self._extract_structured_result(result))
         except AuditInterrupt:
             raise
-        except asyncio.CancelledError:
-            if agent_task is not None and not agent_task.done():
-                agent_task.cancel()
-                agent_task.add_done_callback(self._consume_background_task_result)
-            raise
         finally:
+            if agent_task.done():
+                self._consume_background_task_result(agent_task)
             self.run_hooks.clear()
 
     def _build_thread_id(self, task_spec: dict[str, Any], task_id: str) -> str:
         session_id = str(task_spec.get("session_id", "") or "").strip()
         if session_id:
-            return f"right_brain:{session_id}:{task_id}"
+            return f"execution:{session_id}:{task_id}"
         channel = str(task_spec.get("channel", "") or "").strip()
         chat_id = str(task_spec.get("chat_id", "") or "").strip()
         base = f"{channel}:{chat_id}" if channel or chat_id else "default"
-        return f"right_brain:{base}:{task_id}"
+        return f"execution:{base}:{task_id}"
 
     def _resolve_task_timeout(self, task_spec: dict[str, Any]) -> float:
         raw_timeout = task_spec.get("timeout_s")
@@ -121,7 +88,7 @@ class RightBrainExecutor:
         except (TypeError, ValueError):
             timeout_s = self.DEFAULT_TASK_TIMEOUT_S
         if timeout_s <= 0:
-            return self.DEFAULT_TASK_TIMEOUT_S
+            raise RuntimeError("execution timeout must be positive")
         return timeout_s
 
     @staticmethod
@@ -140,13 +107,13 @@ class RightBrainExecutor:
         thread_id: str,
         run_id: str,
         *,
-        history: list[dict[str, Any]] | None = None,
-        media: list[str] | None = None,
-        task_context: dict[str, Any] | None = None,
-        trace_reporter: DetailedProgressReporter | None = None,
+        history: list[dict[str, Any]],
+        media: list[str],
+        task_context: dict[str, Any],
+        trace_reporter: DetailedProgressReporter | None,
     ) -> Any:
         messages: list[dict[str, Any]] = []
-        for turn in (history or [])[-10:]:
+        for turn in history[-10:]:
             role = str(turn.get("role", "") or "").strip()
             content = turn.get("content", "")
             if role in {"user", "assistant"} and content:
@@ -158,16 +125,11 @@ class RightBrainExecutor:
         goal = str(task_spec.get("goal", "") or "").strip()
         expected_output = str(task_spec.get("expected_output", "") or "").strip()
         constraints = [str(item).strip() for item in list(task_spec.get("constraints") or []) if str(item).strip()]
-        success_criteria = [
-            str(item).strip()
-            for item in list(task_spec.get("success_criteria") or [])
-            if str(item).strip()
-        ]
+        success_criteria = [str(item).strip() for item in list(task_spec.get("success_criteria") or []) if str(item).strip()]
         memory_refs = [str(item).strip() for item in list(task_spec.get("memory_refs") or []) if str(item).strip()]
         skill_hints = [str(item).strip() for item in list(task_spec.get("skill_hints") or []) if str(item).strip()]
 
-        user_parts: list[str] = []
-        user_parts.append(request)
+        user_parts: list[str] = [request]
         if goal:
             user_parts.append(f"\n\n任务目标：{goal}")
         if constraints:
@@ -185,10 +147,9 @@ class RightBrainExecutor:
         history_context = str(task_spec.get("history_context", "") or "").strip()
         if history_context:
             context_parts.append(history_context)
-        if task_context:
-            nested_history_context = str(task_context.get("history_context", "") or "").strip()
-            if nested_history_context and nested_history_context not in context_parts:
-                context_parts.append(nested_history_context)
+        nested_history_context = str(task_context.get("history_context", "") or "").strip()
+        if nested_history_context and nested_history_context not in context_parts:
+            context_parts.append(nested_history_context)
         if context_parts:
             user_parts.append("\n\n补充上下文：\n" + "\n".join(context_parts))
 
@@ -196,14 +157,12 @@ class RightBrainExecutor:
         if media_items:
             messages.append({"role": "user", "content": [{"type": "text", "text": "".join(user_parts)}, *media_items]})
         else:
-            if media:
-                user_parts.append(f"\n\n[附件: {', '.join(media)}]")
             messages.append({"role": "user", "content": "".join(user_parts)})
 
         payload = {"messages": messages}
         config = {
             "configurable": {"thread_id": thread_id},
-            "metadata": {"assistant_id": "emoticorebot-right-brain", "run_id": run_id},
+            "metadata": {"assistant_id": "emoticorebot-execution", "run_id": run_id},
         }
 
         if hasattr(agent, "astream"):
@@ -212,7 +171,7 @@ class RightBrainExecutor:
             return await agent.ainvoke(payload, config=config)
         if hasattr(agent, "invoke"):
             return agent.invoke(payload, config=config)
-        raise RuntimeError("right-brain agent does not expose invoke/ainvoke/astream")
+        raise RuntimeError("execution agent does not expose invoke/ainvoke/astream")
 
     async def _stream_invoke(
         self,
@@ -220,7 +179,7 @@ class RightBrainExecutor:
         payload: dict[str, Any],
         config: dict[str, Any],
         *,
-        trace_reporter: DetailedProgressReporter | None = None,
+        trace_reporter: DetailedProgressReporter | None,
     ) -> Any:
         last_values: Any = None
         async for item in agent.astream(
@@ -229,11 +188,11 @@ class RightBrainExecutor:
             stream_mode=["values", "updates", "messages", "custom"],
             subgraphs=True,
         ):
-            namespace, mode, data = right_trace.parse_stream_item(item)
+            namespace, mode, data = agent_trace.parse_stream_item(item)
             if mode == "values":
                 last_values = data
                 continue
-            for record in right_trace.build_trace_records(mode=mode, namespace=namespace, data=data):
+            for record in agent_trace.build_trace_records(mode=mode, namespace=namespace, data=data):
                 self._trace_log.append(record)
                 if trace_reporter is None:
                     continue
@@ -244,13 +203,13 @@ class RightBrainExecutor:
                     message,
                     {
                         "event": "task.trace",
-                        "producer": str(record.get("role", "") or "right_brain").strip() or "right_brain",
+                        "producer": str(record.get("role", "") or "execution").strip() or "execution",
                         "phase": "trace",
                         "payload": dict(record),
                     },
                 )
         if last_values is None:
-            raise RuntimeError("right-brain trace stream did not produce final state")
+            raise RuntimeError("execution trace stream did not produce final state")
         return last_values
 
     @staticmethod
@@ -267,12 +226,10 @@ class RightBrainExecutor:
                 return f"准备调用工具：{', '.join(names[:3])}"
         if role == "tool":
             name = str(record.get("name", "") or "tool").strip()
-            content = RightBrainExecutor._content_to_text(record.get("content"))
-            if content:
-                return f"{name} 返回：{content[:160]}"
-            return f"{name} 已返回结果"
+            content = ExecutionExecutor._content_to_text(record.get("content"))
+            return f"{name} 返回：{content[:160]}" if content else f"{name} 已返回结果"
         if role == "assistant":
-            content = RightBrainExecutor._content_to_text(record.get("content"))
+            content = ExecutionExecutor._content_to_text(record.get("content"))
             if content:
                 return content[:160]
         return ""
@@ -294,9 +251,7 @@ class RightBrainExecutor:
                     parts.append(text)
             return "\n".join(parts).strip()
         if isinstance(content, dict):
-            text = str(content.get("text", "") or content.get("content", "") or "").strip()
-            if text:
-                return text
+            return str(content.get("text", "") or content.get("content", "") or "").strip()
         return str(content or "").strip()
 
     def _extract_structured_result(self, result: Any) -> dict[str, Any]:
@@ -313,61 +268,45 @@ class RightBrainExecutor:
             if "control_state" in result or "status" in result:
                 return result
 
-            messages = result.get("messages", [])
             text = ""
-            for msg in reversed(messages):
+            for msg in reversed(list(result.get("messages", []) or [])):
                 content = getattr(msg, "content", None)
                 if content is None:
                     content = msg.get("content", "") if isinstance(msg, dict) else ""
                 if isinstance(content, list):
-                    parts = [
+                    content = "\n".join(
                         str(item.get("text", "")) if isinstance(item, dict) and item.get("type") == "text" else str(item)
                         for item in content
-                    ]
-                    content = "\n".join(parts)
+                    )
                 if isinstance(content, str) and content.strip():
                     text = content.strip()
                     break
-
             if text:
                 fence_match = self._JSON_FENCE_RE.search(text)
                 if fence_match:
                     text = fence_match.group(1).strip()
-                try:
-                    payload = json.loads(text)
-                    if isinstance(payload, dict):
-                        return payload
-                except json.JSONDecodeError:
-                    pass
+                payload = json.loads(text)
+                if isinstance(payload, dict):
+                    return payload
 
-        raise RuntimeError("Right-brain executor did not return a structured execution result")
+        raise RuntimeError("execution executor did not return a structured execution result")
 
-    def _normalize_task_result(self, payload: dict[str, Any]) -> RightBrainExecutionResult:
-        if not isinstance(payload, dict):
-            raise RuntimeError("Right-brain execution result must be a dict")
-
+    def _normalize_task_result(self, payload: dict[str, Any]) -> ExecutionResult:
         control_state = str(payload.get("control_state", "completed") or "completed").strip()
         if control_state not in {"completed", "failed"}:
             raise RuntimeError(f"Invalid task control_state: {control_state!r}")
 
-        default_status = self._default_status_for_control_state(control_state)
+        default_status = "failed" if control_state == "failed" else "success"
         status = str(payload.get("status", default_status) or default_status).strip()
         if status not in {"success", "partial", "failed"}:
             raise RuntimeError(f"Invalid task status: {status!r}")
 
         message = str(payload.get("message", "") or "").strip()
         analysis = str(payload.get("analysis", "") or "").strip()
-
-        if control_state == "completed":
-            if status not in {"success", "partial"}:
-                raise RuntimeError("Execution result.status must be success or partial when control_state is completed")
-            if not message:
-                raise RuntimeError("Execution result.message must not be empty when control_state is completed")
-        elif control_state == "failed":
-            if status != "failed":
-                raise RuntimeError("Execution result.status must be failed when control_state is failed")
-            if not message and not analysis:
-                raise RuntimeError("Execution result.message or analysis must explain the failure")
+        if control_state == "completed" and not message:
+            raise RuntimeError("Execution result.message must not be empty when control_state is completed")
+        if control_state == "failed" and not message and not analysis:
+            raise RuntimeError("Execution failures must explain the reason")
 
         trace_items = [dict(item) for item in self._trace_log if isinstance(item, dict)]
         if not trace_items:
@@ -381,26 +320,5 @@ class RightBrainExecutor:
             "task_trace": trace_items,
         }
 
-    @staticmethod
-    def _build_result(
-        *,
-        control_state: str,
-        status: str,
-        message: str,
-        analysis: str,
-    ) -> RightBrainExecutionResult:
-        return {
-            "control_state": control_state,
-            "status": status,
-            "message": str(message or "").strip(),
-            "analysis": str(analysis or "").strip(),
-            "task_trace": [],
-        }
 
-    @staticmethod
-    def _default_status_for_control_state(control_state: str) -> str:
-        if control_state == "failed":
-            return "failed"
-        return "success"
-
-__all__ = ["RightBrainExecutor"]
+__all__ = ["ExecutionExecutor"]

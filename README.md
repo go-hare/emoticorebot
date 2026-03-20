@@ -4,15 +4,14 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-**emoticorebot** is a companion AI architecture built around a **single subject with Left Brain / Right Brain / Memory / Reflection** design.
+**emoticorebot** is a companion AI architecture built around a **single subject with main_brain / execution / memory / reflection** design.
 
-The system has one outward-facing self. `Left Brain` handles user-facing expression and companionship, `Right Brain` handles async reasoning and execution, and `Memory` plus `Reflection` keep the relationship continuous over time.
+The system has one outward-facing self. `Main Brain` handles user-facing understanding, task decisions, and final expression. `Execution` handles async tool use and long-running work. `Memory` plus `Reflection` keep the relationship continuous over time.
 
 Detailed architecture design:
 
-- [docs/companion-left-right-brain-architecture.zh-CN.md](docs/companion-left-right-brain-architecture.zh-CN.md)
-- [docs/companion-left-right-brain-module-contracts.zh-CN.md](docs/companion-left-right-brain-module-contracts.zh-CN.md)
-- [docs/companion-protocol-spec.zh-CN.md](docs/companion-protocol-spec.zh-CN.md)
+- [docs/companion-main-brain-execution-architecture.zh-CN.md](docs/companion-main-brain-execution-architecture.zh-CN.md)
+- [docs/companion-main-brain-execution-module-contracts.zh-CN.md](docs/companion-main-brain-execution-module-contracts.zh-CN.md)
 
 ---
 
@@ -49,11 +48,11 @@ This creates `~/.emoticorebot/` with default config, `SOUL.md` (persona), `USER.
   },
   "agents": {
     "defaults": {
-      "leftBrainMode": {
+      "mainBrainMode": {
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       },
-      "rightBrainMode": {
+      "executionMode": {
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       }
@@ -84,19 +83,22 @@ The authoritative architecture is:
 
 ```text
 User / Channel
-  -> Session Supervisor
-  -> Intent Router
-  -> Left Brain
-  -> Delivery Plane
+  -> ConversationGateway
+  -> RuntimeKernel
+  -> InputNormalizer
+  -> SessionRuntime
+  -> MainBrainFrontLoop
+  -> OutputRuntime
+  -> DeliveryRuntime
 
-Intent Router
-  -> Right Brain (async, on demand)
-Right Brain
-  -> Left Brain
+MainBrainFrontLoop
+  -> ExecutionRuntime (on demand)
+ExecutionRuntime
+  -> MainBrainFrontLoop
 
-Left Brain / Right Brain
+MainBrainFrontLoop / ExecutionRuntime
   -> Memory
-Left Brain / Right Brain
+MainBrainFrontLoop / ExecutionRuntime
   -> Reflection
 ```
 
@@ -105,8 +107,8 @@ Left Brain / Right Brain
 - The system exposes one continuous subject to the user.
 - Inputs are modeled only as `turn` or `stream`.
 - Deliveries are modeled only as `inline`, `push`, or `stream`.
-- `Left Brain` owns user-facing expression and companionship.
-- `Right Brain` owns async reasoning, execution, tools, and long-running work.
+- `Main Brain` owns user-facing expression, task decisions, and final replies.
+- `Execution` owns async execution, tools, and long-running work.
 - `Memory` and `Reflection` keep long-term continuity.
 
 ### Canonical Interaction Modes
@@ -121,10 +123,10 @@ Left Brain / Right Brain
 
 ### Canonical Execution Rule
 
-- `Right Brain` is the only background execution system.
-- `create_task` is interpreted as "submit a request to Right Brain for review and handling".
-- `Right Brain` may `accept`, `answer_only`, or `reject`.
-- User-visible wording still returns through `Left Brain`.
+- `ExecutionRuntime` is the only background execution system.
+- `create_task` means "submit a request to ExecutionRuntime for review and handling".
+- `ExecutionRuntime` may `accept`, `answer_only`, or `reject`.
+- User-visible wording still returns through `MainBrainFrontLoop`.
 
 ---
 
@@ -144,7 +146,7 @@ Three concurrent `asyncio.Task` loops:
 #### Deep Reflection
 Called by the subconscious reflection loop. It runs `deep_reflection` with a periodic signal and may:
 
-- append stable memories into `memory/long_term/memory.jsonl`
+- append stable memories into `memory/memory.jsonl`
 - rewrite `SOUL.md` when a stable self-pattern is confirmed
 - rewrite `USER.md` when a stable user-pattern is confirmed
 
@@ -249,7 +251,7 @@ emoticorebot uses **LangChain** adapters and **litellm** for broad model support
 | Groq | `langchain-groq` |
 | Ollama (local) | `langchain-ollama` |
 
-`left_brain` and `right_brain` can use different models through `agents.defaults.leftBrainMode` and `agents.defaults.rightBrainMode`.
+`main_brain` and `execution` can use different models through `agents.defaults.mainBrainMode` and `agents.defaults.executionMode`.
 
 ---
 
@@ -327,17 +329,17 @@ emoticorebot/
 ├── adapters/            # Conversation gateway / outbound dispatch
 ├── background/          # Background daemon + periodic reflection entrypoints
 ├── bootstrap.py         # RuntimeHost, top-level assembly host
-├── left/
+├── main_brain/
 │   ├── context.py
 │   ├── packet.py
 │   ├── reply_policy.py
 │   └── runtime.py
-├── right/
+├── execution/
 │   ├── backend.py
 │   ├── executor.py
 │   ├── hooks.py
-│   ├── skills.py
 │   ├── runtime.py
+│   ├── skills.py
 │   ├── state.py
 │   ├── store.py
 │   └── trace.py
@@ -352,9 +354,12 @@ emoticorebot/
 ├── memory/
 │   ├── crystallizer.py
 │   ├── retrieval.py
-│   ├── short_term.py
 │   ├── store.py
 │   └── vector_index.py
+├── input/
+│   └── normalizer.py
+├── output/
+│   └── runtime.py
 ├── protocol/            # Typed runtime commands / events / models
 │   ├── commands.py
 │   ├── contracts.py

@@ -7,9 +7,9 @@ from emoticorebot.output.runtime import OutputRuntime
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.events import (
     DeliveryTargetPayload,
-    LeftFollowupReadyPayload,
-    LeftReplyReadyPayload,
-    LeftStreamDeltaPayload,
+    MainBrainFollowupReadyPayload,
+    MainBrainReplyReadyPayload,
+    MainBrainStreamDeltaPayload,
     OutputReadyPayloadBase,
 )
 from emoticorebot.protocol.task_models import MessageRef
@@ -48,14 +48,14 @@ async def _exercise_output_runtime_builds_inline_reply() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.LEFT_EVENT_REPLY_READY,
-            source="left_runtime",
+            event_type=EventType.MAIN_BRAIN_EVENT_REPLY_READY,
+            source="main_brain",
             target="broadcast",
             session_id="sess_1",
             turn_id="turn_1",
             correlation_id="turn_1",
-            payload=LeftReplyReadyPayload(
-                request_id="left_reply_1",
+            payload=MainBrainReplyReadyPayload(
+                request_id="main_brain_reply_1",
                 reply_text="你好",
                 delivery_target=_inline_target(),
                 origin_message=_origin("msg_1"),
@@ -91,13 +91,13 @@ async def _exercise_output_runtime_builds_stream_events() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.LEFT_EVENT_STREAM_DELTA_READY,
-            source="left_runtime",
+            event_type=EventType.MAIN_BRAIN_EVENT_STREAM_DELTA_READY,
+            source="main_brain",
             target="broadcast",
             session_id="sess_stream",
             turn_id="turn_stream",
             correlation_id="turn_stream",
-            payload=LeftStreamDeltaPayload(
+            payload=MainBrainStreamDeltaPayload(
                 stream_id="stream_1",
                 delta_text="你好。",
                 stream_state="open",
@@ -108,13 +108,13 @@ async def _exercise_output_runtime_builds_stream_events() -> None:
     )
     await bus.publish(
         build_envelope(
-            event_type=EventType.LEFT_EVENT_STREAM_DELTA_READY,
-            source="left_runtime",
+            event_type=EventType.MAIN_BRAIN_EVENT_STREAM_DELTA_READY,
+            source="main_brain",
             target="broadcast",
             session_id="sess_stream",
             turn_id="turn_stream",
             correlation_id="turn_stream",
-            payload=LeftStreamDeltaPayload(
+            payload=MainBrainStreamDeltaPayload(
                 stream_id="stream_1",
                 delta_text="我在这。",
                 stream_state="delta",
@@ -125,14 +125,14 @@ async def _exercise_output_runtime_builds_stream_events() -> None:
     )
     await bus.publish(
         build_envelope(
-            event_type=EventType.LEFT_EVENT_REPLY_READY,
-            source="left_runtime",
+            event_type=EventType.MAIN_BRAIN_EVENT_REPLY_READY,
+            source="main_brain",
             target="broadcast",
             session_id="sess_stream",
             turn_id="turn_stream",
             correlation_id="turn_stream",
-            payload=LeftReplyReadyPayload(
-                request_id="left_reply_stream",
+            payload=MainBrainReplyReadyPayload(
+                request_id="main_brain_reply_stream",
                 reply_text="你好。我在这。",
                 delivery_target=_stream_target(),
                 origin_message=_origin("msg_stream"),
@@ -171,16 +171,16 @@ async def _exercise_output_runtime_builds_followup_push() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.LEFT_EVENT_FOLLOWUP_READY,
-            source="left_runtime",
+            event_type=EventType.MAIN_BRAIN_EVENT_FOLLOWUP_READY,
+            source="main_brain",
             target="broadcast",
             session_id="sess_2",
             turn_id="turn_2",
             task_id="task_2",
             correlation_id="task_2",
-            payload=LeftFollowupReadyPayload(
+            payload=MainBrainFollowupReadyPayload(
                 job_id="job_2",
-                source_event=EventType.RIGHT_EVENT_RESULT_READY,
+                source_event=EventType.EXECUTION_EVENT_RESULT_READY,
                 source_decision="accept",
                 reply_text="任务完成。",
                 reply_kind="status",
@@ -219,14 +219,14 @@ async def _exercise_output_runtime_emits_safe_fallback_for_blocked_reply() -> No
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.LEFT_EVENT_REPLY_READY,
-            source="left_runtime",
+            event_type=EventType.MAIN_BRAIN_EVENT_REPLY_READY,
+            source="main_brain",
             target="broadcast",
             session_id="sess_unsafe",
             turn_id="turn_unsafe",
             correlation_id="turn_unsafe",
-            payload=LeftReplyReadyPayload(
-                request_id="left_reply_unsafe",
+            payload=MainBrainReplyReadyPayload(
+                request_id="main_brain_reply_unsafe",
                 reply_text="-----BEGIN PRIVATE KEY-----",
                 delivery_target=_inline_target(),
                 origin_message=_origin("msg_unsafe"),
@@ -263,14 +263,14 @@ async def _exercise_output_runtime_skips_suppressed_left_reply() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.LEFT_EVENT_REPLY_READY,
-            source="left_runtime",
+            event_type=EventType.MAIN_BRAIN_EVENT_REPLY_READY,
+            source="main_brain",
             target="broadcast",
             session_id="sess_sync",
             turn_id="turn_sync",
             correlation_id="turn_sync",
-            payload=LeftReplyReadyPayload(
-                request_id="left_reply_sync",
+            payload=MainBrainReplyReadyPayload(
+                request_id="main_brain_reply_sync",
                 reply_text="这条不应该出现在 output 层",
                 delivery_target=_inline_target(),
                 origin_message=_origin("msg_sync"),
@@ -302,15 +302,15 @@ async def _exercise_output_runtime_skips_suppressed_followup() -> None:
 
     await bus.publish(
         build_envelope(
-            event_type=EventType.LEFT_EVENT_FOLLOWUP_READY,
-            source="left_runtime",
+            event_type=EventType.MAIN_BRAIN_EVENT_FOLLOWUP_READY,
+            source="main_brain",
             target="broadcast",
             session_id="sess_sync_followup",
             turn_id="turn_sync_followup",
             correlation_id="turn_sync_followup",
-            payload=LeftFollowupReadyPayload(
+            payload=MainBrainFollowupReadyPayload(
                 job_id="job_sync_followup",
-                source_event=EventType.RIGHT_EVENT_PROGRESS,
+                source_event=EventType.EXECUTION_EVENT_PROGRESS,
                 source_decision="accept",
                 reply_text="这条同步进展不应该投递给用户",
                 reply_kind="status",

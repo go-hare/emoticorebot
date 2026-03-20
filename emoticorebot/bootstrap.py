@@ -21,17 +21,15 @@ from loguru import logger
 from emoticorebot.adapters.conversation_gateway import ConversationGateway
 from emoticorebot.tools.manager import ToolManager
 from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersConfig
-from emoticorebot.left_brain.context import ContextBuilder
+from emoticorebot.main_brain.context import MainBrainContextBuilder
 from emoticorebot.providers.factory import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
-from emoticorebot.memory.short_term import ShortTermMemoryStore
 from emoticorebot.protocol.envelope import BusEnvelope
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import InboundMessage, OutboundMessage, TransportBus
 from emoticorebot.runtime.kernel import RuntimeKernel, TurnReply
 from emoticorebot.session.thread_store import ThreadStore
 from emoticorebot.utils.llm_utils import extract_message_text
-from emoticorebot.utils.right_brain_projection import project_task_from_runtime_snapshot, project_task_from_session_view
 
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
@@ -45,8 +43,8 @@ class RuntimeHost:
         self,
         bus: TransportBus,
         workspace: Path,
-        right_brain_mode: "ModelModeConfig",
-        left_brain_mode: "ModelModeConfig",
+        execution_mode: "ModelModeConfig",
+        main_brain_mode: "ModelModeConfig",
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
@@ -61,15 +59,14 @@ class RuntimeHost:
 
         self.bus = bus
         self.workspace = workspace
-        self.right_brain_mode = right_brain_mode
-        self.left_brain_mode = left_brain_mode
-        self.memory_window = right_brain_mode.memory_window
+        self.execution_mode = execution_mode
+        self.main_brain_mode = main_brain_mode
+        self.memory_window = execution_mode.memory_window
         self.channels_config = channels_config
 
         self.thread_store = thread_store or ThreadStore(workspace)
-        self.short_term_store = ShortTermMemoryStore(workspace)
         self.emotion_mgr = EmotionStateManager(workspace)
-        self.context = ContextBuilder(
+        self.context = MainBrainContextBuilder(
             workspace,
             memory_config=memory_config,
             providers_config=providers_config,
@@ -77,11 +74,11 @@ class RuntimeHost:
 
         factory = LLMFactory(
             providers_config=providers_config,
-            right_brain_mode=right_brain_mode,
-            left_brain_mode=left_brain_mode,
+            execution_mode=execution_mode,
+            main_brain_mode=main_brain_mode,
         )
-        self.right_brain_llm = factory.get_right_brain()
-        self.left_brain_llm = factory.get_left_brain()
+        self.execution_llm = factory.get_execution()
+        self.main_brain_llm = factory.get_main_brain()
 
         self.tool_manager = ToolManager(
             workspace,
@@ -98,9 +95,9 @@ class RuntimeHost:
         self.kernel = RuntimeKernel(
             workspace=workspace,
             transport=self.bus,
-            left_brain_llm=self.left_brain_llm,
-            executor_llm=self.right_brain_llm,
-            reflection_llm=self.left_brain_llm,
+            main_brain_llm=self.main_brain_llm,
+            execution_llm=self.execution_llm,
+            reflection_llm=self.main_brain_llm,
             context_builder=self.context,
             tool_registry=self.tool_manager.get_registry(),
             emotion_manager=self.emotion_mgr,
@@ -220,19 +217,6 @@ class RuntimeHost:
             **assistant_fields,
         )
         self.thread_store.save(thread)
-        self._persist_short_term_turn(
-            session_id=key,
-            turn_id=turn_id,
-            message_id=message_id,
-            user_content=user_content,
-            user_created_at=msg.timestamp.isoformat(),
-            assistant_content=[{"type": "text", "text": content}],
-            assistant_created_at=assistant_timestamp,
-            right_messages=right_messages,
-            final_state=final_state,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-        )
         self._save_proactive_target(msg.channel, msg.chat_id)
         return OutboundMessage(
             channel=msg.channel,
@@ -280,7 +264,7 @@ class RuntimeHost:
     async def generate_proactive_message(self, prompt: str) -> str:
         """Generate a proactive user-facing message without entering the task pipeline."""
         fallback = "刚刚想到你了，就来打个招呼。"
-        model = self.left_brain_llm
+        model = self.main_brain_llm
         if model is None:
             return fallback
         try:
@@ -361,13 +345,13 @@ class RuntimeHost:
         latest_task = self.kernel.latest_task_for_session(session_id, include_terminal=True)
         if latest_task is not None and latest_task.turn_id == turn.turn_id:
             task_action = "create_task"
-        execution_summary = "left/runtime kernel completed turn dispatch"
+        execution_summary = "main_brain/runtime kernel completed turn dispatch"
 
         final_state: dict[str, Any] = {
             "turn_id": turn.turn_id,
             "output": message,
             "execution_summary": execution_summary,
-            "left_brain": {
+            "main_brain": {
                 "task_action": task_action,
                 "execution_summary": execution_summary,
                 "reply_event_type": turn.event_type,
@@ -404,26 +388,26 @@ class RuntimeHost:
             "source": source,
         }
 
-        left_brain_info = final_state.get("left_brain", {})
+        main_brain_info = final_state.get("main_brain", {})
         execution_summary = final_state.get("execution_summary", "")
-        task_action = str(left_brain_info.get("task_action", "none") or "none").strip() or "none"
+        task_action = str(main_brain_info.get("task_action", "none") or "none").strip() or "none"
         if task_action != "none":
             summary = str(execution_summary or final_state.get("output", "") or "").strip()
-            left_brain_record = {
+            main_brain_record = {
                 **base_record,
                 "job_id": str(((final_state.get("task") or {}).get("task_id", "") if isinstance(final_state.get("task"), dict) else "") or "").strip(),
                 "event_type": "job_requested",
                 "content": summary,
                 "metadata": {
-                    "left_brain": {
+                    "main_brain": {
                         "task_action": task_action,
-                        "reply_event_type": left_brain_info.get("reply_event_type", ""),
-                        "turn_id": left_brain_info.get("turn_id", ""),
+                        "reply_event_type": main_brain_info.get("reply_event_type", ""),
+                        "turn_id": main_brain_info.get("turn_id", ""),
                         "execution_summary": execution_summary,
                     }
                 },
             }
-            records.append(left_brain_record)
+            records.append(main_brain_record)
 
         task_info = final_state.get("task")
         if task_info:
@@ -504,29 +488,30 @@ class RuntimeHost:
         request = task.request.model_dump(exclude_none=True)
         params = self._compact_task_spec_for_session(request)
         task_view = self.kernel.session_runtime.task_view(session_id, task.task_id)
+        state = task.state.value
+        summary = str(task.summary or task.last_progress or "").strip()
+        stage = str(task.last_progress or "").strip()
         if task_view is not None:
-            return self._compact_task_state_for_session(
-                project_task_from_session_view(
-                    task_view,
-                    params=params,
-                )
-            )
+            state = str(task_view.status or state).strip() or state
+            if task_view.current_chunk is not None:
+                stage = str(task_view.current_chunk.title or stage).strip() or stage
+            if task_view.last_user_visible_update:
+                summary = str(task_view.last_user_visible_update or "").strip() or summary
+            elif task_view.recent_observations:
+                summary = str(task_view.recent_observations[-1] or "").strip() or summary
         return self._compact_task_state_for_session(
-            project_task_from_runtime_snapshot(
-                {
-                    "task_id": task.task_id,
-                    "state": task.state.value,
-                    "result": task.result,
-                    "state_version": task.state_version,
-                    "title": task.title,
-                    "summary": task.summary,
-                    "error": task.error,
-                    "last_progress": task.last_progress,
-                    "updated_at": task.updated_at,
-                },
-                params=params,
-                trace=list(task.trace_log),
-            )
+            {
+                "invoked": True,
+                "task_id": task.task_id,
+                "title": str(task_view.title if task_view is not None else task.title or "").strip(),
+                "state": state,
+                "result": str(task.result or "").strip() or "none",
+                "summary": summary,
+                "error": str(task.error or "").strip(),
+                "stage": stage,
+                "task_trace": [item for item in list(task.trace_log) if isinstance(item, dict)],
+                "params": params,
+            }
         )
 
     @staticmethod
@@ -616,9 +601,9 @@ class RuntimeHost:
                 if summary:
                     return summary
 
-            left_brain = metadata.get("left_brain", {})
-            if isinstance(left_brain, dict):
-                return str(left_brain.get("execution_summary", "") or "").strip()
+            main_brain = metadata.get("main_brain", {})
+            if isinstance(main_brain, dict):
+                return str(main_brain.get("execution_summary", "") or "").strip()
 
         return ""
 
@@ -677,68 +662,10 @@ class RuntimeHost:
         )
         self.thread_store.save(thread)
 
-    def _persist_short_term_turn(
-        self,
-        *,
-        session_id: str,
-        turn_id: str,
-        message_id: str,
-        user_content: list[dict[str, Any]],
-        user_created_at: str,
-        assistant_content: list[dict[str, Any]],
-        assistant_created_at: str,
-        right_messages: list[dict[str, Any]],
-        final_state: dict[str, Any],
-        channel: str,
-        chat_id: str,
-    ) -> None:
-        summary = str(final_state.get("output", "") or "").strip()
-        task = final_state.get("task") if isinstance(final_state.get("task"), dict) else {}
-        detail = str(task.get("summary", "") or summary).strip() or summary
-        raw_messages = [
-            {
-                "role": "user",
-                "content": user_content,
-                "session_id": session_id,
-                "turn_id": turn_id,
-                "message_id": message_id,
-                "created_at": user_created_at,
-            },
-            {
-                "role": "assistant",
-                "content": assistant_content,
-                "session_id": session_id,
-                "turn_id": turn_id,
-                "message_id": message_id,
-                "created_at": assistant_created_at,
-            },
-            *right_messages,
-        ]
-        self.short_term_store.append_entries(
-            session_id,
-            [
-                {
-                    "turn_id": turn_id,
-                    "memory_type": "turn_summary",
-                    "summary": summary,
-                    "detail": detail,
-                    "raw_messages": raw_messages,
-                    "source_event_ids": [turn_id] if turn_id else [],
-                    "ttl_seconds": 24 * 3600,
-                    "metadata": {
-                        "channel": channel,
-                        "chat_id": chat_id,
-                        "task": task,
-                    },
-                }
-            ],
-        )
-
     def _reset_session_thread(self, session_id: str) -> None:
         thread = self.thread_store.get_or_create(session_id)
         thread.clear()
         self.thread_store.clear_right_messages(thread.thread_id)
-        self.short_term_store.clear(thread.thread_id)
         self.thread_store.save(thread)
         self.thread_store.invalidate(thread.thread_id)
 

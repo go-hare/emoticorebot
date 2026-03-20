@@ -1,4 +1,4 @@
-"""Append-only long-term memory store."""
+"""Append-only formal memory store."""
 
 from __future__ import annotations
 
@@ -42,14 +42,8 @@ class MemoryStore:
         return path
 
     @property
-    def long_term_dir(self) -> Path:
-        path = self.memory_dir / "long_term"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    @property
     def path(self) -> Path:
-        return self.long_term_dir / "memory.jsonl"
+        return self.memory_dir / "memory.jsonl"
 
     def read_all(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -163,7 +157,7 @@ class MemoryStore:
         self._record_vector_accesses(records=selected, vector_scores=vector_scores, vector_index=vector_index)
         return selected
 
-    def build_left_brain_context(self, *, query: str, limit: int = 8) -> str:
+    def build_main_brain_context(self, *, query: str, limit: int = 8) -> str:
         records = self.query(query, memory_types=tuple(BRAIN_MEMORY_TYPES), limit=limit)
         if not records:
             return ""
@@ -233,7 +227,7 @@ class MemoryStore:
         ).strip()
 
         normalized = {
-            "schema_version": "memory.long_term.v1",
+            "schema_version": "memory.record.v1",
             "memory_id": memory_id,
             "user_id": user_id,
             "session_id": session_id,
