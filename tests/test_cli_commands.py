@@ -8,15 +8,15 @@ from pathlib import Path
 from emoticorebot.cli import commands
 from emoticorebot.cli.commands import _is_one_shot_task_settled, _pick_one_shot_task_id
 from emoticorebot.config.schema import Config
+from emoticorebot.execution.state import ExecutionState
+from emoticorebot.execution.store import ExecutionRecord, ExecutionStore
 from emoticorebot.protocol.events import DeliveryTargetPayload
 from emoticorebot.protocol.task_models import TaskRequestSpec
-from emoticorebot.right_brain.state import RightBrainState
-from emoticorebot.right_brain.store import RightBrainRecord, RightBrainStore
 from emoticorebot.runtime.transport_bus import OutboundMessage
 
 
-def _task(task_id: str, *, state: RightBrainState, updated_at: str = "2026-03-16T00:00:00Z", state_version: int = 1):
-    return RightBrainRecord(
+def _task(task_id: str, *, state: ExecutionState, updated_at: str = "2026-03-16T00:00:00Z", state_version: int = 1):
+    return ExecutionRecord(
         task_id=task_id,
         session_id="cli:direct",
         turn_id="turn_1",
@@ -31,26 +31,26 @@ def _task(task_id: str, *, state: RightBrainState, updated_at: str = "2026-03-16
 
 
 def test_pick_one_shot_task_id_prefers_fallback() -> None:
-    store = RightBrainStore()
-    store.add(_task("task_new", state=RightBrainState.RUNNING))
+    store = ExecutionStore()
+    store.add(_task("task_new", state=ExecutionState.RUNNING))
     agent_loop = SimpleNamespace(kernel=SimpleNamespace(task_store=store))
 
     assert _pick_one_shot_task_id(agent_loop, "cli:direct", set(), "task_resume") == "task_resume"
 
 
 def test_pick_one_shot_task_id_returns_newest_new_task() -> None:
-    store = RightBrainStore()
-    store.add(_task("task_old", state=RightBrainState.DONE, updated_at="2026-03-16T00:00:00Z"))
-    store.add(_task("task_newer", state=RightBrainState.RUNNING, updated_at="2026-03-16T00:00:02Z"))
-    store.add(_task("task_newest", state=RightBrainState.RUNNING, updated_at="2026-03-16T00:00:03Z"))
+    store = ExecutionStore()
+    store.add(_task("task_old", state=ExecutionState.DONE, updated_at="2026-03-16T00:00:00Z"))
+    store.add(_task("task_newer", state=ExecutionState.RUNNING, updated_at="2026-03-16T00:00:02Z"))
+    store.add(_task("task_newest", state=ExecutionState.RUNNING, updated_at="2026-03-16T00:00:03Z"))
     agent_loop = SimpleNamespace(kernel=SimpleNamespace(task_store=store))
 
     assert _pick_one_shot_task_id(agent_loop, "cli:direct", {"task_old"}, None) == "task_newest"
 
 
 def test_is_one_shot_task_settled_accepts_terminal_only() -> None:
-    done = _task("task_done", state=RightBrainState.DONE)
-    running = _task("task_running", state=RightBrainState.RUNNING)
+    done = _task("task_done", state=ExecutionState.DONE)
+    running = _task("task_running", state=ExecutionState.RUNNING)
     tasks = {
         done.task_id: done,
         running.task_id: running,
@@ -62,7 +62,7 @@ def test_is_one_shot_task_settled_accepts_terminal_only() -> None:
 
 
 def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -> None:
-    store = RightBrainStore()
+    store = ExecutionStore()
     streamed_chunks: list[str] = []
     printed_responses: list[str] = []
 
@@ -70,8 +70,8 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
         workspace_path=tmp_path,
         agents=SimpleNamespace(
             defaults=SimpleNamespace(
-                right_brain_mode=SimpleNamespace(memory_window=0),
-                left_brain_mode=SimpleNamespace(memory_window=0),
+                execution_mode=SimpleNamespace(memory_window=0),
+                main_brain_mode=SimpleNamespace(memory_window=0),
             )
         ),
         providers=None,
@@ -106,7 +106,7 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
             message_id: str | None,
         ) -> str:
             assert deliver is True
-            task = _task("task_streamed", state=RightBrainState.RUNNING)
+            task = _task("task_streamed", state=ExecutionState.RUNNING)
             task.session_id = session_key
             store.add(task)
             await self._bus.publish_outbound(
@@ -138,7 +138,7 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
                 )
             )
             await asyncio.sleep(0)
-            task.state = RightBrainState.DONE
+            task.state = ExecutionState.DONE
             task.touch()
             await self._bus.publish_outbound(
                 OutboundMessage(
@@ -188,7 +188,7 @@ def test_agent_one_shot_prints_task_result_after_stream(monkeypatch, tmp_path) -
     assert printed_responses == ["任务已完成。"]
 
 
-def test_status_prints_left_brain_and_right_brain_models(monkeypatch, tmp_path) -> None:
+def test_status_prints_main_brain_and_execution_models(monkeypatch, tmp_path) -> None:
     printed: list[str] = []
     config_path = Path(tmp_path) / "config.json"
     config_path.write_text("{}", encoding="utf-8")
@@ -199,12 +199,5 @@ def test_status_prints_left_brain_and_right_brain_models(monkeypatch, tmp_path) 
 
     commands.status()
 
-    assert any("Left Brain Model: anthropic/claude-opus-4-5" in line for line in printed)
-    assert any("Right Brain Model: anthropic/claude-opus-4-5" in line for line in printed)
-
-
-def test_interactive_console_disables_ansi_sequences() -> None:
-    interactive_console = commands._interactive_console()
-
-    assert interactive_console.color_system is None
-    assert interactive_console.no_color is True
+    assert any("Main Brain Model: anthropic/claude-opus-4-5" in line for line in printed)
+    assert any("Execution Model: anthropic/claude-opus-4-5" in line for line in printed)

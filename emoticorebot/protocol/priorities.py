@@ -1,4 +1,4 @@
-"""Priority model for the v3 runtime bus."""
+"""Priority model for the runtime bus."""
 
 from __future__ import annotations
 
@@ -22,15 +22,15 @@ PRIORITY_BY_EVENT_TYPE: dict[str, EventPriority] = {
     EventType.INPUT_STREAM_CHUNK: EventPriority.P1,
     EventType.INPUT_STREAM_COMMITTED: EventPriority.P1,
     EventType.INPUT_STREAM_INTERRUPTED: EventPriority.P0,
-    EventType.LEFT_COMMAND_REPLY_REQUESTED: EventPriority.P1,
-    EventType.LEFT_EVENT_REPLY_READY: EventPriority.P1,
-    EventType.LEFT_EVENT_STREAM_DELTA_READY: EventPriority.P1,
-    EventType.LEFT_EVENT_FOLLOWUP_READY: EventPriority.P1,
-    EventType.RIGHT_COMMAND_JOB_REQUESTED: EventPriority.P1,
-    EventType.RIGHT_EVENT_JOB_ACCEPTED: EventPriority.P2,
-    EventType.RIGHT_EVENT_PROGRESS: EventPriority.P2,
-    EventType.RIGHT_EVENT_JOB_REJECTED: EventPriority.P2,
-    EventType.RIGHT_EVENT_RESULT_READY: EventPriority.P2,
+    EventType.MAIN_BRAIN_COMMAND_REPLY_REQUESTED: EventPriority.P1,
+    EventType.MAIN_BRAIN_EVENT_REPLY_READY: EventPriority.P1,
+    EventType.MAIN_BRAIN_EVENT_STREAM_DELTA_READY: EventPriority.P1,
+    EventType.MAIN_BRAIN_EVENT_FOLLOWUP_READY: EventPriority.P1,
+    EventType.EXECUTION_COMMAND_TASK_REQUESTED: EventPriority.P1,
+    EventType.EXECUTION_EVENT_TASK_ACCEPTED: EventPriority.P2,
+    EventType.EXECUTION_EVENT_PROGRESS: EventPriority.P2,
+    EventType.EXECUTION_EVENT_TASK_REJECTED: EventPriority.P2,
+    EventType.EXECUTION_EVENT_RESULT_READY: EventPriority.P2,
     EventType.OUTPUT_INLINE_READY: EventPriority.P2,
     EventType.OUTPUT_PUSH_READY: EventPriority.P2,
     EventType.OUTPUT_STREAM_OPEN: EventPriority.P2,
@@ -47,4 +47,3 @@ def priority_for(event_type: EventType | str) -> EventPriority:
 
 
 __all__ = ["EventPriority", "PRIORITY_BY_EVENT_TYPE", "priority_for"]
-

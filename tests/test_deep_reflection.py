@@ -17,7 +17,7 @@ def test_cognitive_event_recent_prefers_latest_timestamp() -> None:
         workspace = Path(tmp_dir)
         older = CognitiveEvent(
             id="evt_old",
-            version="3",
+            schema_version="cognitive_event.v1",
             timestamp="2026-03-14T16:00:00+08:00",
             session_id="cli:direct",
             turn_id="turn_old",
@@ -27,7 +27,7 @@ def test_cognitive_event_recent_prefers_latest_timestamp() -> None:
         )
         newer = CognitiveEvent(
             id="evt_new",
-            version="3",
+            schema_version="cognitive_event.v1",
             timestamp="2026-03-14T17:00:00+08:00",
             session_id="cli:direct",
             turn_id="turn_new",
@@ -107,7 +107,7 @@ def test_deep_reflection_event_block_includes_updates_and_state() -> None:
                 "timestamp": "2026-03-14T17:00:00+08:00",
                 "user_input": "你好",
                 "assistant_output": "你好。",
-                "left_brain_state": {
+                "main_brain_state": {
                     "emotion": "开心",
                     "pad": {"pleasure": 0.7, "arousal": 0.4, "dominance": 0.5},
                     "drives": {"social": 60.0, "energy": 80.0},
@@ -122,8 +122,8 @@ def test_deep_reflection_event_block_includes_updates_and_state() -> None:
                         "should_apply": False,
                         "confidence": 0.7,
                         "reason": "当前状态合理。",
-                        "pad_delta": {"pleasure": 0.7, "arousal": 0.4, "dominance": 0.5},
-                        "drives_delta": {"social": 60.0, "energy": 80.0},
+                        "pad_state": {"pleasure": 0.7, "arousal": 0.4, "dominance": 0.5},
+                        "drives_state": {"social": 60.0, "energy": 80.0},
                     },
                 },
                 "task": {"status": "done"},

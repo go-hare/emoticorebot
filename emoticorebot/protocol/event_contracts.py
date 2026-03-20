@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from .commands import (
-    ControlCommandPayload,
-    LeftReplyRequestPayload,
-    RightBrainJobRequestPayload,
-)
+from .commands import ControlCommandPayload, ExecutionTaskRequestPayload, MainBrainReplyRequestPayload
 from .events import (
     DeliveryFailedPayload,
-    LeftFollowupReadyPayload,
-    LeftReplyReadyPayload,
-    LeftStreamDeltaPayload,
+    ExecutionAcceptedPayload,
+    ExecutionProgressPayload,
+    ExecutionRejectedPayload,
+    ExecutionResultPayload,
+    MainBrainFollowupReadyPayload,
+    MainBrainReplyReadyPayload,
+    MainBrainStreamDeltaPayload,
     OutputInlineReadyPayload,
     OutputPushReadyPayload,
     OutputStreamClosePayload,
@@ -19,10 +19,6 @@ from .events import (
     OutputStreamOpenPayload,
     PerceptionEventPayload,
     RepliedPayload,
-    RightBrainAcceptedPayload,
-    RightBrainProgressPayload,
-    RightBrainRejectedPayload,
-    RightBrainResultPayload,
     StreamChunkPayload,
     StreamCommitPayload,
     StreamInterruptedPayload,
@@ -30,7 +26,7 @@ from .events import (
     SystemSignalPayload,
     TurnInputPayload,
 )
-from .reflection_models import ReflectionUpdatePayload, ReflectionWriteCommittedPayload, ReflectionWriteRequestPayload, ReflectionSignalPayload
+from .reflection_models import ReflectionSignalPayload, ReflectionUpdatePayload, ReflectionWriteCommittedPayload, ReflectionWriteRequestPayload
 from .task_models import ProtocolModel
 from .topics import EventType
 
@@ -40,15 +36,15 @@ PAYLOAD_MODEL_BY_EVENT_TYPE: dict[str, type[ProtocolModel]] = {
     EventType.INPUT_STREAM_CHUNK: StreamChunkPayload,
     EventType.INPUT_STREAM_COMMITTED: StreamCommitPayload,
     EventType.INPUT_STREAM_INTERRUPTED: StreamInterruptedPayload,
-    EventType.LEFT_COMMAND_REPLY_REQUESTED: LeftReplyRequestPayload,
-    EventType.LEFT_EVENT_REPLY_READY: LeftReplyReadyPayload,
-    EventType.LEFT_EVENT_STREAM_DELTA_READY: LeftStreamDeltaPayload,
-    EventType.LEFT_EVENT_FOLLOWUP_READY: LeftFollowupReadyPayload,
-    EventType.RIGHT_COMMAND_JOB_REQUESTED: RightBrainJobRequestPayload,
-    EventType.RIGHT_EVENT_JOB_ACCEPTED: RightBrainAcceptedPayload,
-    EventType.RIGHT_EVENT_PROGRESS: RightBrainProgressPayload,
-    EventType.RIGHT_EVENT_JOB_REJECTED: RightBrainRejectedPayload,
-    EventType.RIGHT_EVENT_RESULT_READY: RightBrainResultPayload,
+    EventType.MAIN_BRAIN_COMMAND_REPLY_REQUESTED: MainBrainReplyRequestPayload,
+    EventType.MAIN_BRAIN_EVENT_REPLY_READY: MainBrainReplyReadyPayload,
+    EventType.MAIN_BRAIN_EVENT_STREAM_DELTA_READY: MainBrainStreamDeltaPayload,
+    EventType.MAIN_BRAIN_EVENT_FOLLOWUP_READY: MainBrainFollowupReadyPayload,
+    EventType.EXECUTION_COMMAND_TASK_REQUESTED: ExecutionTaskRequestPayload,
+    EventType.EXECUTION_EVENT_TASK_ACCEPTED: ExecutionAcceptedPayload,
+    EventType.EXECUTION_EVENT_PROGRESS: ExecutionProgressPayload,
+    EventType.EXECUTION_EVENT_TASK_REJECTED: ExecutionRejectedPayload,
+    EventType.EXECUTION_EVENT_RESULT_READY: ExecutionResultPayload,
     EventType.REFLECTION_LIGHT: ReflectionSignalPayload,
     EventType.REFLECTION_DEEP: ReflectionSignalPayload,
     EventType.OUTPUT_INLINE_READY: OutputInlineReadyPayload,
@@ -93,5 +89,3 @@ __all__ = [
     "is_known_event_type",
     "payload_model_for_event",
 ]
-
-

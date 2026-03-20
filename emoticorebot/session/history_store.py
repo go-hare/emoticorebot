@@ -139,9 +139,9 @@ def normalize_message_payload(message: dict[str, Any], *, default_message_id: st
     if isinstance(namespace, list) and namespace:
         payload["namespace"] = [str(item).strip() for item in namespace if str(item).strip()]
 
-    left_brain = message.get("left_brain")
-    if isinstance(left_brain, dict) and left_brain:
-        payload["left_brain"] = left_brain
+    main_brain = message.get("main_brain")
+    if isinstance(main_brain, dict) and main_brain:
+        payload["main_brain"] = main_brain
 
     metadata = message.get("metadata")
     if not isinstance(metadata, dict):

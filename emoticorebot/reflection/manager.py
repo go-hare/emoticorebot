@@ -27,7 +27,7 @@ class TurnReflectionProposal:
 
 
 class ReflectionManager:
-    """Runs reflection services and commits approved memory writes."""
+    """Runs reflection services and commits deep-reflection memory writes."""
 
     _SKILL_MEMORY_SUBTYPES = {"skill_hint", "skill"}
 
@@ -70,11 +70,6 @@ class ReflectionManager:
             emotion=reflection_input["emotion"],
             execution=execution,
             source_type=str(reflection_input.get("source_type", "user_turn") or "user_turn"),
-            task=reflection_input.get("task") if isinstance(reflection_input.get("task"), dict) else {},
-            task_trace=[
-                item for item in list(reflection_input.get("task_trace", []) or []) if isinstance(item, dict)
-            ],
-            metadata=reflection_input.get("metadata") if isinstance(reflection_input.get("metadata"), dict) else {},
         )
         turn_reflection = dict(result.turn_reflection)
         cognitive_events = CognitiveEvent.build_turn_events(
@@ -101,28 +96,25 @@ class ReflectionManager:
         *,
         event_ids: list[str],
     ) -> list[str]:
-        records = self._prepare_turn_memory_candidates(
-            reflection_input=proposal.reflection_input,
-            turn_reflection=proposal.turn_reflection,
-            event_ids=event_ids,
-        )
-        if not records:
-            return []
-        return self._memory_store.append_many(records)
+        del proposal, event_ids
+        return []
 
     async def propose_deep(self, *, events: list[dict[str, Any]]) -> DeepReflectionProposal:
         return await self._deep_reflection.propose(events)
 
     def append_deep_memories(self, proposal: DeepReflectionProposal) -> DeepReflectionResult:
         records = [
-            *list(proposal.memory_candidates),
-            *self._build_deep_update_records(target="user_model", updates=proposal.user_updates),
-            *self._build_deep_update_records(target="persona", updates=proposal.soul_updates),
+            {
+                **dict(record),
+                "source_module": str(record.get("source_module", "") or "reflection_governor.deep_reflection"),
+            }
+            for record in proposal.memory_candidates
+            if isinstance(record, dict)
         ]
         memory_ids = self._memory_store.append_many(records)
         skill_hint_count = sum(
             1
-            for record in proposal.memory_candidates
+            for record in records
             if str((record.get("metadata", {}) or {}).get("subtype", "") or "").strip() in self._SKILL_MEMORY_SUBTYPES
         )
         materialization = self._skill_materializer.materialize_from_memory()
@@ -139,48 +131,6 @@ class ReflectionManager:
             soul_updates=list(proposal.soul_updates),
         )
 
-    @staticmethod
-    def _build_deep_update_records(*, target: str, updates: list[str]) -> list[dict[str, Any]]:
-        normalized = ReflectionManager._normalize_text_list(updates)
-        if not normalized:
-            return []
-
-        if target == "user_model":
-            memory_type = "user_model"
-            confidence = 0.86
-            stability = 0.9
-            tags = ["user_model", "deep_reflection"]
-            subtype = "user_model"
-            importance = 7
-        else:
-            memory_type = "persona"
-            confidence = 0.84
-            stability = 0.92
-            tags = ["persona", "deep_reflection"]
-            subtype = "persona"
-            importance = 7
-
-        records: list[dict[str, Any]] = []
-        for text in normalized:
-            records.append(
-                {
-                    "memory_type": memory_type,
-                    "summary": text,
-                    "detail": text,
-                    "confidence": confidence,
-                    "stability": stability,
-                    "tags": tags,
-                    "source_module": "reflection_governor.deep_reflection",
-                    "metadata": {
-                        "subtype": subtype,
-                        "importance": importance,
-                        "scope": "deep",
-                        "source": "deep_reflection_updates",
-                    },
-                }
-            )
-        return records
-
     def recent_cognitive_events(self, *, limit: int) -> list[dict[str, Any]]:
         return CognitiveEvent.recent(self._workspace, limit=limit)
 
@@ -192,13 +142,13 @@ class ReflectionManager:
 
     def _build_reflection_input(self, *, signal: BusEnvelope[ReflectionSignalPayload]) -> ReflectionInput:
         metadata = signal.payload.metadata if isinstance(signal.payload.metadata, dict) else {}
-        right_brain = self._build_right_brain_input(signal=signal, metadata=metadata)
-        if right_brain:
-            return right_brain
+        execution = self._build_execution_reflection_input(signal=signal, metadata=metadata)
+        if execution:
+            return execution
 
-        return self._build_left_reflection_input(signal=signal, metadata=metadata)
+        return self._build_main_brain_reflection_input(signal=signal, metadata=metadata)
 
-    def _build_left_reflection_input(
+    def _build_main_brain_reflection_input(
         self,
         *,
         signal: BusEnvelope[ReflectionSignalPayload],
@@ -220,13 +170,13 @@ class ReflectionManager:
             raw["turn_id"] = signal.turn_id
         return build_reflection_input(raw)
 
-    def _build_right_brain_input(
+    def _build_execution_reflection_input(
         self,
         *,
         signal: BusEnvelope[ReflectionSignalPayload],
         metadata: Mapping[str, Any],
     ) -> ReflectionInput:
-        payload = metadata.get("right_brain_summary")
+        payload = metadata.get("execution_summary")
         if not isinstance(payload, Mapping):
             return {}
 
@@ -275,7 +225,7 @@ class ReflectionManager:
                 "source_event_type": summary.get("source_event_type"),
                 "decision": summary.get("decision"),
                 "result": result,
-            "reflection_reason": str(signal.payload.reason or ""),
+                "reflection_reason": str(signal.payload.reason or ""),
                 "recent_turns": recent_turns,
                 "short_term_memory": short_term,
                 "long_term_memory": long_term,
@@ -286,122 +236,6 @@ class ReflectionManager:
             },
         }
         return build_reflection_input(raw)
-
-    def _prepare_turn_memory_candidates(
-        self,
-        *,
-        reflection_input: ReflectionInput,
-        turn_reflection: dict[str, Any],
-        event_ids: list[str],
-    ) -> list[dict[str, Any]]:
-        candidates = turn_reflection.get("memory_candidates") if isinstance(turn_reflection, dict) else []
-        if not isinstance(candidates, list):
-            return []
-
-        session_id = str(reflection_input.get("session_id", "") or "")
-        turn_id = str(reflection_input.get("turn_id", "") or "").strip()
-        tool_names = self._extract_tool_names(reflection_input)
-
-        prepared: list[dict[str, Any]] = []
-        for item in candidates:
-            if not isinstance(item, dict):
-                continue
-            summary = str(item.get("summary", "") or "").strip()
-            detail = str(item.get("detail", "") or "").strip()
-            if not summary and not detail:
-                continue
-            prepared.append(
-                {
-                    **item,
-                    "session_id": session_id,
-                    "memory_type": str(item.get("memory_type", "") or "").strip() or "reflection",
-                    "detail": detail or summary,
-                    "source_module": "reflection_governor.turn_reflection",
-                    "source_event_ids": list(event_ids),
-                    "evidence_messages": self._evidence_messages(reflection_input),
-                    "metadata": {
-                        **dict(item.get("metadata", {}) or {}),
-                        "tool_names": tool_names,
-                    },
-                }
-            )
-        return prepared
-
-    @staticmethod
-    def _evidence_messages(reflection_input: ReflectionInput) -> list[dict[str, Any]]:
-        evidence: list[dict[str, Any]] = []
-
-        user_input = str(reflection_input.get("user_input", "") or "").strip()
-        if user_input:
-            evidence.append(
-                {
-                    "role": "user",
-                    "content": user_input,
-                    "content_blocks": [{"type": "text", "text": user_input}],
-                    "session_id": str(reflection_input.get("session_id", "") or ""),
-                    "turn_id": str(reflection_input.get("turn_id", "") or ""),
-                    "message_id": str(reflection_input.get("message_id", "") or ""),
-                }
-            )
-
-        assistant_output = str(
-            reflection_input.get("assistant_output", "") or reflection_input.get("output", "") or ""
-        ).strip()
-        if assistant_output:
-            evidence.append(
-                {
-                    "role": "assistant",
-                    "content": assistant_output,
-                    "content_blocks": [{"type": "text", "text": assistant_output}],
-                    "session_id": str(reflection_input.get("session_id", "") or ""),
-                    "turn_id": str(reflection_input.get("turn_id", "") or ""),
-                    "message_id": str(reflection_input.get("message_id", "") or ""),
-                }
-            )
-
-        recent_turns = []
-        metadata = reflection_input.get("metadata") if isinstance(reflection_input.get("metadata"), dict) else {}
-        if isinstance(metadata.get("recent_turns"), list):
-            recent_turns = list(metadata.get("recent_turns") or [])
-        for item in recent_turns:
-            if not isinstance(item, dict):
-                continue
-            content = str(item.get("content", "") or "").strip()
-            if not content:
-                continue
-            evidence.append(
-                {
-                    "role": str(item.get("role", "") or "").strip() or "assistant",
-                    "content": content,
-                    "content_blocks": [{"type": "text", "text": content}],
-                    "session_id": str(reflection_input.get("session_id", "") or ""),
-                    "turn_id": str(reflection_input.get("turn_id", "") or ""),
-                    "message_id": str(item.get("message_id", "") or reflection_input.get("message_id", "") or ""),
-                }
-            )
-        return evidence[:6]
-
-    @staticmethod
-    def _extract_tool_names(reflection_input: ReflectionInput) -> list[str]:
-        names: list[str] = []
-        for item in list(reflection_input.get("task_trace", []) or []):
-            if not isinstance(item, dict):
-                continue
-            containers: list[Mapping[str, Any]] = [item]
-            nested = item.get("data")
-            if isinstance(nested, Mapping):
-                containers.append(nested)
-            for container in containers:
-                for key in ("tool_name", "tool", "name", "node"):
-                    value = str(container.get(key, "") or "").strip()
-                    if value and value not in names:
-                        names.append(value)
-            payload = nested.get("payload") if isinstance(nested, Mapping) else None
-            if isinstance(payload, Mapping):
-                value = str(payload.get("tool_name", "") or "").strip()
-                if value and value not in names:
-                    names.append(value)
-        return names[:6]
 
     @staticmethod
     def _normalize_text_list(value: object) -> list[str]:
@@ -450,4 +284,6 @@ class ReflectionManager:
 
 
 __all__ = ["ReflectionManager", "TurnReflectionProposal"]
+
+
 

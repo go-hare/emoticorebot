@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from .contracts import RightBrainDecision, RightBrainJobAction
+from .contracts import ExecutionDecision, ExecutionTaskAction
 from .events import DeliveryTargetPayload, TurnInputPayload
 from .task_models import ControlParameters, ProtocolModel
 
@@ -14,17 +14,17 @@ ControlAction = Literal["speak", "move", "stop", "manipulate"]
 
 
 FollowupSourceEvent = Literal[
-    "right.event.job_accepted",
-    "right.event.progress",
-    "right.event.result_ready",
-    "right.event.job_rejected",
+    "execution.event.task_accepted",
+    "execution.event.progress",
+    "execution.event.result_ready",
+    "execution.event.task_rejected",
 ]
 
 
 class FollowupContextPayload(ProtocolModel):
     source_event: FollowupSourceEvent
     job_id: str
-    decision: RightBrainDecision
+    decision: ExecutionDecision
     stage: str | None = None
     summary: str | None = None
     progress: float | None = None
@@ -35,22 +35,22 @@ class FollowupContextPayload(ProtocolModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class LeftReplyRequestPayload(ProtocolModel):
+class MainBrainReplyRequestPayload(ProtocolModel):
     request_id: str
     turn_input: TurnInputPayload | None = None
     followup_context: FollowupContextPayload | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_source(self) -> "LeftReplyRequestPayload":
+    def validate_source(self) -> "MainBrainReplyRequestPayload":
         if (self.turn_input is None) == (self.followup_context is None):
-            raise ValueError("left reply requests require exactly one of turn_input or followup_context")
+            raise ValueError("main brain reply requests require exactly one of turn_input or followup_context")
         return self
 
 
-class RightBrainJobRequestPayload(ProtocolModel):
+class ExecutionTaskRequestPayload(ProtocolModel):
     job_id: str
-    job_action: RightBrainJobAction
+    job_action: ExecutionTaskAction
     job_kind: str | None = None
     source_text: str | None = None
     request_text: str | None = None
@@ -74,8 +74,8 @@ class ControlCommandPayload(ProtocolModel):
 __all__ = [
     "ControlAction",
     "ControlCommandPayload",
+    "ExecutionTaskAction",
+    "ExecutionTaskRequestPayload",
     "FollowupContextPayload",
-    "LeftReplyRequestPayload",
-    "RightBrainJobAction",
-    "RightBrainJobRequestPayload",
+    "MainBrainReplyRequestPayload",
 ]

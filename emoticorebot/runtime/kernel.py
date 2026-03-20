@@ -10,8 +10,9 @@ from uuid import uuid4
 from emoticorebot.bus.pubsub import PriorityPubSubBus
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.delivery.runtime import DeliveryRuntime
+from emoticorebot.execution.runtime import ExecutionRuntime
 from emoticorebot.input.normalizer import InputNormalizer
-from emoticorebot.left_brain.runtime import LeftBrainRuntime
+from emoticorebot.main_brain.runtime import MainBrainFrontLoop
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.output.runtime import OutputRuntime
 from emoticorebot.protocol.contracts import ChannelKind, InputKind, SessionMode
@@ -20,7 +21,6 @@ from emoticorebot.protocol.events import DeliveryFailedPayload, OutputReadyPaylo
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.reflection.persona import GovernedWriteResult
 from emoticorebot.reflection.runtime import ReflectionRuntime
-from emoticorebot.right_brain.runtime import RightBrainRuntime
 from emoticorebot.runtime.transport_bus import TransportBus
 from emoticorebot.session.runtime import SessionRuntime
 
@@ -42,15 +42,15 @@ class _OpenInputStream:
 
 
 class RuntimeKernel:
-    """Owns the documented left/right/runtime/reflection/delivery event graph."""
+    """Owns the main_brain/execution/reflection/delivery event graph."""
 
     def __init__(
         self,
         *,
         workspace: Path,
         transport: TransportBus | None = None,
-        left_brain_llm: object | None = None,
-        executor_llm: object | None = None,
+        main_brain_llm: object | None = None,
+        execution_llm: object | None = None,
         reflection_llm: object | None = None,
         context_builder: object | None = None,
         tool_registry: object | None = None,
@@ -58,21 +58,21 @@ class RuntimeKernel:
         memory_config: MemoryConfig | None = None,
         providers_config: ProvidersConfig | None = None,
     ) -> None:
-        self._left_brain_llm = left_brain_llm
+        self._main_brain_llm = main_brain_llm
         self._context_builder = context_builder
         self._bus = PriorityPubSubBus()
         self._input_normalizer = InputNormalizer()
-        self._right_brain_runtime = RightBrainRuntime(
+        self._execution_runtime = ExecutionRuntime(
             bus=self._bus,
-            executor_llm=executor_llm,
+            executor_llm=execution_llm,
             context_builder=context_builder,
             tool_registry=tool_registry,
         )
-        self._session = SessionRuntime(bus=self._bus, task_store=self._right_brain_runtime.task_store)
-        self._left_brain = LeftBrainRuntime(
+        self._session = SessionRuntime(bus=self._bus, task_store=self._execution_runtime.task_store)
+        self._main_brain = MainBrainFrontLoop(
             bus=self._bus,
-            task_store=self._right_brain_runtime.task_store,
-            left_brain_llm=left_brain_llm,
+            task_store=self._execution_runtime.task_store,
+            main_brain_llm=main_brain_llm,
             context_builder=context_builder,
             session_runtime=self._session,
         )
@@ -94,8 +94,8 @@ class RuntimeKernel:
         self._started = False
 
         self._session.register()
-        self._right_brain_runtime.register()
-        self._left_brain.register()
+        self._execution_runtime.register()
+        self._main_brain.register()
         self._output_runtime = OutputRuntime(bus=self._bus)
         self._output_runtime.register()
         self._delivery_runtime = DeliveryRuntime(bus=self._bus, transport=transport, should_deliver=self._should_deliver_reply)
@@ -111,7 +111,7 @@ class RuntimeKernel:
 
     @property
     def task_store(self):
-        return self._right_brain_runtime.task_store
+        return self._execution_runtime.task_store
 
     @property
     def event_bus(self) -> PriorityPubSubBus:
@@ -122,12 +122,12 @@ class RuntimeKernel:
         return self._session
 
     @property
-    def right_brain_runtime(self) -> RightBrainRuntime:
-        return self._right_brain_runtime
+    def execution_runtime(self) -> ExecutionRuntime:
+        return self._execution_runtime
 
     @property
-    def left_brain_runtime(self) -> LeftBrainRuntime:
-        return self._left_brain
+    def main_brain_runtime(self) -> MainBrainFrontLoop:
+        return self._main_brain
 
     @property
     def reflection_runtime(self) -> ReflectionRuntime:
@@ -149,8 +149,8 @@ class RuntimeKernel:
         self._started = True
 
     async def stop(self) -> None:
-        await self._left_brain.stop()
-        await self._right_brain_runtime.stop()
+        await self._main_brain.stop()
+        await self._execution_runtime.stop()
         await self._reflection.stop()
         await self._bus.stop()
         self._close_context_builder()
@@ -170,8 +170,8 @@ class RuntimeKernel:
         metadata: dict[str, object] | None = None,
         timeout_s: float = 30.0,
     ) -> TurnReply:
-        if self._left_brain_llm is None:
-            raise RuntimeError("RuntimeKernel.handle_user_message requires left_brain_llm")
+        if self._main_brain_llm is None:
+            raise RuntimeError("RuntimeKernel.handle_user_message requires main_brain_llm")
         await self.start()
         turn_id = f"turn_{uuid4().hex[:12]}"
         key = (session_id, turn_id)
@@ -180,7 +180,7 @@ class RuntimeKernel:
         self._pending_turns[key] = future
         self._pending_turn_by_session[session_id] = turn_id
         self._active_turn_by_session[session_id] = turn_id
-        barge_in = bool(self._session.snapshot(session_id).active_reply_stream_id)
+        barge_in = self._session.has_active_reply_stream(session_id)
 
         payload_metadata = dict(metadata or {})
         payload_metadata["history_context"] = history_context
@@ -222,11 +222,10 @@ class RuntimeKernel:
         await self.start()
         stream_id = f"stream_{uuid4().hex[:12]}"
         key = (session_id, stream_id)
-        snapshot = self._session.snapshot(session_id)
         payload_metadata = dict(metadata or {})
         if history_context:
             payload_metadata["history_context"] = history_context
-        payload_metadata.setdefault("barge_in", bool(snapshot.active_reply_stream_id))
+        payload_metadata.setdefault("barge_in", self._session.has_active_reply_stream(session_id))
         self._open_input_streams[key] = _OpenInputStream(stream_id=stream_id)
         await self._bus.publish(
             self._input_normalizer.normalize_stream_start(
@@ -277,8 +276,8 @@ class RuntimeKernel:
         metadata: dict[str, object] | None = None,
         timeout_s: float = 30.0,
     ) -> TurnReply:
-        if self._left_brain_llm is None:
-            raise RuntimeError("RuntimeKernel.commit_user_stream requires left_brain_llm")
+        if self._main_brain_llm is None:
+            raise RuntimeError("RuntimeKernel.commit_user_stream requires main_brain_llm")
         await self.start()
         self._require_open_input_stream(session_id=session_id, stream_id=stream_id)
 

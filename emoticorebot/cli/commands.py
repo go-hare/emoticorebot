@@ -21,7 +21,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from emoticorebot import __version__, __logo__
 from emoticorebot.config.schema import Config
-from emoticorebot.right_brain.state import TERMINAL_STATES, RightBrainState
+from emoticorebot.execution.state import ExecutionState, TERMINAL_STATES
 
 app = typer.Typer(
     name="emoticorebot",
@@ -161,7 +161,7 @@ def _is_one_shot_task_settled(agent_loop: object, task_id: str | None) -> bool:
     if task is None:
         return False
 
-    return task.state in TERMINAL_STATES or task.state is RightBrainState.DONE
+    return task.state in TERMINAL_STATES or task.state is ExecutionState.DONE
 
 
 async def _await_one_shot_task_id(
@@ -341,8 +341,8 @@ def gateway(
     agent = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        right_brain_mode=config.agents.defaults.right_brain_mode,
-        left_brain_mode=config.agents.defaults.left_brain_mode,
+        execution_mode=config.agents.defaults.execution_mode,
+        main_brain_mode=config.agents.defaults.main_brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -449,8 +449,8 @@ def agent(
     agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        right_brain_mode=config.agents.defaults.right_brain_mode,
-        left_brain_mode=config.agents.defaults.left_brain_mode,
+        execution_mode=config.agents.defaults.execution_mode,
+        main_brain_mode=config.agents.defaults.main_brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -1072,8 +1072,8 @@ def cron_run(
     agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        right_brain_mode=config.agents.defaults.right_brain_mode,
-        left_brain_mode=config.agents.defaults.left_brain_mode,
+        execution_mode=config.agents.defaults.execution_mode,
+        main_brain_mode=config.agents.defaults.main_brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -1203,8 +1203,8 @@ def status():
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
     if config_path.exists():
-        console.print(f"Left Brain Model: {config.agents.defaults.left_brain_mode.model}")
-        console.print(f"Right Brain Model: {config.agents.defaults.right_brain_mode.model}")
+        console.print(f"Main Brain Model: {config.agents.defaults.main_brain_mode.model}")
+        console.print(f"Execution Model: {config.agents.defaults.execution_mode.model}")
 
 
 if __name__ == "__main__":

@@ -378,25 +378,25 @@ class EmotionStateManager:
     def apply_reflection_state_update(
         self,
         *,
-        pad_delta: dict[str, float] | None = None,
-        drive_delta: dict[str, float] | None = None,
+        pad_state: dict[str, float] | None = None,
+        drives_state: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         """Apply reflection-selected absolute state values through the state manager."""
         with self._lock:
             for attr in ("pleasure", "arousal", "dominance"):
-                if attr not in (pad_delta or {}):
+                if attr not in (pad_state or {}):
                     continue
                 try:
-                    value = float((pad_delta or {}).get(attr, getattr(self.pad, attr)) or 0.0)
+                    value = float((pad_state or {}).get(attr, getattr(self.pad, attr)) or 0.0)
                 except Exception:
                     continue
                 setattr(self.pad, attr, value)
 
             for attr in ("social", "energy"):
-                if attr not in (drive_delta or {}):
+                if attr not in (drives_state or {}):
                     continue
                 try:
-                    value = float((drive_delta or {}).get(attr, getattr(self.drive, attr)) or 0.0)
+                    value = float((drives_state or {}).get(attr, getattr(self.drive, attr)) or 0.0)
                 except Exception:
                     continue
                 setattr(self.drive, attr, value)
