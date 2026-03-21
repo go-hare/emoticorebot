@@ -69,14 +69,17 @@ class DeliveryService:
             return
 
         delivery_message_id = self._delivery_message_id(payload.content.reply_id)
+        close_without_body = stream_state in {"close", "superseded"} and bool(
+            reply_metadata.get("stream_close_without_body")
+        )
         outbound = OutboundMessage(
             channel=channel,
             chat_id=chat_id,
-            content=self._render_text(payload),
+            content="" if close_without_body else self._render_text(payload),
             message_id=delivery_message_id,
             reply_to=payload.content.reply_to_message_id or origin.message_id,
-            media=self._render_media(payload),
-            content_blocks=self._render_blocks(payload),
+            media=[] if close_without_body else self._render_media(payload),
+            content_blocks=[] if close_without_body else self._render_blocks(payload),
             metadata={
                 "reply_id": payload.content.reply_id,
                 "reply_kind": payload.content.kind,

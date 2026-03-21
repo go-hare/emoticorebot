@@ -77,6 +77,9 @@ class TaskRequestSpec(ProtocolModel):
     request: str
     title: str | None = None
     goal: str | None = None
+    mainline: list[Any] = Field(default_factory=list)
+    current_stage: str | list[str] | None = None
+    current_checks: list[str] = Field(default_factory=list)
     expected_output: str | None = None
     constraints: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)

@@ -45,7 +45,6 @@ _DEFAULT_DRIVE_CONFIG = {
     },
     "schedules": {
         "decay_minutes": 30,
-        "reflection_hours": 1,
         "proactive_check_minutes": 10,
     },
 }
@@ -143,7 +142,7 @@ class PADState:
         return "平静"
 
     def get_emotion_prompt(self) -> str:
-        """自然语言描述，注入 system prompt（左脑路径使用）。"""
+        """自然语言描述，注入 system prompt（大脑路径使用）。"""
         label = self.get_emotion_label()
         desc = {
             "悲伤": "有些低落，回复简短，惜字如金",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from emoticorebot.session.models import SessionTaskView, SessionTraceRecord
-from emoticorebot.utils.right_brain_projection import (
+from emoticorebot.utils.executor_projection import (
     normalize_task_result,
     normalize_task_state,
     project_task_from_runtime_snapshot,
@@ -17,7 +17,7 @@ def test_task_projection_maps_runtime_state_to_three_state_view() -> None:
     assert normalize_task_result("running", "success") == "none"
 
 
-def test_project_task_from_runtime_snapshot_uses_compact_right_brain_fields() -> None:
+def test_project_task_from_runtime_snapshot_uses_compact_executor_fields() -> None:
     projected = project_task_from_runtime_snapshot(
         {
             "task_id": "task_1",
@@ -25,9 +25,8 @@ def test_project_task_from_runtime_snapshot_uses_compact_right_brain_fields() ->
             "state": "running",
             "result": "none",
             "summary": "正在执行",
-            "last_progress": "已完成扫描",
         },
-        params={"request": "创建 add.py"},
+        params={"request": "创建 add.py", "current_stage": "已完成扫描"},
     )
 
     assert projected == {
@@ -38,7 +37,7 @@ def test_project_task_from_runtime_snapshot_uses_compact_right_brain_fields() ->
         "result": "none",
         "summary": "正在执行",
         "stage": "已完成扫描",
-        "params": {"request": "创建 add.py"},
+        "params": {"request": "创建 add.py", "current_stage": "已完成扫描"},
     }
 
 

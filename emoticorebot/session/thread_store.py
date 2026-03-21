@@ -1,4 +1,4 @@
-"""Thread persistence layer for raw left/right session histories."""
+"""Thread persistence layer for raw brain/executor session histories."""
 
 from __future__ import annotations
 
@@ -79,23 +79,23 @@ class ThreadStore:
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.threads_dir = workspace / "session"
-        self.left_store = HistoryStore(self.threads_dir, "left.jsonl")
-        self.right_store = HistoryStore(self.threads_dir, "right.jsonl")
+        self.brain_store = HistoryStore(self.threads_dir, "brain.jsonl")
+        self.executor_store = HistoryStore(self.threads_dir, "executor.jsonl")
         self._cache: dict[str, ConversationThread] = {}
 
-    def append_right_messages(self, thread_id: str, messages: list[dict[str, Any]]) -> None:
-        self.right_store.append_messages(thread_id, messages)
+    def append_executor_messages(self, thread_id: str, messages: list[dict[str, Any]]) -> None:
+        self.executor_store.append_messages(thread_id, messages)
 
-    def clear_right_messages(self, thread_id: str) -> None:
-        self.right_store.clear_messages(thread_id)
+    def clear_executor_messages(self, thread_id: str) -> None:
+        self.executor_store.clear_messages(thread_id)
 
-    def get_right_messages(
+    def get_executor_messages(
         self,
         thread_id: str,
         *,
         max_messages: int | None = None,
     ) -> list[dict[str, Any]]:
-        return self.right_store.load_messages(thread_id, max_messages=max_messages)
+        return self.executor_store.load_messages(thread_id, max_messages=max_messages)
 
     def get_or_create(self, thread_id: str) -> ConversationThread:
         if thread_id in self._cache:
@@ -119,7 +119,7 @@ class ThreadStore:
 
     def save(self, thread: ConversationThread) -> None:
         thread.updated_at = datetime.now()
-        self.left_store.write_messages(thread.thread_id, thread.messages)
+        self.brain_store.write_messages(thread.thread_id, thread.messages)
         self._cache[thread.thread_id] = thread
 
     def invalidate(self, thread_id: str) -> None:
@@ -127,9 +127,11 @@ class ThreadStore:
 
     def list_threads(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        for path in self.left_store.iter_thread_dirs():
-            left_path = path / "left.jsonl"
-            messages = HistoryStore.read_jsonl(left_path)
+        for path in self.brain_store.iter_thread_dirs():
+            history_path = path / self.brain_store.filename
+            if not history_path.exists():
+                continue
+            messages = HistoryStore.read_jsonl(history_path)
             created_at = self._infer_created_at(messages)
             updated_at = self._infer_updated_at(messages)
             records.append(
@@ -137,17 +139,17 @@ class ThreadStore:
                     "thread_id": path.name,
                     "created_at": created_at.isoformat() if created_at else "",
                     "updated_at": updated_at.isoformat() if updated_at else "",
-                    "path": str(left_path),
+                    "path": str(history_path),
                 }
             )
         return sorted(records, key=lambda item: item.get("updated_at", ""), reverse=True)
 
     def _load(self, thread_id: str) -> ConversationThread | None:
-        left_path = self.left_store.path_for(thread_id)
-        if not left_path.exists():
+        brain_path = self.brain_store.path_for(thread_id)
+        if not brain_path.exists():
             return None
         try:
-            messages = HistoryStore.read_jsonl(left_path)
+            messages = HistoryStore.read_jsonl(brain_path)
             return self._thread_from_payload(
                 thread_id=thread_id,
                 messages=messages,

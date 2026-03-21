@@ -9,6 +9,7 @@ from emoticorebot.protocol.events import (
     DeliveryFailedPayload,
     DeliveryTargetPayload,
     OutputInlineReadyPayload,
+    OutputStreamClosePayload,
     OutputStreamDeltaPayload,
     OutputStreamOpenPayload,
     RepliedPayload,
@@ -34,17 +35,21 @@ def _stream_payload(
     stream_state: str,
     stream_index: int,
     message_id: str = "msg_1",
-) -> OutputStreamOpenPayload | OutputStreamDeltaPayload:
+    metadata: dict[str, object] | None = None,
+) -> OutputStreamOpenPayload | OutputStreamDeltaPayload | OutputStreamClosePayload:
     common = {
         "output_id": f"out_{reply.reply_id}",
         "delivery_target": DeliveryTargetPayload(delivery_mode="stream", channel="cli", chat_id="direct"),
         "content": reply,
         "origin_message": MessageRef(channel="cli", chat_id="direct", message_id=message_id),
+        "metadata": dict(metadata or {}),
         "stream_id": "stream_turn_1",
         "stream_index": stream_index,
     }
     if event_type == EventType.OUTPUT_STREAM_OPEN:
         return OutputStreamOpenPayload(stream_state=stream_state, **common)
+    if event_type == EventType.OUTPUT_STREAM_CLOSE:
+        return OutputStreamClosePayload(stream_state=stream_state, **common)
     return OutputStreamDeltaPayload(stream_state=stream_state, **common)
 
 
@@ -290,6 +295,54 @@ async def _exercise_delivery_stream_stale_reply_emits_superseded() -> None:
 
 def test_delivery_service_stream_stale_reply_emits_superseded() -> None:
     asyncio.run(_exercise_delivery_stream_stale_reply_emits_superseded())
+
+
+async def _exercise_delivery_stream_close_avoids_duplicate_body() -> None:
+    bus = PriorityPubSubBus()
+    transport = TransportBus()
+    service = DeliveryService(bus=bus, transport=transport)
+    replied: list[BusEnvelope[RepliedPayload]] = []
+
+    service.register()
+
+    async def _capture_replied(event: BusEnvelope[RepliedPayload]) -> None:
+        replied.append(event)
+
+    bus.subscribe(consumer="test", event_type=EventType.OUTPUT_REPLIED, handler=_capture_replied)
+
+    await bus.publish(
+        build_envelope(
+            event_type=EventType.OUTPUT_STREAM_CLOSE,
+            source="safety",
+            target="broadcast",
+            session_id="sess_stream_close",
+            turn_id="turn_stream_close",
+            payload=_stream_payload(
+                event_type=EventType.OUTPUT_STREAM_CLOSE,
+                reply=ReplyDraft(
+                    reply_id="reply_stream_close",
+                    kind="answer",
+                    plain_text="你好。我在这。",
+                    metadata={"stream_close_without_body": True},
+                ),
+                stream_state="close",
+                stream_index=3,
+            ),
+        )
+    )
+    await bus.drain()
+
+    outbound = await transport.consume_outbound()
+    assert outbound.content == ""
+    assert outbound.content_blocks == []
+    assert outbound.media == []
+    assert outbound.metadata["_stream_state"] == "close"
+    assert len(replied) == 1
+    assert replied[0].payload.reply_id == "reply_stream_close"
+
+
+def test_delivery_service_stream_close_avoids_duplicate_body() -> None:
+    asyncio.run(_exercise_delivery_stream_close_avoids_duplicate_body())
 
 
 async def _exercise_delivery_preserves_multimodal_blocks() -> None:

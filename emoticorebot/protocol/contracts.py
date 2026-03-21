@@ -11,8 +11,8 @@ InputKind = Literal["text", "voice", "multimodal"]
 DeliveryMode = Literal["inline", "push", "stream"]
 ReplyDeliveryMode = Literal["inline", "push", "stream", "suppressed"]
 StreamState = Literal["open", "delta", "close", "superseded"]
-RightBrainJobAction = Literal["create_task", "cancel_task"]
-RightBrainDecision = Literal["accept", "answer_only", "reject"]
+ExecutorJobAction = Literal["execute", "cancel"]
+ExecutorDecision = Literal["accept", "reject"]
 TaskMode = Literal["skip", "sync", "async"]
 
 
@@ -22,8 +22,8 @@ __all__ = [
     "InputKind",
     "InputMode",
     "ReplyDeliveryMode",
-    "RightBrainDecision",
-    "RightBrainJobAction",
+    "ExecutorDecision",
+    "ExecutorJobAction",
     "SessionMode",
     "StreamState",
     "TaskMode",

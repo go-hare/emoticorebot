@@ -46,7 +46,7 @@ class ManagedAnchorWriter:
             "filename": "SOUL.md",
             "marker_start": "<!-- TURN_REFLECTION_SOUL_START -->",
             "marker_end": "<!-- TURN_REFLECTION_SOUL_END -->",
-            "intro": "以下条目沉淀当前轮高置信左脑风格修正，由 `turn_reflection` 自动维护。",
+            "intro": "以下条目沉淀当前轮高置信大脑风格修正，由 `turn_reflection` 自动维护。",
             "section_title": "## 逐轮快写（自动维护）",
             "max_entries": 10,
         },
@@ -62,7 +62,7 @@ class ManagedAnchorWriter:
             "filename": "SOUL.md",
             "marker_start": "<!-- DEEP_REFLECTION_SOUL_START -->",
             "marker_end": "<!-- DEEP_REFLECTION_SOUL_END -->",
-            "intro": "以下条目沉淀左脑的稳定风格与长期策略，由 `deep_reflection` 自动维护。",
+            "intro": "以下条目沉淀大脑的稳定风格与长期策略，由 `deep_reflection` 自动维护。",
             "section_title": "## 深反思沉淀（自动维护）",
             "max_entries": None,
         },
@@ -506,4 +506,3 @@ class PersonaManager:
         return normalized
 
 __all__ = ["GovernedWriteResult", "ManagedAnchorWriter", "PersonaManager"]
-

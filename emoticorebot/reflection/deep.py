@@ -52,7 +52,7 @@ class DeepReflectionService:
     _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
 
     _PROMPT = """
-你是 `left_brain` 的深反思过程。
+你是 `brain` 的深反思过程。
 
 请严格按结构化字段填写，不要补充额外说明。
 
@@ -69,7 +69,7 @@ class DeepReflectionService:
         - 没有内容时，字符串字段返回 `""`，数组字段返回 `[]`，对象字段返回 `{{}}`。
 - `user_updates` / `soul_updates` 的每一项都必须是一条可直接写入 Markdown 列表的稳定结论。
 - `user_updates` 聚焦用户的稳定事实、偏好、目标、边界与长期沟通习惯。
-- `soul_updates` 聚焦左脑的稳定风格、表达原则与长期策略修正。
+- `soul_updates` 聚焦大脑的稳定风格、表达原则与长期策略修正。
 - 不要输出标题、编号、解释前缀或多段内容，每一项都用单句表达。
 
 最近的认知事件：
@@ -100,17 +100,17 @@ class DeepReflectionService:
 - `summary`：这一阶段的高层总结。
 - `memory_candidates`：真正值得进入统一长期记忆的候选列表，没有就返回空数组。
 - `user_updates`：对用户整体画像的更新候选，没有就返回空数组；每一项都应像 `用户更喜欢先讨论架构，再进入实现细节。` 这样可直接落盘。
-- `soul_updates`：对左脑稳定风格的更新候选，没有就返回空数组；每一项都应像 `复杂任务中先收敛判断，再交给 task 执行。` 这样可直接落盘。
+- `soul_updates`：对大脑稳定风格的更新候选，没有就返回空数组；每一项都应像 `复杂任务中先收敛判断，再交给 task 执行。` 这样可直接落盘。
 - 如果需要表达可复用执行技能，请直接输出 `memory_type="execution"` 的候选，并在 `metadata.subtype` 里写 `skill_hint`，相关 `skill_name / trigger / hint` 也放进 `metadata`。
 
 示例：
 {{
-  "summary": "近期多轮任务显示，复杂问题更适合由 task 内部收敛后再交回左脑。",
+  "summary": "近期多轮任务显示，复杂问题更适合由 task 内部收敛后再交回大脑。",
   "memory_candidates": [
     {{
       "memory_type": "execution",
       "summary": "复杂任务适合走最终结果式执行链路",
-      "detail": "当任务需要多步分析和工具配合时，task 应优先在内部收敛，再把最终结果返回给 left_brain。",
+      "detail": "当任务需要多步分析和工具配合时，task 应优先在内部收敛，再把最终结果返回给 brain。",
       "confidence": 0.88,
       "stability": 0.81,
       "tags": ["workflow", "task"],
@@ -120,7 +120,7 @@ class DeepReflectionService:
         "goal_cluster": "complex_execution",
         "tool_sequence": ["analysis", "tool", "summary"],
         "preconditions": ["需要多步执行"],
-        "steps_summary": "左脑决策，task 内部收敛后返回最终结果",
+        "steps_summary": "大脑决策，task 内部收敛后返回最终结果",
         "sample_size": 4,
         "success_rate": 0.8
       }}
@@ -271,7 +271,7 @@ class DeepReflectionService:
             user_input = str(event.get("user_input", "") or "").strip()
             assistant_output = str(event.get("assistant_output", "") or "").strip()
             turn_reflection = event.get("turn_reflection") if isinstance(event.get("turn_reflection"), dict) else {}
-            left_brain_state = event.get("left_brain_state") if isinstance(event.get("left_brain_state"), dict) else {}
+            brain_state = event.get("brain_state") if isinstance(event.get("brain_state"), dict) else {}
             task = event.get("task") if isinstance(event.get("task"), dict) else {}
             lifecycle_status = str(task.get("state", "none") or "none").strip()
             result_status = str(task.get("result", "") or "").strip()
@@ -283,13 +283,13 @@ class DeepReflectionService:
             soul_updates = DeepReflectionService._normalize_str_list(turn_reflection.get("soul_updates"))
             needs_deep_reflection = bool(turn_reflection.get("needs_deep_reflection", False))
             state_update = turn_reflection.get("state_update") if isinstance(turn_reflection.get("state_update"), dict) else {}
-            emotion_label = str(left_brain_state.get("emotion", "") or "").strip()
-            pad = dict(left_brain_state.get("pad", {}) or {})
-            drives = dict(left_brain_state.get("drives", {}) or {})
+            emotion_label = str(brain_state.get("emotion", "") or "").strip()
+            pad = dict(brain_state.get("pad", {}) or {})
+            drives = dict(brain_state.get("drives", {}) or {})
             lines.append(
                 "- "
                 f"{event_id} [{timestamp}] 用户={DeepReflectionService._compact(user_input, 80)} "
-                f"左脑回复={DeepReflectionService._compact(assistant_output, 80)} "
+                f"大脑回复={DeepReflectionService._compact(assistant_output, 80)} "
                 f"反思摘要={DeepReflectionService._compact(str(turn_reflection.get('summary', '') or ''), 80)} "
                 f"执行状态={execution_status} "
                 f"emotion={emotion_label or 'unknown'} "

@@ -1,4 +1,4 @@
-"""Agent wiring for the right-brain execution layer."""
+"""Agent wiring for the executor layer."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ class ExecutionAgentService(Protocol):
     executor_llm: Any
     tools: Any
     context: Any
-    run_hooks: Any
     assistant_role: str
 
 
@@ -56,7 +55,7 @@ def build_prompt(
     service: ExecutionAgentService,
 ) -> str:
     workspace = Path(service.context.workspace).expanduser().resolve()
-    role = str(getattr(service, "assistant_role", "right_brain") or "right_brain").strip()
+    role = str(getattr(service, "assistant_role", "executor") or "executor").strip()
     return (
         f"你是 `{role}`，负责复杂问题的规划、执行与结果收口。\n"
         f"当前工作区目录是 `{workspace}`。\n\n"
@@ -78,17 +77,13 @@ def build_prompt(
         "1. 如果任务上下文里带有 `skill_hints`，优先按这些提示执行。\n"
         "2. 只有在提示里已经给出明确技能或路径时才去读取，不要主动枚举一堆技能目录。\n"
         "3. 只有在技能确实匹配当前任务时才复用，不要机械套模板。\n\n"
-        "## 审核钩子\n"
-        "1. 在真正开始执行前，必须先调用一次 `audit_tool`。\n"
-        "2. 当你判断“任务可以开始”时，调用 `audit_tool(decision=\"accept\", ...)`。\n"
-        "3. 当你判断“不应执行”时，调用 `audit_tool(decision=\"reject\", ...)`。\n"
-        "4. 当你判断“不需要执行，只需要给左脑理性答案素材”时，调用 `audit_tool(decision=\"answer_only\", ...)`。\n"
-        "5. 如果发现缺少继续执行所需的关键信息，不要返回中间等待态；直接调用 "
-        "`audit_tool(decision=\"reject\", reason=..., summary=...)`，把缺什么写清楚，交回左脑决定是否向用户补充信息。\n"
-        "6. `reject / answer_only` 会直接终止本次 run，所以要把理由或答案素材写清楚。\n"
-        "7. 不支持中途等待用户批准、补充或继续；当前 run 只能继续执行或直接结束。\n\n"
+        "## 执行原则\n"
+        "1. 收到当前 check 后，直接开始执行，不需要额外审核或等待确认。\n"
+        "2. 如果信息不足或工具失败，优先在当前 run 内换一种做法继续推进。\n"
+        "3. 只有在确实无法继续时，才返回 `failed`，把缺失项或失败原因写清楚。\n"
+        "4. 不支持中途等待用户批准、补充或继续；当前 run 只能继续执行或直接结束。\n\n"
         "## 回传约束\n"
-        "1. 你的对话、工具调用和工具结果会被系统自动采集并回传给左脑。\n"
+        "1. 你的对话、工具调用和工具结果会被系统自动采集并回传给大脑。\n"
         "2. 不需要额外调用专门的阶段汇报工具。\n"
         "3. 正常推进执行，关键进展体现在你的实际操作和最终结构化结果里即可。\n\n"
         "## 收口原则\n"
@@ -109,7 +104,7 @@ def build_prompt(
         "⚠️ 重要约束：\n"
         "- 输出必须是可被 `json.loads()` 直接解析的纯 JSON，不要输出任何 JSON 之外的文字。\n"
         "- 已完成任务：使用 `completed`，并在 `message` 中写最终可交付结果。\n"
-        "- 缺少关键信息时：直接调用 `audit_tool(decision=\"reject\", ...)` 终止当前 run，并把缺失项写清楚。\n"
+        "- 缺少关键信息或无法恢复时：使用 `failed`，把缺失项或失败原因写清楚。\n"
         "- 无法恢复或执行报错：使用 `failed`，在 `message` 或 `analysis` 中说明原因。\n"
         "- `task_trace` 由系统补充，你不要自己填写。\n"
     )
@@ -119,49 +114,10 @@ def build_agent_tools(
     service: ExecutionAgentService,
 ) -> list[Any]:
     tools: list[Any] = []
-    audit_tool = build_audit_tool(service)
-    if audit_tool is not None:
-        tools.append(audit_tool)
     if service.tools is not None:
         tool_names = [name for name in service.tools.tool_names if name != "message"]
         tools.extend(build_registry_tools(service, tool_names))
     return tools
-
-
-def build_audit_tool(service: ExecutionAgentService) -> Any | None:
-    """构建右脑审核钩子，决定本次 run 是否继续执行。"""
-    try:
-        from langchain_core.tools import StructuredTool
-        from pydantic import BaseModel, Field
-    except Exception:
-        return None
-
-    class AuditArgs(BaseModel):
-        decision: Literal["accept", "answer_only", "reject"] = Field(description="本次审核裁决。")
-        reason: str = Field(default="", description="裁决理由。")
-        summary: str = Field(default="", description="给左脑看的紧凑摘要，可选。")
-        result_text: str = Field(default="", description="decision=answer_only 时返回给左脑的答案素材。")
-
-    async def audit_tool(decision: str, reason: str = "", summary: str = "", result_text: str = "") -> str:
-        return await service.run_hooks.audit(
-            decision=str(decision or "").strip(),  # type: ignore[arg-type]
-            reason=reason,
-            summary=summary,
-            result_text=result_text,
-            event="task.audit",
-            producer=str(getattr(service, "assistant_role", "right_brain") or "right_brain").strip(),
-        )
-
-    return StructuredTool.from_function(
-        coroutine=audit_tool,
-        name="audit_tool",
-        description=(
-            "右脑审核钩子。必须在真正开始执行前先调用一次。"
-            "`accept` 表示任务可以开始；`reject` 表示不应执行；"
-            "`answer_only` 表示不需要执行，只返回理性答案素材给左脑。"
-        ),
-        args_schema=AuditArgs,
-    )
 
 
 def build_registry_tools(service: ExecutionAgentService, names: list[str]) -> list[Any]:
@@ -205,18 +161,7 @@ def build_registry_tool(service: ExecutionAgentService, name: str) -> Any | None
     )  # type: ignore[call-overload]
 
     async def _runner(**kwargs: Any) -> str:
-        result = await service.tools.execute(name, kwargs)
-        summary = summarize_tool_progress(name=name, result=result)
-        if summary:
-            role = str(getattr(service, "assistant_role", "right_brain") or "right_brain").strip()
-            await service.run_hooks.report_progress(
-                summary,
-                event="task.tool",
-                producer=role,
-                phase="tool",
-                tool_name=name,
-            )
-        return result
+        return await service.tools.execute(name, kwargs)
 
     _runner.__name__ = name
     _runner.__doc__ = str(registry_tool.description or name)
@@ -244,40 +189,12 @@ def json_schema_to_python_type(schema: dict[str, Any] | None) -> Any:
     return str
 
 
-def summarize_tool_progress(*, name: str, result: Any) -> str:
-    watched = {
-        "write_file",
-        "edit_file",
-        "insert_lines",
-        "replace_lines",
-        "delete_lines",
-        "exec",
-    }
-    if name not in watched:
-        return ""
-
-    text = str(result or "").strip()
-    if not text or text.startswith("Error:"):
-        return ""
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return ""
-
-    headline = lines[0]
-    if name == "exec" and headline.lower().startswith("exit code:"):
-        if len(lines) > 1:
-            headline = f"{headline}; {lines[1]}"
-    return f"{name} 已完成：{headline[:160]}"
-
-
 __all__ = [
     "ExecutionResultSchema",
     "build_agent",
     "build_prompt",
     "build_registry_tool",
     "build_registry_tools",
-    "build_audit_tool",
     "build_agent_tools",
     "backend_available",
 ]

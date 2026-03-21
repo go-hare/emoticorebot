@@ -1,4 +1,4 @@
-"""Right-brain execution streaming and trace helpers."""
+"""Executor execution streaming and trace helpers."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def parse_stream_item(item: Any) -> tuple[tuple[str, ...], str, Any]:
             namespace = tuple(str(part) for part in head if str(part))
             return namespace, "values", tail
         return namespace, str(head), tail
-    raise RuntimeError(f"Unexpected right-brain stream item: {type(item)!r}")
+    raise RuntimeError(f"Unexpected executor stream item: {type(item)!r}")
 
 
 def build_trace_records(*, mode: str, namespace: tuple[str, ...], data: Any) -> list[dict[str, Any]]:

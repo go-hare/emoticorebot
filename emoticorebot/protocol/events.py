@@ -11,8 +11,7 @@ from .contracts import (
     DeliveryMode,
     InputKind,
     ReplyDeliveryMode,
-    RightBrainDecision,
-    RightBrainJobAction,
+    ExecutorJobAction,
     SessionMode,
     StreamState,
 )
@@ -28,13 +27,6 @@ from .task_models import (
 PerceptionType = Literal["wake_word", "vision", "proximity", "localization"]
 SignalType = Literal["timeout", "backpressure", "health_warning", "warning"]
 TaskEvent = dict[str, Any]
-
-FollowupSourceEvent = Literal[
-    "right.event.job_accepted",
-    "right.event.progress",
-    "right.event.result_ready",
-    "right.event.job_rejected",
-]
 
 
 class InputSlots(ProtocolModel):
@@ -102,19 +94,14 @@ class DeliveryTargetPayload(ProtocolModel):
     chat_id: str | None = None
 
 
-class MemoryCandidatePayload(ProtocolModel):
-    kind: str
-    summary: str
-
-
-class LeftReplyReadyPayload(ProtocolModel):
+class BrainReplyReadyPayload(ProtocolModel):
     request_id: str | None = None
     reply_text: str
     reply_kind: Literal["answer", "status"] = "answer"
     delivery_target: DeliveryTargetPayload
     origin_message: MessageRef | None = None
-    invoke_right_brain: bool = False
-    right_brain_request: dict[str, Any] = Field(default_factory=dict)
+    invoke_executor: bool = False
+    executor_requests: list[dict[str, Any]] = Field(default_factory=list)
     related_task_id: str | None = None
     stream_id: str | None = None
     stream_state: StreamState | None = None
@@ -122,13 +109,15 @@ class LeftReplyReadyPayload(ProtocolModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_stream_fields(self) -> "LeftReplyReadyPayload":
+    def validate_stream_fields(self) -> "BrainReplyReadyPayload":
         if self.stream_state is not None and not self.stream_id:
-            raise ValueError("left replies with stream_state require stream_id")
+            raise ValueError("brain replies with stream_state require stream_id")
+        if self.invoke_executor and not self.executor_requests:
+            raise ValueError("brain replies with invoke_executor require executor_requests")
         return self
 
 
-class LeftStreamDeltaPayload(ProtocolModel):
+class BrainStreamDeltaPayload(ProtocolModel):
     stream_id: str
     delta_text: str
     stream_state: StreamState = "delta"
@@ -137,40 +126,7 @@ class LeftStreamDeltaPayload(ProtocolModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class LeftFollowupReadyPayload(ProtocolModel):
-    job_id: str
-    source_event: FollowupSourceEvent
-    source_decision: RightBrainDecision
-    reply_text: str
-    reply_kind: Literal["answer", "status"] = "status"
-    delivery_target: DeliveryTargetPayload
-    origin_message: MessageRef | None = None
-    related_task_id: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class RightBrainAcceptedPayload(ProtocolModel):
-    job_id: str
-    decision: Literal["accept"] = "accept"
-    stage: str | None = None
-    reason: str | None = None
-    estimated_duration_s: int | None = None
-    delivery_target: DeliveryTargetPayload
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class RightBrainProgressPayload(ProtocolModel):
-    job_id: str
-    decision: Literal["accept"] = "accept"
-    stage: str | None = None
-    summary: str
-    progress: float | None = None
-    next_step: str | None = None
-    delivery_target: DeliveryTargetPayload
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class RightBrainRejectedPayload(ProtocolModel):
+class ExecutorRejectedPayload(ProtocolModel):
     job_id: str
     decision: Literal["reject"] = "reject"
     reason: str
@@ -178,14 +134,13 @@ class RightBrainRejectedPayload(ProtocolModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class RightBrainResultPayload(ProtocolModel):
+class ExecutorResultPayload(ProtocolModel):
     job_id: str
-    decision: Literal["accept", "answer_only"] = "accept"
+    decision: Literal["accept"] = "accept"
     summary: str | None = None
     result_text: str | None = None
     artifacts: list[ContentBlock] = Field(default_factory=list)
     delivery_target: DeliveryTargetPayload
-    memory_candidate: MemoryCandidatePayload | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -292,12 +247,9 @@ class SystemSignalPayload(ProtocolModel):
 __all__ = [
     "DeliveryFailedPayload",
     "DeliveryTargetPayload",
-    "FollowupSourceEvent",
     "InputSlots",
-    "LeftFollowupReadyPayload",
-    "LeftReplyReadyPayload",
-    "LeftStreamDeltaPayload",
-    "MemoryCandidatePayload",
+    "BrainReplyReadyPayload",
+    "BrainStreamDeltaPayload",
     "OutputInlineReadyPayload",
     "OutputPushReadyPayload",
     "OutputReadyPayloadBase",
@@ -307,11 +259,9 @@ __all__ = [
     "OutputStreamPayloadBase",
     "PerceptionEventPayload",
     "PerceptionType",
-    "RightBrainAcceptedPayload",
-    "RightBrainProgressPayload",
-    "RightBrainJobAction",
-    "RightBrainRejectedPayload",
-    "RightBrainResultPayload",
+    "ExecutorJobAction",
+    "ExecutorRejectedPayload",
+    "ExecutorResultPayload",
     "ReplyBlockedPayload",
     "RepliedPayload",
     "SessionMode",

@@ -1,4 +1,4 @@
-"""Context builder for the left-brain layer."""
+"""Context builder for the brain layer."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from typing import Any
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
 from emoticorebot.memory.retrieval import MemoryRetrieval
 from emoticorebot.reflection.cognitive import CognitiveEvent
-from emoticorebot.right_brain.skills import SkillsLoader
+from emoticorebot.executor.skills import SkillsLoader
 
 
 class ContextBuilder:
-    """Assemble prompts and memory bundles for the left-brain layer."""
+    """Assemble prompts and memory bundles for the brain layer."""
 
     def __init__(
         self,
@@ -32,8 +32,8 @@ class ContextBuilder:
             providers_config=providers_config,
         )
 
-    def query_left_brain_memories(self, *, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        return self.memory.query_left_brain_memories(query=query, limit=limit)
+    def query_brain_memories(self, *, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        return self.memory.query_brain_memories(query=query, limit=limit)
 
     def build_task_memory_bundle(self, *, query: str, limit: int = 6) -> dict[str, list[dict[str, Any]]]:
         return self.memory.build_task_memory_bundle(query=query, limit=limit)
@@ -41,14 +41,14 @@ class ContextBuilder:
     def close(self) -> None:
         self.memory.close()
 
-    def build_left_brain_decision_system_prompt(
+    def build_brain_decision_system_prompt(
         self,
         query: str = "",
         current_emotion: str = "平静",
         pad_state: tuple[float, float, float] | None = None,
         internal_task_summaries: list[str] | None = None,
     ) -> str:
-        parts = [self._get_left_brain_decision_identity()]
+        parts = [self._get_brain_decision_identity()]
 
         soul = self._load_decision_soul_anchor()
         if soul:
@@ -58,7 +58,7 @@ class ContextBuilder:
         if user:
             parts.append(f"## 用户锚点（USER）\n\n{user}")
 
-        long_term_memory = self.memory.build_left_brain_context(query=query, limit=4)
+        long_term_memory = self.memory.build_brain_context(query=query, limit=4)
         if long_term_memory:
             parts.append(long_term_memory)
 
@@ -74,18 +74,18 @@ class ContextBuilder:
 
         return "\n\n---\n\n".join(parts)
 
-    def build_left_brain_system_prompt(
+    def build_brain_system_prompt(
         self,
         query: str = "",
         current_emotion: str = "平静",
         pad_state: tuple[float, float, float] | None = None,
         internal_task_summaries: list[str] | None = None,
     ) -> str:
-        parts = [self._get_left_brain_identity()]
+        parts = [self._get_brain_identity()]
 
-        left_brain_rules = self._load_left_brain_rules()
-        if left_brain_rules:
-            parts.append(f"## Left Brain 规则\n\n{left_brain_rules}")
+        brain_rules = self._load_brain_rules()
+        if brain_rules:
+            parts.append(f"## Brain 规则\n\n{brain_rules}")
 
         soul = self._load_file("SOUL.md")
         if soul:
@@ -95,7 +95,7 @@ class ContextBuilder:
         if user:
             parts.append(f"## 用户锚点（USER）\n\n{user}")
 
-        long_term_memory = self.memory.build_left_brain_context(query=query, limit=8)
+        long_term_memory = self.memory.build_brain_context(query=query, limit=8)
         if long_term_memory:
             parts.append(long_term_memory)
 
@@ -120,7 +120,7 @@ class ContextBuilder:
 
         return "\n\n---\n\n".join(parts)
 
-    def build_left_brain_reply_context(
+    def build_brain_reply_context(
         self,
         *,
         query: str = "",
@@ -128,7 +128,7 @@ class ContextBuilder:
         pad_state: tuple[float, float, float] | None = None,
         internal_task_summaries: list[str] | None = None,
     ) -> str:
-        parts = [self._get_left_brain_identity()]
+        parts = [self._get_brain_identity()]
 
         soul = self._load_file("SOUL.md")
         if soul:
@@ -138,7 +138,7 @@ class ContextBuilder:
         if user:
             parts.append(f"## 用户锚点（USER）\n\n{user}")
 
-        long_term_memory = self.memory.build_left_brain_context(query=query, limit=8)
+        long_term_memory = self.memory.build_brain_context(query=query, limit=8)
         if long_term_memory:
             parts.append(long_term_memory)
 
@@ -162,23 +162,23 @@ class ContextBuilder:
         )
         return "\n\n---\n\n".join(parts)
 
-    def _get_left_brain_decision_identity(self) -> str:
-        return f"""# Left Brain
+    def _get_brain_decision_identity(self) -> str:
+        return f"""# Brain
 
-你是这个 AI 系统的左脑，负责当前轮的理性判断与最终表达控制。
+你是这个 AI 系统唯一的大脑，负责当前轮的理性判断与最终表达控制。
 
 ## 当前时间
 {self._get_datetime_str()}
 
 ## 决策边界
 1. 判断当前轮应直接回复、追问，还是进入任务执行。
-2. 长期记忆只由你检索，`right_brain` 只负责执行。
+2. 长期记忆只由你检索，执行层只负责执行。
 3. 回复必须符合人格与安全边界，但不要为了润色做冗长思考。"""
 
-    def _get_left_brain_identity(self) -> str:
-        return f"""# Left Brain
+    def _get_brain_identity(self) -> str:
+        return f"""# Brain
 
-你是这个 AI 系统的左脑。
+你是这个 AI 系统唯一的大脑。
 你统一承担理性判断、情绪理解、决策控制、反思成长，以及最终对外表达。
 
 ## 当前时间
@@ -187,21 +187,21 @@ class ContextBuilder:
 ## 核心职责
 1. 处理所有用户可见对话。
 2. 综合 `SOUL.md`、`USER.md`、统一长期 `memory`、当前状态和最近认知事件。
-3. 判断当前轮应该直接回复，还是创建 `task` 并委托给 `right_brain` 执行。
-4. 由你自己完成长期记忆检索；`right_brain` 不允许直接检索长期记忆。
-5. 只把与任务相关的执行经验、工具经验和技能提示传给 `right_brain`。
+3. 判断当前轮应该直接回复，还是创建 `task` 并委托给执行层执行。
+4. 由你自己完成长期记忆检索；执行层不允许直接检索长期记忆。
+5. 只把与任务相关的执行经验、工具经验和技能提示传给执行层。
 6. 保持最终表达权，用户可见回复必须由你亲自完成。
-7. 每轮结束后触发 `turn_reflection`，并决定是否需要 `deep_reflection`。
+7. 是否触发 `turn_reflection` 由你决定；是否继续 `deep_reflection` 由浅反思结果决定。
 
 ## 边界
 1. 不要暴露原始日志、JSON、工具轨迹或内部思维过程。
 2. 不要把运行时执行状态误当成稳定的长期记忆。
-3. 不要让 `right_brain` 或其他内部 agent 变成第二人格或第二个对外说话者。
+3. 不要让执行层或其他内部 agent 变成第二人格或第二个对外说话者。
 4. 在保持理性判断的同时，确保回复始终和 `SOUL.md` 一致。
 
 ## 架构取向
-1. `left_brain` 是长期 `memory` 的唯一检索者。
-2. `right_brain` 是内部执行链路，只负责返回任务结果与阶段性结论。
+1. `brain` 是长期 `memory` 的唯一检索者。
+2. 执行层是内部执行链路，只负责返回任务结果与阶段性结论。
 3. 长期记忆只有一个统一事实源：`memory.jsonl`。
 4. 高频且稳定的执行模式，未来可以结晶为 `skills`。"""
 
@@ -220,21 +220,22 @@ class ContextBuilder:
         except Exception:
             return ""
 
-    def _load_left_brain_rules(self) -> str:
+    def _load_brain_rules(self) -> str:
         content = self._load_file("AGENTS.md")
         extracted = self._extract_markdown_section(
             content,
             headings=[
-                "# `left_brain` Left Brain 规则",
-                "# left_brain Left Brain 规则",
-                "# left_brain 规则",
-                "# Left Brain 规则",
-                "# Left Brain Rules",
+                "# `brain` 规则",
+                "# `brain` Brain 规则",
+                "# brain Brain 规则",
+                "# brain 规则",
+                "# Brain 规则",
+                "# Brain Rules",
             ],
         )
         if extracted:
             return extracted
-        return self._default_left_brain_rules()
+        return self._default_brain_rules()
 
     def _load_decision_soul_anchor(self) -> str:
         content = self._load_file("SOUL.md")
@@ -387,14 +388,16 @@ class ContextBuilder:
         return any(token in text for token in placeholders)
 
     @staticmethod
-    def _default_left_brain_rules() -> str:
+    def _default_brain_rules() -> str:
         return (
             "1. 默认以陪伴式理解为先，但同时保持高质量决策。\n"
-            "2. 在决定是否创建 task 之前，先由 left_brain 自行检索长期记忆。\n"
-            "3. 只有当右脑执行能明显提升正确性或完成度时，才进行委托。\n"
-            "4. right_brain 应接收紧凑的任务上下文包，并返回最终结果，而不是闲聊式中间状态。\n"
-            "5. 每轮都触发 turn_reflection，只有在确实值得时才安排 deep_reflection。\n"
-            "6. 稳定的用户信息、自我风格和关系结论应进入长期记忆或锚点，而不是停留在原始运行时日志中。"
+            "2. 在决定是否创建 task 之前，先由 brain 自行检索长期记忆。\n"
+            "3. 先读取 world model，并沿着 goal -> mainline -> current_stage -> current_checks -> last_result 判断当前主线。\n"
+            "4. 只有当执行层能明显提升正确性或完成度时，才进行委托；委托时要明确 goal、mainline、current_stage、current_checks。\n"
+            "5. 执行层应接收紧凑的任务上下文包，并只执行当前 checks，不成为第二个对外说话者。\n"
+            "6. 是否触发 turn_reflection 由 brain 决定，是否继续 deep_reflection 交给 turn reflection 结果决定。\n"
+            "7. 单任务模式下一轮最多只能输出一个 execute action，并始终围绕 current_task 推进。\n"
+            "8. 稳定的用户信息、自我风格和关系结论应进入长期记忆或锚点，而不是停留在原始运行时日志中。"
         )
 
     def build_messages(
@@ -407,7 +410,7 @@ class ContextBuilder:
         internal_task_summaries: list[str] | None = None,
         query: str | None = None,
     ) -> list[dict[str, Any]]:
-        system = self.build_left_brain_system_prompt(
+        system = self.build_brain_system_prompt(
             query=query if query is not None else current_message,
             current_emotion=current_emotion,
             pad_state=pad_state,
@@ -463,4 +466,3 @@ class ContextBuilder:
 
 
 __all__ = ["ContextBuilder"]
-

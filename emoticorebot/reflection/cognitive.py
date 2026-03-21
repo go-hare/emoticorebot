@@ -10,7 +10,7 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from emoticorebot.types import ReflectionInput
 
-from emoticorebot.utils.right_brain_projection import project_task_for_memory
+from emoticorebot.utils.executor_projection import project_task_for_memory
 
 
 @dataclass
@@ -21,7 +21,7 @@ class CognitiveEvent:
     session_id: str
     turn_id: str
     user_input: str
-    left_brain_state: dict[str, Any] = field(default_factory=dict)
+    brain_state: dict[str, Any] = field(default_factory=dict)
     retrieval: dict[str, Any] = field(default_factory=dict)
     task: dict[str, Any] = field(default_factory=dict)
     assistant_output: str = ""
@@ -103,7 +103,7 @@ class CognitiveEvent:
             )
             if not summary:
                 continue
-            emotion = str(((row.get("left_brain_state") or {}).get("emotion", "") or "平静")).strip()
+            emotion = str(((row.get("brain_state") or {}).get("emotion", "") or "平静")).strip()
             outcome_raw = str(((row.get("turn_reflection") or {}).get("outcome", "") or "unknown")).strip()
             outcome = {
                 "success": "成功",
@@ -138,7 +138,7 @@ class CognitiveEvent:
         if not assistant_output:
             return []
 
-        left_brain = reflection_input.get("left_brain")
+        brain = reflection_input.get("brain")
         emotion = reflection_input.get("emotion") if isinstance(reflection_input.get("emotion"), dict) else {}
         event = cls(
             id=f"evt_{uuid4().hex}",
@@ -147,15 +147,15 @@ class CognitiveEvent:
             session_id=str(reflection_input.get("session_id", "") or ""),
             turn_id=cls._extract_turn_id(reflection_input),
             user_input=user_input,
-            left_brain_state=cls._build_left_brain_state(left_brain, emotion=emotion),
-            retrieval=cls._build_retrieval(left_brain=left_brain, user_input=user_input),
+            brain_state=cls._build_brain_state(brain, emotion=emotion),
+            retrieval=cls._build_retrieval(brain=brain, user_input=user_input),
             task=cls._build_task_state(reflection_input),
             assistant_output=assistant_output,
             turn_reflection=cls._normalize_turn_reflection(turn_reflection),
             meta={
                 "importance": round(float(importance), 2),
                 "channel": str(reflection_input.get("channel", "") or ""),
-                "source": "left_brain.turn_reflection",
+                "source": "brain.turn_reflection",
                 "source_type": str(reflection_input.get("source_type", "user_turn") or "user_turn"),
                 "message_id": str(reflection_input.get("message_id", "") or ""),
             },
@@ -187,65 +187,110 @@ class CognitiveEvent:
         return f"turn_{uuid4().hex[:12]}"
 
     @staticmethod
-    def _build_left_brain_state(
-        left_brain: Any,
+    def _build_brain_state(
+        brain: Any,
         *,
         emotion: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if left_brain is None:
-            left_brain = {}
+        if brain is None:
+            brain = {}
 
         emotion_payload = emotion if isinstance(emotion, dict) else {}
 
-        def _get_left_brain_value(key: str, default: Any = "") -> Any:
-            if isinstance(left_brain, dict):
-                return left_brain.get(key, default)
-            return getattr(left_brain, key, default)
+        def _get_brain_value(key: str, default: Any = "") -> Any:
+            if isinstance(brain, dict):
+                return brain.get(key, default)
+            return getattr(brain, key, default)
 
-        left_brain_state = {
-            "emotion": str(
-                emotion_payload.get("emotion_label", "") or _get_left_brain_value("emotion", "") or "平静"
-            ).strip()
+        brain_state = {
+            "emotion": str(emotion_payload.get("emotion_label", "") or _get_brain_value("emotion", "") or "平静").strip()
             or "平静",
-            "pad": dict(emotion_payload.get("pad", {}) or _get_left_brain_value("pad", {}) or {}),
-            "drives": dict(emotion_payload.get("drives", {}) or _get_left_brain_value("drives", {}) or {}),
+            "pad": dict(emotion_payload.get("pad", {}) or _get_brain_value("pad", {}) or {}),
+            "drives": dict(emotion_payload.get("drives", {}) or _get_brain_value("drives", {}) or {}),
             "emotion_prompt": str(
-                emotion_payload.get("emotion_prompt", "") or _get_left_brain_value("emotion_prompt", "") or ""
+                emotion_payload.get("emotion_prompt", "") or _get_brain_value("emotion_prompt", "") or ""
             ).strip(),
-            "intent": str(_get_left_brain_value("intent", "") or "").strip(),
-            "working_hypothesis": str(_get_left_brain_value("working_hypothesis", "") or "").strip(),
-            "retrieval_query": str(_get_left_brain_value("retrieval_query", "") or "").strip(),
+            "intent": str(_get_brain_value("intent", "") or "").strip(),
+            "working_hypothesis": str(_get_brain_value("working_hypothesis", "") or "").strip(),
+            "retrieval_query": str(_get_brain_value("retrieval_query", "") or "").strip(),
             "retrieval_focus": [
                 str(item).strip()
-                for item in list(_get_left_brain_value("retrieval_focus", []) or [])
+                for item in list(_get_brain_value("retrieval_focus", []) or [])
                 if str(item).strip()
             ],
             "retrieved_memory_ids": [
                 str(item).strip()
-                for item in list(_get_left_brain_value("retrieved_memory_ids", []) or [])
+                for item in list(_get_brain_value("retrieved_memory_ids", []) or [])
                 if str(item).strip()
             ],
-            "task_request": str(_get_left_brain_value("task_brief", "") or "").strip(),
-            "task_action": str(_get_left_brain_value("task_action", "") or "").strip(),
-            "task_reason": str(_get_left_brain_value("task_reason", "") or "").strip(),
+            "task_request": str(_get_brain_value("task_brief", "") or "").strip(),
+            "task_action": CognitiveEvent._action_label(_get_brain_value("actions", [])),
+            "task_actions": CognitiveEvent._action_labels(_get_brain_value("actions", [])),
+            "task_action_count": len(CognitiveEvent._action_labels(_get_brain_value("actions", []))),
+            "task_reason": CognitiveEvent._action_reason(_get_brain_value("actions", [])),
+            "task_reasons": CognitiveEvent._action_reasons(_get_brain_value("actions", [])),
         }
-        return left_brain_state
+        return brain_state
 
     @staticmethod
-    def _build_retrieval(*, left_brain: Any, user_input: str) -> dict[str, Any]:
-        def _get_left_brain_value(key: str, default: Any = "") -> Any:
-            if isinstance(left_brain, dict):
-                return left_brain.get(key, default)
-            return getattr(left_brain, key, default)
+    def _action_label(actions: Any) -> str:
+        labels = CognitiveEvent._action_labels(actions)
+        if not labels:
+            return ""
+        unique = list(dict.fromkeys(labels))
+        if len(unique) == 1:
+            return unique[0] if len(labels) == 1 else f"multi_{unique[0]}"
+        return "mixed"
 
-        query = str(_get_left_brain_value("retrieval_query", "") or "").strip() if left_brain is not None else ""
+    @staticmethod
+    def _action_labels(actions: Any) -> list[str]:
+        if not isinstance(actions, list):
+            return []
+        labels: list[str] = []
+        for item in actions:
+            if not isinstance(item, dict):
+                continue
+            action_type = str(item.get("type", "") or "").strip()
+            if action_type != "execute":
+                continue
+            operation = str(item.get("operation", "") or "run").strip()
+            labels.append("cancel" if operation == "cancel" else "execute")
+        return labels
+
+    @staticmethod
+    def _action_reason(actions: Any) -> str:
+        reasons = CognitiveEvent._action_reasons(actions)
+        if not reasons:
+            return ""
+        return reasons[0] if len(reasons) == 1 else " | ".join(reasons[:3])
+
+    @staticmethod
+    def _action_reasons(actions: Any) -> list[str]:
+        if not isinstance(actions, list):
+            return []
+        reasons: list[str] = []
+        for item in actions:
+            if isinstance(item, dict):
+                reason = str(item.get("reason", "") or "").strip()
+                if reason:
+                    reasons.append(reason)
+        return reasons
+
+    @staticmethod
+    def _build_retrieval(*, brain: Any, user_input: str) -> dict[str, Any]:
+        def _get_brain_value(key: str, default: Any = "") -> Any:
+            if isinstance(brain, dict):
+                return brain.get(key, default)
+            return getattr(brain, key, default)
+
+        query = str(_get_brain_value("retrieval_query", "") or "").strip() if brain is not None else ""
         if not query:
             query = user_input
         memory_ids = []
-        if left_brain is not None:
+        if brain is not None:
             memory_ids = [
                 str(item).strip()
-                for item in list(_get_left_brain_value("retrieved_memory_ids", []) or [])
+                for item in list(_get_brain_value("retrieved_memory_ids", []) or [])
                 if str(item).strip()
             ]
         return {"query": query, "memory_ids": memory_ids}
@@ -256,6 +301,26 @@ class CognitiveEvent:
         execution = (
             reflection_input.get("execution") if isinstance(reflection_input.get("execution"), dict) else {}
         )
+        metadata = reflection_input.get("metadata") if isinstance(reflection_input.get("metadata"), dict) else {}
+        task_snapshots = [item for item in list(metadata.get("task_snapshots", []) or []) if isinstance(item, dict)]
+        if not task and task_snapshots:
+            if len(task_snapshots) == 1:
+                task = task_snapshots[0]
+            else:
+                summary = f"本轮并行涉及 {len(task_snapshots)} 个执行动作"
+                state = str(execution.get("status", "") or "").strip()
+                result = "none"
+                if state in {"done", "completed"}:
+                    result = "success"
+                elif state == "failed":
+                    result = "failed"
+                return {
+                    "used": True,
+                    "state": "running" if state not in {"done", "completed", "failed"} else "done",
+                    "result": result,
+                    "summary": summary,
+                    "task_count": len(task_snapshots),
+                }
         return project_task_for_memory(task, execution=execution)
 
     @staticmethod

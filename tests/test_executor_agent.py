@@ -5,16 +5,16 @@ from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage
 
-from emoticorebot.right_brain.backend import build_prompt
-from emoticorebot.right_brain.executor import RightBrainExecutor
+from emoticorebot.executor.backend import build_prompt
+from emoticorebot.executor.agent import ExecutorAgent
 
 
-def _build_executor() -> RightBrainExecutor:
+def _build_executor() -> ExecutorAgent:
     context = SimpleNamespace(workspace="D:/tmp/workspace", build_media_context=lambda media: [])
-    return RightBrainExecutor(executor_llm=None, tool_registry=None, context_builder=context)
+    return ExecutorAgent(executor_llm=None, tool_registry=None, context_builder=context)
 
 
-def test_right_brain_invalid_control_state_is_rejected() -> None:
+def test_executor_invalid_control_state_is_rejected() -> None:
     executor = _build_executor()
 
     try:
@@ -32,33 +32,34 @@ def test_right_brain_invalid_control_state_is_rejected() -> None:
         raise AssertionError("unsupported control_state should be rejected")
 
 
-def test_right_brain_agent_instructions_require_terminal_audit_on_missing_info() -> None:
+def test_executor_agent_instructions_require_direct_execution_on_missing_info() -> None:
     service = SimpleNamespace(
         context=SimpleNamespace(workspace="D:/tmp/workspace"),
-        assistant_role="right_brain",
+        assistant_role="executor",
     )
 
     prompt = build_prompt(service)
 
-    assert 'audit_tool(decision="reject"' in prompt
+    assert "直接开始执行，不需要额外审核或等待确认" in prompt
     assert "等待用户批准、补充或继续" in prompt
-    assert "直接调用 `audit_tool(decision=\"reject\", ...)`" in prompt
+    assert "只有在确实无法继续时，才返回 `failed`" in prompt
     assert "缺少关键信息但任务仍可恢复" not in prompt
     assert "`failed`" in prompt
     assert "不要主动枚举一堆技能目录" in prompt
     assert "不支持中途等待用户批准、补充或继续" in prompt
+    assert "audit_tool" not in prompt
     assert '"recommended_action"' not in prompt
     assert '"confidence"' not in prompt
     assert '"attempt_count"' not in prompt
 
 
-def test_right_brain_executor_instructions_use_right_brain_identity() -> None:
+def test_executor_instructions_use_executor_identity() -> None:
     prompt = build_prompt(_build_executor())
 
-    assert "你是 `right_brain`" in prompt
+    assert "你是 `executor`" in prompt
 
 
-def test_right_brain_prompt_uses_single_execution_path() -> None:
+def test_executor_prompt_uses_single_execution_path() -> None:
     prompt = build_prompt(_build_executor())
 
     assert "系统已将本次任务标记为简单文件任务" not in prompt
@@ -66,7 +67,7 @@ def test_right_brain_prompt_uses_single_execution_path() -> None:
     assert "不要用 `exec` 去列目录、读取文件、cat 内容、或做例行验证" in prompt
 
 
-def test_right_brain_executor_result_keeps_only_minimal_fields() -> None:
+def test_executor_result_keeps_only_minimal_fields() -> None:
     executor = _build_executor()
 
     result = executor._normalize_task_result(
@@ -130,6 +131,39 @@ def test_invoke_agent_includes_memory_and_skill_hints() -> None:
     asyncio.run(_exercise_invoke_agent_includes_memory_and_skill_hints())
 
 
+async def _exercise_invoke_agent_includes_task_mainline_and_checks() -> None:
+    executor = _build_executor()
+    agent = _CapturingAgent()
+
+    await executor._invoke_agent(
+        agent,
+        {
+            "request": "修复当前 bug",
+            "goal": "修复 reflection bug",
+            "mainline": ["看问题", ["改代码", "补测试"], "跑测试"],
+            "current_stage": ["改代码", "补测试"],
+            "current_checks": ["修改 manager.py", "补 governor 测试"],
+            "task_context": {},
+        },
+        "thread_2",
+        "run_2",
+    )
+
+    assert agent.payload is not None
+    content = agent.payload["messages"][-1]["content"]
+    assert "任务主线" in content
+    assert "1. 看问题" in content
+    assert "并行: 改代码 / 补测试" in content
+    assert "当前阶段：改代码 / 补测试" in content
+    assert "当前 checks" in content
+    assert "修改 manager.py" in content
+    assert "补 governor 测试" in content
+
+
+def test_invoke_agent_includes_task_mainline_and_checks() -> None:
+    asyncio.run(_exercise_invoke_agent_includes_task_mainline_and_checks())
+
+
 class _StreamingAgent:
     def __init__(self) -> None:
         self.stream_mode = None
@@ -145,7 +179,6 @@ class _StreamingAgent:
 async def _exercise_invoke_agent_awaits_stream_and_emits_assistant_traces() -> None:
     executor = _build_executor()
     agent = _StreamingAgent()
-    trace_events: list[tuple[str, dict[str, object]]] = []
 
     result = await executor._invoke_agent(
         agent,
@@ -155,22 +188,12 @@ async def _exercise_invoke_agent_awaits_stream_and_emits_assistant_traces() -> N
         },
         "thread_stream_1",
         "run_stream_1",
-        trace_reporter=lambda message, payload: _append_trace(trace_events, message, payload),
     )
 
     assert result["control_state"] == "completed"
-    assert [message for message, _payload in trace_events] == ["先看一下", "项目结构"]
     assert agent.stream_mode == ["updates", "values"]
-    assert all(payload["event"] == "task.trace" for _, payload in trace_events)
-    assert all(payload["payload"]["role"] == "assistant" for _, payload in trace_events)
-
-
-async def _append_trace(
-    events: list[tuple[str, dict[str, object]]],
-    message: str,
-    payload: dict[str, object],
-) -> None:
-    events.append((message, payload))
+    assert [item["content"][0]["text"] for item in executor._trace_log] == ["先看一下", "项目结构"]
+    assert all(item["role"] == "assistant" for item in executor._trace_log)
 
 
 def test_invoke_agent_awaits_stream_and_emits_assistant_traces() -> None:

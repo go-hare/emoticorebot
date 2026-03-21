@@ -4,11 +4,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from emoticorebot.right_brain.backend import build_agent_tools
+from emoticorebot.executor.backend import build_agent_tools
 from emoticorebot.tools import ExecTool, ToolRegistry, WriteFileTool
 
 
-def test_right_backend_exposes_registered_tools_without_profile_split() -> None:
+def test_executor_backend_exposes_registered_tools_without_profile_split() -> None:
     with TemporaryDirectory() as tmp_dir:
         workspace = Path(tmp_dir)
         registry = ToolRegistry()
@@ -16,7 +16,7 @@ def test_right_backend_exposes_registered_tools_without_profile_split() -> None:
         registry.register(ExecTool(working_dir=str(workspace)))
         service = SimpleNamespace(
             context=SimpleNamespace(workspace=str(workspace)),
-            assistant_role="right_brain",
+            assistant_role="executor",
             tools=registry,
             run_hooks=SimpleNamespace(report_progress=None),
         )

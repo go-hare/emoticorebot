@@ -90,11 +90,6 @@ class ReflectionGovernor:
         )
         self._bus.subscribe(
             consumer="reflection_governor",
-            event_type=EventType.REFLECTION_DEEP,
-            handler=self._weak_handler("_on_reflection_signal"),
-        )
-        self._bus.subscribe(
-            consumer="reflection_governor",
             event_type=EventType.REFLECTION_WRITE_REQUEST,
             handler=self._weak_handler("_on_write_request"),
         )
@@ -134,10 +129,10 @@ class ReflectionGovernor:
         if not events:
             return DeepReflectionResult()
         return await self._apply_deep_reflection(
-            reason=reason or "periodic_signal",
+            reason=reason or "manual_deep_reflection",
             session_id=self._SYSTEM_SESSION_ID,
-            turn_id="turn_background_reflection",
-            correlation_id="background_reflection",
+            turn_id="turn_manual_deep_reflection",
+            correlation_id="manual_deep_reflection",
             causation_id=None,
             task_id=None,
             recent_context_ids=[],
@@ -191,19 +186,6 @@ class ReflectionGovernor:
         if event.event_type == EventType.REFLECTION_LIGHT:
             await self._apply_turn_reflection(event)
             return
-        if event.event_type == EventType.REFLECTION_DEEP:
-            warm_limit = self._deep_warm_limit(event)
-            await self._apply_deep_reflection(
-                reason=str(event.payload.reason or "deep_reflection"),
-                session_id=event.session_id or self._SYSTEM_SESSION_ID,
-                turn_id=event.turn_id,
-                correlation_id=event.correlation_id or event.task_id or event.turn_id or event.event_id,
-                causation_id=event.event_id,
-                task_id=event.task_id,
-                recent_context_ids=self._context_ids_for(event),
-                metadata=dict(event.payload.metadata or {}),
-                events=self._reflection.recent_cognitive_events(limit=max(6, warm_limit)),
-            )
 
     async def _apply_turn_reflection(
         self,
@@ -576,14 +558,6 @@ class ReflectionGovernor:
             self._recent_context_ids.popitem(last=False)
 
     @staticmethod
-    def _deep_warm_limit(signal: BusEnvelope[ReflectionSignalPayload]) -> int:
-        metadata = dict(signal.payload.metadata or {})
-        try:
-            return max(int(metadata.get("warm_limit", 15) or 15), 1)
-        except (TypeError, ValueError):
-            return 15
-
-    @staticmethod
     def _governance_metadata(result: GovernedWriteResult, *, scope: str, action: str) -> dict[str, Any]:
         if not result.applied:
             return {}
@@ -619,7 +593,7 @@ class ReflectionGovernor:
         metadata: dict[str, Any],
     ) -> BusEnvelope[ReflectionSignalPayload]:
         return build_envelope(
-            event_type=EventType.REFLECTION_DEEP,
+            event_type=EventType.REFLECTION_LIGHT,
             source="reflection_governor",
             target="reflection_governor",
             session_id=session_id,
@@ -638,4 +612,3 @@ class ReflectionGovernor:
 
 
 __all__ = ["ReflectionGovernor"]
-

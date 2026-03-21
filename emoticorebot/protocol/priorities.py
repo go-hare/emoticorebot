@@ -22,22 +22,18 @@ PRIORITY_BY_EVENT_TYPE: dict[str, EventPriority] = {
     EventType.INPUT_STREAM_CHUNK: EventPriority.P1,
     EventType.INPUT_STREAM_COMMITTED: EventPriority.P1,
     EventType.INPUT_STREAM_INTERRUPTED: EventPriority.P0,
-    EventType.LEFT_COMMAND_REPLY_REQUESTED: EventPriority.P1,
-    EventType.LEFT_EVENT_REPLY_READY: EventPriority.P1,
-    EventType.LEFT_EVENT_STREAM_DELTA_READY: EventPriority.P1,
-    EventType.LEFT_EVENT_FOLLOWUP_READY: EventPriority.P1,
-    EventType.RIGHT_COMMAND_JOB_REQUESTED: EventPriority.P1,
-    EventType.RIGHT_EVENT_JOB_ACCEPTED: EventPriority.P2,
-    EventType.RIGHT_EVENT_PROGRESS: EventPriority.P2,
-    EventType.RIGHT_EVENT_JOB_REJECTED: EventPriority.P2,
-    EventType.RIGHT_EVENT_RESULT_READY: EventPriority.P2,
+    EventType.BRAIN_COMMAND_REPLY_REQUESTED: EventPriority.P1,
+    EventType.BRAIN_EVENT_REPLY_READY: EventPriority.P1,
+    EventType.BRAIN_EVENT_STREAM_DELTA_READY: EventPriority.P1,
+    EventType.EXECUTOR_COMMAND_JOB_REQUESTED: EventPriority.P1,
+    EventType.EXECUTOR_EVENT_JOB_REJECTED: EventPriority.P2,
+    EventType.EXECUTOR_EVENT_RESULT_READY: EventPriority.P2,
     EventType.OUTPUT_INLINE_READY: EventPriority.P2,
     EventType.OUTPUT_PUSH_READY: EventPriority.P2,
     EventType.OUTPUT_STREAM_OPEN: EventPriority.P2,
     EventType.OUTPUT_STREAM_DELTA: EventPriority.P2,
     EventType.OUTPUT_STREAM_CLOSE: EventPriority.P2,
     EventType.REFLECTION_LIGHT: EventPriority.P4,
-    EventType.REFLECTION_DEEP: EventPriority.P4,
     EventType.REFLECTION_WRITE_REQUEST: EventPriority.P4,
 }
 
@@ -47,4 +43,3 @@ def priority_for(event_type: EventType | str) -> EventPriority:
 
 
 __all__ = ["EventPriority", "PRIORITY_BY_EVENT_TYPE", "priority_for"]
-

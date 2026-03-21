@@ -1,4 +1,4 @@
-"""Right-brain execution wrapper around the agent backend."""
+"""Executor wrapper around the agent backend."""
 
 from __future__ import annotations
 
@@ -8,24 +8,22 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from emoticorebot.right_brain import backend as right_backend
-from emoticorebot.right_brain import trace as right_trace
-from emoticorebot.right_brain.hooks import AuditInterrupt, DetailedProgressReporter, RunHooks
+from emoticorebot.executor import backend as right_backend
+from emoticorebot.executor import trace as right_trace
 from emoticorebot.utils.llm_utils import blocks_to_llm_content
 
 
-RightBrainExecutionResult = dict[str, Any]
+ExecutorExecutionResult = dict[str, Any]
 
 
-class RightBrainExecutor:
-    """Runs a right-brain task spec against the agent backend without runtime coupling."""
+class ExecutorAgent:
+    """Runs an executor task spec against the agent backend without runtime coupling."""
 
     DEFAULT_TASK_TIMEOUT_S = 120.0
     _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
-    assistant_role = "right_brain"
+    assistant_role = "executor"
 
     def __init__(self, executor_llm: Any, tool_registry: Any, context_builder: Any) -> None:
-        self.run_hooks = RunHooks()
         self.executor_llm = executor_llm
         self.tools = tool_registry
         self.context = context_builder
@@ -36,14 +34,12 @@ class RightBrainExecutor:
         task_spec: dict[str, Any],
         *,
         task_id: str,
-        progress_reporter: DetailedProgressReporter | None = None,
-        trace_reporter: DetailedProgressReporter | None = None,
-    ) -> RightBrainExecutionResult:
+    ) -> ExecutorExecutionResult:
         if not right_backend.backend_available():
             return self._build_result(
                 control_state="failed",
                 status="failed",
-                message="右脑执行器依赖当前不可用，无法执行内部任务。",
+                message="执行层依赖当前不可用，无法执行内部任务。",
                 analysis="系统缺少 create_agent 执行能力",
             )
 
@@ -52,14 +48,13 @@ class RightBrainExecutor:
             return self._build_result(
                 control_state="failed",
                 status="failed",
-                message="右脑执行器未收到有效请求。",
+                message="执行层未收到有效请求。",
                 analysis="任务请求为空",
             )
 
         agent = right_backend.build_agent(self)
         thread_id = self._build_thread_id(task_spec, task_id)
         run_id = f"run_{uuid4().hex[:12]}"
-        self.run_hooks.bind_reporter(progress_reporter)
         self._trace_log = []
 
         history = [item for item in list(task_spec.get("history") or []) if isinstance(item, dict)]
@@ -78,9 +73,8 @@ class RightBrainExecutor:
                     history=history,
                     media=media,
                     task_context=task_context,
-                    trace_reporter=trace_reporter,
                 ),
-                name=f"right-brain:{task_id}",
+                name=f"executor:{task_id}",
             )
             try:
                 agent_result = await asyncio.wait_for(asyncio.shield(agent_task), timeout=timeout_s)
@@ -91,28 +85,24 @@ class RightBrainExecutor:
                 return self._build_result(
                     control_state="failed",
                     status="failed",
-                    message=f"右脑执行器超时（{timeout_text}s），本次任务已终止。",
-                    analysis="右脑执行器在限定时间内未返回结果。",
+                    message=f"执行层超时（{timeout_text}s），本次任务已终止。",
+                    analysis="执行层在限定时间内未返回结果。",
                 )
             return self._normalize_task_result(self._extract_structured_result(agent_result))
-        except AuditInterrupt:
-            raise
         except asyncio.CancelledError:
             if agent_task is not None and not agent_task.done():
                 agent_task.cancel()
                 agent_task.add_done_callback(self._consume_background_task_result)
             raise
-        finally:
-            self.run_hooks.clear()
 
     def _build_thread_id(self, task_spec: dict[str, Any], task_id: str) -> str:
         session_id = str(task_spec.get("session_id", "") or "").strip()
         if session_id:
-            return f"right_brain:{session_id}:{task_id}"
+            return f"executor:{session_id}:{task_id}"
         channel = str(task_spec.get("channel", "") or "").strip()
         chat_id = str(task_spec.get("chat_id", "") or "").strip()
         base = f"{channel}:{chat_id}" if channel or chat_id else "default"
-        return f"right_brain:{base}:{task_id}"
+        return f"executor:{base}:{task_id}"
 
     def _resolve_task_timeout(self, task_spec: dict[str, Any]) -> float:
         raw_timeout = task_spec.get("timeout_s")
@@ -143,7 +133,6 @@ class RightBrainExecutor:
         history: list[dict[str, Any]] | None = None,
         media: list[str] | None = None,
         task_context: dict[str, Any] | None = None,
-        trace_reporter: DetailedProgressReporter | None = None,
     ) -> Any:
         messages: list[dict[str, Any]] = []
         for turn in (history or [])[-10:]:
@@ -156,6 +145,9 @@ class RightBrainExecutor:
 
         request = str(task_spec.get("request", "") or "").strip()
         goal = str(task_spec.get("goal", "") or "").strip()
+        mainline = list(task_spec.get("mainline") or [])
+        current_stage = task_spec.get("current_stage")
+        current_checks = [str(item).strip() for item in list(task_spec.get("current_checks") or []) if str(item).strip()]
         expected_output = str(task_spec.get("expected_output", "") or "").strip()
         constraints = [str(item).strip() for item in list(task_spec.get("constraints") or []) if str(item).strip()]
         success_criteria = [
@@ -170,6 +162,28 @@ class RightBrainExecutor:
         user_parts.append(request)
         if goal:
             user_parts.append(f"\n\n任务目标：{goal}")
+        if mainline:
+            mainline_lines: list[str] = []
+            for index, item in enumerate(mainline, start=1):
+                if isinstance(item, list):
+                    branch = [str(entry).strip() for entry in item if str(entry).strip()]
+                    if branch:
+                        mainline_lines.append(f"{index}. 并行: {' / '.join(branch)}")
+                    continue
+                text = str(item or "").strip()
+                if text:
+                    mainline_lines.append(f"{index}. {text}")
+            if mainline_lines:
+                user_parts.append("\n\n任务主线：\n" + "\n".join(mainline_lines))
+        if current_stage not in (None, "", []):
+            if isinstance(current_stage, list):
+                stage_text = " / ".join(str(item).strip() for item in current_stage if str(item).strip())
+            else:
+                stage_text = str(current_stage).strip()
+            if stage_text:
+                user_parts.append(f"\n\n当前阶段：{stage_text}")
+        if current_checks:
+            user_parts.append("\n\n当前 checks：\n- " + "\n- ".join(current_checks))
         if constraints:
             user_parts.append("\n\n约束条件：\n- " + "\n- ".join(constraints))
         if success_criteria:
@@ -203,24 +217,22 @@ class RightBrainExecutor:
         payload = {"messages": messages}
         config = {
             "configurable": {"thread_id": thread_id},
-            "metadata": {"assistant_id": "emoticorebot-right-brain", "run_id": run_id},
+            "metadata": {"assistant_id": "emoticorebot-executor", "run_id": run_id},
         }
 
         if hasattr(agent, "astream") or hasattr(agent, "stream"):
-            return await self._stream_invoke(agent, payload, config, trace_reporter=trace_reporter)
+            return await self._stream_invoke(agent, payload, config)
         if hasattr(agent, "ainvoke"):
             return await agent.ainvoke(payload, config=config)
         if hasattr(agent, "invoke"):
             return agent.invoke(payload, config=config)
-        raise RuntimeError("right-brain agent does not expose invoke/ainvoke/astream/stream")
+        raise RuntimeError("executor agent does not expose invoke/ainvoke/astream/stream")
 
     async def _stream_invoke(
         self,
         agent: Any,
         payload: dict[str, Any],
         config: dict[str, Any],
-        *,
-        trace_reporter: DetailedProgressReporter | None = None,
     ) -> Any:
         last_values: Any = None
         seen_signatures: set[str] = set()
@@ -234,7 +246,7 @@ class RightBrainExecutor:
         elif hasattr(agent, "stream"):
             stream = agent.stream(payload, **stream_kwargs)
         else:
-            raise RuntimeError("right-brain agent does not expose streaming APIs")
+            raise RuntimeError("executor agent does not expose streaming APIs")
 
         if hasattr(stream, "__aiter__"):
             async for item in stream:
@@ -249,20 +261,6 @@ class RightBrainExecutor:
                     if signature:
                         seen_signatures.add(signature)
                     self._trace_log.append(record)
-                    if trace_reporter is None:
-                        continue
-                    message = self._trace_message(record)
-                    if not message:
-                        continue
-                    await trace_reporter(
-                        message,
-                        {
-                            "event": "task.trace",
-                            "producer": str(record.get("role", "") or "right_brain").strip() or "right_brain",
-                            "phase": "trace",
-                            "payload": dict(record),
-                        },
-                    )
         else:
             for item in stream:
                 namespace, mode, data = right_trace.parse_stream_item(item)
@@ -276,69 +274,9 @@ class RightBrainExecutor:
                     if signature:
                         seen_signatures.add(signature)
                     self._trace_log.append(record)
-                    if trace_reporter is None:
-                        continue
-                    message = self._trace_message(record)
-                    if not message:
-                        continue
-                    await trace_reporter(
-                        message,
-                        {
-                            "event": "task.trace",
-                            "producer": str(record.get("role", "") or "right_brain").strip() or "right_brain",
-                            "phase": "trace",
-                            "payload": dict(record),
-                        },
-                    )
         if last_values is None:
-            raise RuntimeError("right-brain trace stream did not produce final state")
+            raise RuntimeError("executor trace stream did not produce final state")
         return last_values
-
-    @staticmethod
-    def _trace_message(record: dict[str, Any]) -> str:
-        role = str(record.get("role", "") or "").strip()
-        tool_calls = list(record.get("tool_calls", []) or [])
-        if tool_calls:
-            names = [
-                str(item.get("name", "") or "").strip()
-                for item in tool_calls
-                if isinstance(item, dict) and str(item.get("name", "") or "").strip()
-            ]
-            if names:
-                return f"准备调用工具：{', '.join(names[:3])}"
-        if role == "tool":
-            name = str(record.get("name", "") or "tool").strip()
-            content = RightBrainExecutor._content_to_text(record.get("content"))
-            if content:
-                return f"{name} 返回：{content[:160]}"
-            return f"{name} 已返回结果"
-        if role == "assistant":
-            content = RightBrainExecutor._content_to_text(record.get("content"))
-            if content:
-                return content[:160]
-        return ""
-
-    @staticmethod
-    def _content_to_text(content: Any) -> str:
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict):
-                    text = str(item.get("text", "") or item.get("content", "") or "").strip()
-                    if text:
-                        parts.append(text)
-                        continue
-                text = str(item or "").strip()
-                if text:
-                    parts.append(text)
-            return "\n".join(parts).strip()
-        if isinstance(content, dict):
-            text = str(content.get("text", "") or content.get("content", "") or "").strip()
-            if text:
-                return text
-        return str(content or "").strip()
 
     def _extract_structured_result(self, result: Any) -> dict[str, Any]:
         if hasattr(result, "model_dump"):
@@ -381,11 +319,11 @@ class RightBrainExecutor:
                 except json.JSONDecodeError:
                     pass
 
-        raise RuntimeError("Right-brain executor did not return a structured execution result")
+        raise RuntimeError("Executor did not return a structured execution result")
 
-    def _normalize_task_result(self, payload: dict[str, Any]) -> RightBrainExecutionResult:
+    def _normalize_task_result(self, payload: dict[str, Any]) -> ExecutorExecutionResult:
         if not isinstance(payload, dict):
-            raise RuntimeError("Right-brain execution result must be a dict")
+            raise RuntimeError("Executor execution result must be a dict")
 
         control_state = str(payload.get("control_state", "completed") or "completed").strip()
         if control_state not in {"completed", "failed"}:
@@ -429,7 +367,7 @@ class RightBrainExecutor:
         status: str,
         message: str,
         analysis: str,
-    ) -> RightBrainExecutionResult:
+    ) -> ExecutorExecutionResult:
         return {
             "control_state": control_state,
             "status": status,
@@ -444,4 +382,4 @@ class RightBrainExecutor:
             return "failed"
         return "success"
 
-__all__ = ["RightBrainExecutor"]
+__all__ = ["ExecutorAgent"]

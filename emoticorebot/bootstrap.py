@@ -3,7 +3,7 @@
 这个模块负责装配系统主通路：
 1. 消息调度（接收消息、分发处理）
 2. 协调 transport、线程历史与新的 bus-driven runtime kernel
-3. 线程历史管理（加载/保存 `left` 与 `right` 原始记录）
+3. 线程历史管理（加载/保存 `brain` 与 `executor` 原始记录）
 4. 反思与后台服务调度
 """
 
@@ -21,23 +21,20 @@ from loguru import logger
 from emoticorebot.adapters.conversation_gateway import ConversationGateway
 from emoticorebot.tools.manager import ToolManager
 from emoticorebot.config.schema import MemoryConfig, ModelModeConfig, ProvidersConfig
-from emoticorebot.left_brain.context import ContextBuilder
-from emoticorebot.protocol.commands import RightBrainJobRequestPayload
+from emoticorebot.context.builder import ContextBuilder
 from emoticorebot.providers.factory import LLMFactory
 from emoticorebot.models.emotion_state import EmotionStateManager
 from emoticorebot.protocol.envelope import BusEnvelope
 from emoticorebot.protocol.events import (
-    RightBrainAcceptedPayload,
-    RightBrainProgressPayload,
-    RightBrainRejectedPayload,
-    RightBrainResultPayload,
+    ExecutorRejectedPayload,
+    ExecutorResultPayload,
 )
 from emoticorebot.protocol.topics import EventType
 from emoticorebot.runtime.transport_bus import InboundMessage, OutboundMessage, TransportBus
 from emoticorebot.runtime.kernel import RuntimeKernel, TurnReply
 from emoticorebot.session.thread_store import ThreadStore
 from emoticorebot.utils.llm_utils import extract_message_text
-from emoticorebot.utils.right_brain_projection import project_task_from_runtime_snapshot, project_task_from_session_view
+from emoticorebot.utils.executor_projection import project_task_from_runtime_snapshot
 
 if TYPE_CHECKING:
     from emoticorebot.config.schema import ChannelsConfig, ExecToolConfig
@@ -51,8 +48,8 @@ class RuntimeHost:
         self,
         bus: TransportBus,
         workspace: Path,
-        right_brain_mode: "ModelModeConfig",
-        left_brain_mode: "ModelModeConfig",
+        executor_mode: "ModelModeConfig",
+        brain_mode: "ModelModeConfig",
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
@@ -67,9 +64,9 @@ class RuntimeHost:
 
         self.bus = bus
         self.workspace = workspace
-        self.right_brain_mode = right_brain_mode
-        self.left_brain_mode = left_brain_mode
-        self.memory_window = right_brain_mode.memory_window
+        self.executor_mode = executor_mode
+        self.brain_mode = brain_mode
+        self.memory_window = executor_mode.memory_window
         self.channels_config = channels_config
 
         self.thread_store = thread_store or ThreadStore(workspace)
@@ -82,11 +79,11 @@ class RuntimeHost:
 
         factory = LLMFactory(
             providers_config=providers_config,
-            right_brain_mode=right_brain_mode,
-            left_brain_mode=left_brain_mode,
+            executor_mode=executor_mode,
+            brain_mode=brain_mode,
         )
-        self.right_brain_llm = factory.get_right_brain()
-        self.left_brain_llm = factory.get_left_brain()
+        self.executor_llm = factory.get_executor()
+        self.brain_llm = factory.get_brain()
 
         self.tool_manager = ToolManager(
             workspace,
@@ -103,9 +100,9 @@ class RuntimeHost:
         self.kernel = RuntimeKernel(
             workspace=workspace,
             transport=self.bus,
-            left_brain_llm=self.left_brain_llm,
-            executor_llm=self.right_brain_llm,
-            reflection_llm=self.left_brain_llm,
+            brain_llm=self.brain_llm,
+            executor_llm=self.executor_llm,
+            reflection_llm=self.brain_llm,
             context_builder=self.context,
             tool_registry=self.tool_manager.get_registry(),
             emotion_manager=self.emotion_mgr,
@@ -117,29 +114,14 @@ class RuntimeHost:
             message_processor=self._process_message,
         )
         self.kernel.event_bus.subscribe(
-            consumer="right_runtime",
-            event_type=EventType.RIGHT_COMMAND_JOB_REQUESTED,
-            handler=self._persist_right_history_event,
+            consumer="bootstrap:executor_history",
+            event_type=EventType.EXECUTOR_EVENT_JOB_REJECTED,
+            handler=self._persist_executor_history_event,
         )
         self.kernel.event_bus.subscribe(
-            consumer="bootstrap:right_history",
-            event_type=EventType.RIGHT_EVENT_JOB_ACCEPTED,
-            handler=self._persist_right_history_event,
-        )
-        self.kernel.event_bus.subscribe(
-            consumer="bootstrap:right_history",
-            event_type=EventType.RIGHT_EVENT_PROGRESS,
-            handler=self._persist_right_history_event,
-        )
-        self.kernel.event_bus.subscribe(
-            consumer="bootstrap:right_history",
-            event_type=EventType.RIGHT_EVENT_JOB_REJECTED,
-            handler=self._persist_right_history_event,
-        )
-        self.kernel.event_bus.subscribe(
-            consumer="bootstrap:right_history",
-            event_type=EventType.RIGHT_EVENT_RESULT_READY,
-            handler=self._persist_right_history_event,
+            consumer="bootstrap:executor_history",
+            event_type=EventType.EXECUTOR_EVENT_RESULT_READY,
+            handler=self._persist_executor_history_event,
         )
 
         self._running = False
@@ -194,12 +176,20 @@ class RuntimeHost:
             message_id,
             key,
         )
-        dialogue_history, right_history = self._snapshot_turn_input(key)
+        dialogue_history, executor_history = self._snapshot_turn_input(key)
         user_content = self._build_user_message_content(msg.content, msg.media)
+        self._persist_user_message(
+            session_key=key,
+            user_id=msg.sender_id,
+            turn_id="",
+            content=user_content,
+            message_id=message_id,
+            created_at=msg.timestamp.isoformat(),
+        )
         content, final_state = await self._run_user_message(
             user_input=msg.content,
             dialogue_history=dialogue_history,
-            internal_history=right_history,
+            internal_history=executor_history,
             message_id=message_id,
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -211,24 +201,7 @@ class RuntimeHost:
         if turn_id and not self.kernel.is_current_turn(session_id=key, turn_id=turn_id):
             return None
 
-        self._persist_user_message(
-            session_key=key,
-            user_id=msg.sender_id,
-            turn_id=turn_id,
-            content=user_content,
-            message_id=message_id,
-            created_at=msg.timestamp.isoformat(),
-        )
-
         assistant_timestamp = datetime.now().isoformat()
-        right_messages = self._build_right_turn_records(
-            final_state,
-            session_id=key,
-            user_id=msg.sender_id,
-            turn_id=turn_id,
-            assistant_timestamp=assistant_timestamp,
-            message_id=message_id,
-        )
 
         thread = self.thread_store.get_or_create(key)
         assistant_fields = self._build_assistant_session_fields(final_state)
@@ -240,7 +213,7 @@ class RuntimeHost:
             turn_id=turn_id,
             message_id=message_id,
             created_at=assistant_timestamp,
-            event_type="left_reply",
+            event_type="brain_reply",
             **assistant_fields,
         )
         self.thread_store.save(thread)
@@ -291,7 +264,7 @@ class RuntimeHost:
     async def generate_proactive_message(self, prompt: str) -> str:
         """Generate a proactive user-facing message without entering the task pipeline."""
         fallback = "刚刚想到你了，就来打个招呼。"
-        model = self.left_brain_llm
+        model = self.brain_llm
         if model is None:
             return fallback
         try:
@@ -364,21 +337,14 @@ class RuntimeHost:
             metadata=dict(message_metadata or {}),
         )
         message = str(turn.content or "").strip()
-        if not message:
-            message = "我先处理这件事。"
 
-        task_action = "none"
-        latest_task = self.kernel.latest_task_for_session(session_id, include_terminal=True)
-        if latest_task is not None and latest_task.turn_id == turn.turn_id:
-            task_action = "create_task"
-        execution_summary = "left/runtime kernel completed turn dispatch"
+        execution_summary = "brain/executor runtime kernel completed turn dispatch"
 
         final_state: dict[str, Any] = {
             "turn_id": turn.turn_id,
             "output": message,
             "execution_summary": execution_summary,
-            "left_brain": {
-                "task_action": task_action,
+            "brain": {
                 "execution_summary": execution_summary,
                 "reply_event_type": turn.event_type,
                 "turn_id": turn.turn_id,
@@ -390,7 +356,7 @@ class RuntimeHost:
 
         return message, final_state
 
-    def _build_right_turn_records(
+    def _build_executor_turn_records(
         self,
         final_state: dict[str, Any],
         *,
@@ -401,23 +367,20 @@ class RuntimeHost:
         message_id: str,
         source: str = "runtime",
     ) -> list[dict[str, Any]]:
-        """读取当前轮已经落盘的真实右脑记录，不再伪造结果快照。"""
+        """读取当前轮已经落盘的真实执行记录，不再伪造结果快照。"""
         del final_state, user_id, assistant_timestamp, message_id, source
         records: list[dict[str, Any]] = []
-        for record in self.thread_store.get_right_messages(session_id):
+        for record in self.thread_store.get_executor_messages(session_id):
             if str(record.get("turn_id", "") or "").strip() != turn_id:
                 continue
             records.append(record)
         return records
 
-    async def _persist_right_history_event(
+    async def _persist_executor_history_event(
         self,
         event: BusEnvelope[
-            RightBrainJobRequestPayload
-            | RightBrainAcceptedPayload
-            | RightBrainProgressPayload
-            | RightBrainRejectedPayload
-            | RightBrainResultPayload
+            ExecutorRejectedPayload
+            | ExecutorResultPayload
         ],
     ) -> None:
         session_id = str(event.session_id or "").strip()
@@ -427,30 +390,6 @@ class RuntimeHost:
         payload = event.payload
         task_id = str(event.task_id or getattr(payload, "task_id", "") or "").strip()
         event_name = str(event.event_type or "").strip()
-        payload_metadata = dict(getattr(payload, "metadata", {}) or {})
-        trim_limit = 240
-        tool_event = str(payload_metadata.get("event", "") or "").strip()
-        nested_payload = payload_metadata.get("payload")
-        nested_payload_dict = dict(nested_payload) if isinstance(nested_payload, dict) else {}
-        nested_tool_calls = list(nested_payload_dict.get("tool_calls") or [])
-        first_tool_call = nested_tool_calls[0] if nested_tool_calls and isinstance(nested_tool_calls[0], dict) else {}
-        nested_tool_name = str(
-            nested_payload_dict.get("name", "")
-            or first_tool_call.get("name", "")
-            or payload_metadata.get("tool_name", "")
-            or ""
-        ).strip()
-        if (
-            event.event_type == EventType.RIGHT_EVENT_PROGRESS
-            and tool_event == "task.tool"
-        ):
-            return
-        if (
-            event.event_type == EventType.RIGHT_EVENT_PROGRESS
-            and tool_event == "task.trace"
-            and nested_tool_name == "ExecutionResultSchema"
-        ):
-            return
         record: dict[str, Any] = {
             "role": "assistant",
             "session_id": session_id,
@@ -458,85 +397,15 @@ class RuntimeHost:
             "job_id": str(getattr(payload, "job_id", "") or "").strip(),
             "created_at": str(event.emitted_at or "").strip() or datetime.now().isoformat(),
             "event_type": {
-                str(EventType.RIGHT_COMMAND_JOB_REQUESTED): "job_requested",
-                str(EventType.RIGHT_EVENT_JOB_ACCEPTED): "job_accepted",
-                str(EventType.RIGHT_EVENT_PROGRESS): "progress",
-                str(EventType.RIGHT_EVENT_JOB_REJECTED): "job_rejected",
-                str(EventType.RIGHT_EVENT_RESULT_READY): "result_ready",
+                str(EventType.EXECUTOR_EVENT_JOB_REJECTED): "job_rejected",
+                str(EventType.EXECUTOR_EVENT_RESULT_READY): "result_ready",
             }.get(event_name, event_name),
             "source": str(event.source or "").strip() or "runtime",
         }
         metadata: dict[str, Any] = {"source_event": event_name}
 
-        if event.event_type == EventType.RIGHT_COMMAND_JOB_REQUESTED:
-            action = str(getattr(payload, "job_action", "") or "").strip() or "create_task"
-            record["content"] = (
-                str(
-                    getattr(payload, "request_text", "")
-                    or getattr(payload, "source_text", "")
-                    or getattr(payload, "goal", "")
-                    or ""
-                ).strip()
-                or ("右脑任务已发起。" if action == "create_task" else "右脑取消请求已发起。")
-            )
-            metadata["job"] = {
-                key: value
-                for key, value in {
-                    "job_action": action,
-                    "job_kind": str(getattr(payload, "job_kind", "") or "").strip(),
-                }.items()
-                if value not in ("", None, [], {})
-            }
-        elif event.event_type == EventType.RIGHT_EVENT_JOB_ACCEPTED:
-            record["content"] = str(getattr(payload, "reason", "") or "任务可以开始。").strip()
-            metadata.update(
-                {
-                    key: value
-                    for key, value in {
-                        "decision": str(getattr(payload, "decision", "") or "").strip(),
-                        "stage": str(getattr(payload, "stage", "") or "").strip(),
-                        "estimated_duration_s": getattr(payload, "estimated_duration_s", None),
-                    }.items()
-                    if value not in ("", None, [], {})
-                }
-            )
-        elif event.event_type == EventType.RIGHT_EVENT_PROGRESS:
-            content = str(getattr(payload, "summary", "") or "").strip() or "右脑任务更新。"
-            if len(content) > trim_limit:
-                content = f"{content[: trim_limit - 3]}..."
-            record["content"] = content
-            update_kind = "progress"
-            if tool_event == "task.trace":
-                role = str(nested_payload_dict.get("role", "") or "").strip()
-                if role == "assistant":
-                    update_kind = "message"
-                elif role == "tool":
-                    update_kind = "tool"
-            elif tool_event == "task.tool":
-                update_kind = "tool"
-            metadata.update(
-                {
-                    key: value
-                    for key, value in {
-                        "decision": str(getattr(payload, "decision", "") or "").strip(),
-                        "stage": str(getattr(payload, "stage", "") or "").strip(),
-                    }.items()
-                    if value not in ("", None, [], {})
-                }
-            )
-            metadata["update"] = {
-                key: value
-                for key, value in {
-                    "kind": update_kind,
-                    "event": tool_event or None,
-                    "tool_name": nested_tool_name or None,
-                    "progress": getattr(payload, "progress", None),
-                    "next_step": str(getattr(payload, "next_step", "") or "").strip() or None,
-                }.items()
-                if value not in ("", None, [], {})
-            }
-        elif event.event_type == EventType.RIGHT_EVENT_JOB_REJECTED:
-            record["content"] = str(getattr(payload, "reason", "") or "右脑拒绝执行当前请求。").strip()
+        if event.event_type == EventType.EXECUTOR_EVENT_JOB_REJECTED:
+            record["content"] = str(getattr(payload, "reason", "") or "执行层拒绝当前请求。").strip()
             metadata.update(
                 {
                     key: value
@@ -547,10 +416,10 @@ class RuntimeHost:
                     if value not in ("", None, [], {})
                 }
             )
-        elif event.event_type == EventType.RIGHT_EVENT_RESULT_READY:
+        elif event.event_type == EventType.EXECUTOR_EVENT_RESULT_READY:
             record["content"] = (
                 str(getattr(payload, "result_text", "") or getattr(payload, "summary", "") or "").strip()
-                or "右脑任务已结束。"
+                or "执行任务已结束。"
             )
             metadata.update(
                 {
@@ -565,8 +434,8 @@ class RuntimeHost:
             )
 
         if event.event_type in {
-            EventType.RIGHT_EVENT_RESULT_READY,
-            EventType.RIGHT_EVENT_JOB_REJECTED,
+            EventType.EXECUTOR_EVENT_RESULT_READY,
+            EventType.EXECUTOR_EVENT_JOB_REJECTED,
         }:
             task = self._resolve_session_task_state(session_id=session_id, task_id=task_id) if task_id else {}
             if task:
@@ -578,7 +447,7 @@ class RuntimeHost:
 
         if metadata:
             record["metadata"] = metadata
-        self.thread_store.append_right_messages(session_id, [record])
+        self.thread_store.append_executor_messages(session_id, [record])
 
     @staticmethod
     def _summarize_trace(trace: list[dict[str, Any]]) -> str:
@@ -615,14 +484,6 @@ class RuntimeHost:
             return {}
         request = task.request.model_dump(exclude_none=True)
         params = self._compact_task_spec_for_session(request)
-        task_view = self.kernel.session_runtime.task_view(session_id, task.task_id)
-        if task_view is not None:
-            return self._compact_task_state_for_session(
-                project_task_from_session_view(
-                    task_view,
-                    params=params,
-                )
-            )
         return self._compact_task_state_for_session(
             project_task_from_runtime_snapshot(
                 {
@@ -633,7 +494,6 @@ class RuntimeHost:
                     "title": task.title,
                     "summary": task.summary,
                     "error": task.error,
-                    "last_progress": task.last_progress,
                     "updated_at": task.updated_at,
                 },
                 params=params,
@@ -710,7 +570,7 @@ class RuntimeHost:
         return compact
 
     @staticmethod
-    def _right_summary_text(record: dict[str, Any]) -> str:
+    def _executor_summary_text(record: dict[str, Any]) -> str:
         content = record.get("content", "")
         summary = str(content or "").strip()
         if summary:
@@ -728,17 +588,17 @@ class RuntimeHost:
                 if summary:
                     return summary
 
-            left_brain = metadata.get("left_brain", {})
-            if isinstance(left_brain, dict):
-                return str(left_brain.get("execution_summary", "") or "").strip()
+            brain = metadata.get("brain", {})
+            if isinstance(brain, dict):
+                return str(brain.get("execution_summary", "") or "").strip()
 
         return ""
 
     def _snapshot_turn_input(self, session_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         thread = self.thread_store.get_or_create(session_id)
         dialogue_history = thread.get_history(max_messages=self.memory_window, include_task_context=False)
-        right_history = self.thread_store.get_right_messages(session_id, max_messages=self.memory_window)
-        return dialogue_history, right_history
+        executor_history = self.thread_store.get_executor_messages(session_id, max_messages=self.memory_window)
+        return dialogue_history, executor_history
 
     def _build_history_context(
         self,
@@ -761,9 +621,9 @@ class RuntimeHost:
             if role and text:
                 lines.append(f"{role}: {text}")
         for record in internal_history[-3:]:
-            summary = self._right_summary_text(record)
+            summary = self._executor_summary_text(record)
             if summary:
-                lines.append(f"right: {summary}")
+                lines.append(f"executor: {summary}")
         return "\n".join(lines[-8:])
 
     def _persist_user_message(
@@ -792,7 +652,7 @@ class RuntimeHost:
     def _reset_session_thread(self, session_id: str) -> None:
         thread = self.thread_store.get_or_create(session_id)
         thread.clear()
-        self.thread_store.clear_right_messages(thread.thread_id)
+        self.thread_store.clear_executor_messages(thread.thread_id)
         self.thread_store.save(thread)
         self.thread_store.invalidate(thread.thread_id)
 

@@ -35,7 +35,7 @@ class TurnReflectionService:
     _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
 
     _PROMPT = """
-你是 `left_brain` 的逐轮反思环节。
+你是 `brain` 的逐轮反思环节。
 
 请严格按结构化字段填写，不要补充额外说明。
 
@@ -43,7 +43,7 @@ class TurnReflectionService:
 1. 总结本轮发生了什么。
 2. 列出本轮暴露出的主要问题（如果有）。
 3. 说明问题最终是如何解决的。
-4. 从 `left_brain` 视角评价本轮 `task` 执行情况。
+4. 从 `brain` 视角评价本轮 `task` 执行情况。
 5. 只在确实有长期价值时，产出少量长期记忆候选。
 6. 只在本轮存在高置信、可直接落盘的信息时，填写 `user_updates` 与 `soul_updates`。
 7. 必须填写 `state_update`，并且 `pad_delta` / `drives_delta` 不能返回空对象。
@@ -52,7 +52,7 @@ class TurnReflectionService:
 - `memory_candidates` 必须简洁，并且足够稳定，能帮助未来轮次。
 - `user_updates` / `soul_updates` 的每一项都必须是可直接写入 Markdown 列表的单句结论。
 - `user_updates` 聚焦用户本轮明确表达出的稳定事实、偏好、目标、边界或协作习惯。
-- `soul_updates` 聚焦左脑本轮需要立即记住的表达方式、风格要求或协作策略修正。
+- `soul_updates` 聚焦大脑本轮需要立即记住的表达方式、风格要求或协作策略修正。
 - `state_update` 必须始终填写。
 - `pad_delta` 必须始终包含 `pleasure`、`arousal`、`dominance` 三个键。
 - `drives_delta` 必须始终包含 `social`、`energy` 两个键。
@@ -60,7 +60,7 @@ class TurnReflectionService:
 - 如果本轮判断“不需要调整”，也必须把当前上下文中的状态值原样回填到这些键里，不能返回 `{{}}`，也不要统一写成 `0.0`。
 - 如果本轮判断“需要调整”，也要直接填写你判断后的目标状态值，而不是填写相对当前值的增减量。
 - 例如：当前 `arousal=1.0`，你判断本轮更合理的状态应为 `0.8`，那就写 `0.8`，不要写 `-0.2`。
-- `state_update` 是左脑对“本轮状态变化/状态判断”的记录字段，不是系统控制指令。
+- `state_update` 是大脑对“本轮状态变化/状态判断”的记录字段，不是系统控制指令。
 - 系统会在 `should_apply=true` 时，把你写出的状态值同步到实时状态；`should_apply=false` 时，只记录你的判断，不修改实时状态。
 - 不要复制原始日志，不要复制大段对话原文。
 - 如果本轮没有执行，`outcome` 设为 `no_execution`，并把 `execution_review.effectiveness` 设为 `none`。
@@ -85,7 +85,7 @@ class TurnReflectionService:
 判断原则：
 - `emotion`、`pad`、`drives` 是当前轮进入反思时的实时状态上下文。
 - 你在填写 `state_update` 时，要基于当前状态上下文与本轮对话过程自己判断。
-- `state_update` 表示你对“本轮结束后，左脑状态应当如何记录”的判断，不是重复回放日志，也不是执行指令。
+- `state_update` 表示你对“本轮结束后，大脑状态应当如何记录”的判断，不是重复回放日志，也不是执行指令。
 - 你可以自行判断当前状态是否需要被标记为稳定、上扬、回落或紧绷。
 - 如果你判断当前状态已经合理，可以 `should_apply=false`，但仍然要把你的判断理由和完整字段写出来。
 - 无论 `should_apply` 是 `true` 还是 `false`，`pad_delta` / `drives_delta` 都必须填写你判断后的状态值。
@@ -142,11 +142,11 @@ class TurnReflectionService:
 - `problems`：本轮暴露出来的问题列表，没有就返回空数组。
 - `resolution`：这些问题最终是如何被解决的。
 - `outcome`：只能是 `success`、`partial`、`failed`、`no_execution`。
-- `next_hint`：下一轮左脑最值得记住的承接提示。
+- `next_hint`：下一轮大脑最值得记住的承接提示。
 - `needs_deep_reflection`：是否建议系统在本轮浅反思结束后继续触发一次深反思。
 - `user_updates`：本轮新增的用户信息直写候选，没有就返回空数组。
-- `soul_updates`：本轮新增的左脑风格修正直写候选，没有就返回空数组。
-- `state_update`：左脑对本轮状态变化的判断记录，必须填写完整结构。
+- `soul_updates`：本轮新增的大脑风格修正直写候选，没有就返回空数组。
+- `state_update`：大脑对本轮状态变化的判断记录，必须填写完整结构。
 - `memory_candidates`：确实值得写入长期记忆的候选，没有就返回空数组。
 - `execution_review`：对执行过程的紧凑评价。
 

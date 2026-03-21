@@ -4,11 +4,18 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-**emoticorebot** is a companion AI architecture built around a **single subject with Left Brain / Right Brain / Memory / Reflection** design.
+**emoticorebot** is a companion AI architecture built around a **single-task, batch-driven Brain / Executor / World Model / Reflection** design.
 
-The system has one outward-facing self. `Left Brain` handles user-facing expression and companionship, `Right Brain` handles async reasoning and execution, and `Memory` plus `Reflection` keep the relationship continuous over time.
+The system has one outward-facing self. `Brain` handles user-facing expression and planning, `Executor` handles async execution and tools, and `World Model` plus `Reflection` keep the relationship and task continuity over time.
 
-Detailed architecture design:
+Current docs:
+
+- [docs/brain-executor-architecture.zh-CN.md](docs/brain-executor-architecture.zh-CN.md)
+- [docs/brain-executor-single-task-architecture.zh-CN.md](docs/brain-executor-single-task-architecture.zh-CN.md)
+- [docs/brain-system-prompt.zh-CN.md](docs/brain-system-prompt.zh-CN.md)
+- [docs/brain-executor-refactor-plan.zh-CN.md](docs/brain-executor-refactor-plan.zh-CN.md)
+
+Archived historical docs:
 
 - [docs/companion-left-right-brain-architecture.zh-CN.md](docs/companion-left-right-brain-architecture.zh-CN.md)
 - [docs/companion-left-right-brain-module-contracts.zh-CN.md](docs/companion-left-right-brain-module-contracts.zh-CN.md)
@@ -49,11 +56,11 @@ This creates `~/.emoticorebot/` with default config, `SOUL.md` (persona), `USER.
   },
   "agents": {
     "defaults": {
-      "leftBrainMode": {
+      "brainMode": {
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       },
-      "rightBrainMode": {
+      "executorMode": {
         "model": "anthropic/claude-opus-4-5",
         "provider": "openrouter"
       }
@@ -80,34 +87,37 @@ Current gateway integrations are WebSocket/polling based and do not require a lo
 
 ## Architecture
 
-The authoritative architecture is:
+The current runtime flow is:
 
 ```text
 User / Channel
-  -> Session Supervisor
-  -> Intent Router
-  -> Left Brain
-  -> Delivery Plane
+  -> ConversationGateway
+  -> RuntimeKernel
+  -> PriorityPubSubBus
+  -> InputNormalizer
+  -> SessionRuntime
+  -> BrainRuntime
+  -> ExecutorRuntime (optional, current batch only)
+  -> OutputRuntime
+  -> DeliveryRuntime
+  -> User / Channel
 
-Intent Router
-  -> Right Brain (async, on demand)
-Right Brain
-  -> Left Brain
-
-Left Brain / Right Brain
-  -> Memory
-Left Brain / Right Brain
+BrainRuntime / SessionRuntime / ExecutorRuntime
+  -> World Model
+BrainRuntime
   -> Reflection
 ```
 
 ### Canonical Principles
 
 - The system exposes one continuous subject to the user.
-- Inputs are modeled only as `turn` or `stream`.
-- Deliveries are modeled only as `inline`, `push`, or `stream`.
-- `Left Brain` owns user-facing expression and companionship.
-- `Right Brain` owns async reasoning, execution, tools, and long-running work.
-- `Memory` and `Reflection` keep long-term continuity.
+- There is only one `current_task` per session.
+- One brain turn can emit at most one `execute` action.
+- Parallelism exists only inside `current_task.current_checks`.
+- `Brain` owns user-facing expression, stable mainline, and next-batch decisions.
+- `Executor` owns async execution, tools, and terminal fact reporting.
+- `World Model` is the source of truth for current task state.
+- `Reflection` is sidecar work triggered by `Brain`, not by `Executor`.
 
 ### Canonical Interaction Modes
 
@@ -121,10 +131,11 @@ Left Brain / Right Brain
 
 ### Canonical Execution Rule
 
-- `Right Brain` is the only background execution system.
-- `create_task` is interpreted as "submit a request to Right Brain for review and handling".
-- `Right Brain` may `accept`, `answer_only`, or `reject`.
-- User-visible wording still returns through `Left Brain`.
+- `Executor` is the only execution system.
+- `execute` means "submit the current batch to Executor for handling".
+- `Executor` only emits terminal results for the current job.
+- `SessionRuntime` writes those facts back into the world model.
+- `Brain` re-decides only after a user event or the current batch reaches terminal state.
 
 ---
 
@@ -144,7 +155,7 @@ Three concurrent `asyncio.Task` loops:
 #### Deep Reflection
 Called by the subconscious reflection loop. It runs `deep_reflection` with a periodic signal and may:
 
-- append stable memories into `memory/long_term/memory.jsonl`
+- append stable memories into `memory/memory.jsonl`
 - rewrite `SOUL.md` when a stable self-pattern is confirmed
 - rewrite `USER.md` when a stable user-pattern is confirmed
 
@@ -249,7 +260,7 @@ emoticorebot uses **LangChain** adapters and **litellm** for broad model support
 | Groq | `langchain-groq` |
 | Ollama (local) | `langchain-ollama` |
 
-`left_brain` and `right_brain` can use different models through `agents.defaults.leftBrainMode` and `agents.defaults.rightBrainMode`.
+`brain` and `executor` can use different models through `agents.defaults.brainMode` and `agents.defaults.executorMode`.
 
 ---
 
@@ -324,80 +335,32 @@ emoticorebot channels status  # Show channel connection status
 
 ```text
 emoticorebot/
-├── adapters/            # Conversation gateway / outbound dispatch
-├── background/          # Background daemon + periodic reflection entrypoints
-├── bootstrap.py         # RuntimeHost, top-level assembly host
-├── left/
-│   ├── context.py
-│   ├── packet.py
-│   ├── reply_policy.py
-│   └── runtime.py
-├── right/
-│   ├── backend.py
-│   ├── executor.py
-│   ├── hooks.py
-│   ├── skills.py
-│   ├── runtime.py
-│   ├── state.py
-│   ├── store.py
-│   └── trace.py
-├── bus/
-│   ├── interceptor.py
-│   ├── priority_queue.py
-│   ├── pubsub.py
-│   └── router.py
-├── delivery/
-│   ├── runtime.py
-│   └── service.py
-├── memory/
-│   ├── crystallizer.py
-│   ├── retrieval.py
-│   ├── short_term.py
-│   ├── store.py
-│   └── vector_index.py
-├── protocol/            # Typed runtime commands / events / models
-│   ├── commands.py
-│   ├── contracts.py
-│   ├── envelope.py
-│   ├── event_contracts.py
-│   ├── events.py
-│   ├── reflection_models.py
-│   ├── priorities.py
-│   ├── task_models.py
-│   └── topics.py
-├── runtime/
-│   ├── kernel.py
-│   └── transport_bus.py
-├── safety/
-│   └── guard.py
-├── session/
-│   ├── models.py
-│   ├── runtime.py
-│   ├── history_store.py
-│   └── thread_store.py
-├── tools/
-│   ├── manager.py
-│   └── mcp.py
-├── channels/
-├── providers/
-│   └── factory.py
-├── cron/
-├── models/
-├── config/
-├── skills/
-├── templates/
-├── reflection/
-│   ├── candidates.py
-│   ├── cognitive.py
-│   ├── deep.py
-│   ├── governor.py
-│   ├── input.py
-│   ├── manager.py
-│   ├── persona.py
-│   ├── runtime.py
-│   └── turn.py
-├── utils/
-└── cli/
+├── adapters/            # Conversation gateway adapters
+├── background/          # Subconscious daemon and heartbeat loops
+├── bootstrap.py         # RuntimeHost and top-level assembly
+├── brain/               # Brain prompt, packet parsing, decision runtime
+├── bus/                 # Priority event bus and routing
+├── channels/            # Telegram / Discord / Slack / etc.
+├── cli/                 # CLI entrypoints
+├── config/              # Config loading and schema
+├── context/             # Brain context assembly
+├── cron/                # Scheduler service
+├── delivery/            # Final outbound delivery
+├── executor/            # Batch execution runtime and tool agent
+├── input/               # Input normalization
+├── memory/              # Long-term store, retrieval, vector mirror
+├── models/              # Shared runtime models
+├── output/              # Output event shaping
+├── protocol/            # Typed runtime commands / events / topics
+├── providers/           # LLM and transcription providers
+├── reflection/          # Turn/deep reflection and governor
+├── runtime/             # RuntimeKernel and transport bus
+├── session/             # Session flow, thread store, world-model wakeups
+├── skills/              # Built-in workflow skills
+├── templates/           # Workspace bootstrap templates
+├── tools/               # Built-in tools and MCP registry
+├── utils/               # Shared helpers
+└── world_model/         # Single-task schema, reducers, persistence
 ```
 
 ---
@@ -409,4 +372,3 @@ See `COMMUNICATION.md`.
 ## License
 
 MIT.
-

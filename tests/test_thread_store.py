@@ -3,7 +3,7 @@ from __future__ import annotations
 from emoticorebot.session.thread_store import ThreadStore
 
 
-def test_thread_store_persists_left_and_right_history(tmp_path) -> None:
+def test_thread_store_persists_brain_and_executor_history(tmp_path) -> None:
     store = ThreadStore(tmp_path)
 
     thread = store.get_or_create("cli:direct")
@@ -15,23 +15,23 @@ def test_thread_store_persists_left_and_right_history(tmp_path) -> None:
         task={"task_id": "task_1", "status": "done"},
     )
     store.save(thread)
-    store.append_right_messages(
+    store.append_executor_messages(
         "cli:direct",
-        [{"role": "assistant", "content": "right note", "message_id": "inner_1", "event_type": "progress"}],
+        [{"role": "assistant", "content": "executor note", "message_id": "inner_1", "event_type": "progress"}],
     )
 
     store.invalidate("cli:direct")
     reloaded = store.get("cli:direct")
-    right = store.get_right_messages("cli:direct")
+    executor = store.get_executor_messages("cli:direct")
 
     assert reloaded is not None
     assert reloaded.thread_id == "cli:direct"
     assert len(reloaded.messages) == 2
     assert len(reloaded.get_history()) == 2
-    assert right[0]["message_id"] == "inner_1"
-    assert right[0]["event_type"] == "progress"
-    assert (tmp_path / "session" / "cli_direct" / "left.jsonl").exists()
-    assert (tmp_path / "session" / "cli_direct" / "right.jsonl").exists()
+    assert executor[0]["message_id"] == "inner_1"
+    assert executor[0]["event_type"] == "progress"
+    assert (tmp_path / "session" / "cli_direct" / "brain.jsonl").exists()
+    assert (tmp_path / "session" / "cli_direct" / "executor.jsonl").exists()
 
 
 def test_thread_store_lists_threads_by_updated_time(tmp_path) -> None:
@@ -48,4 +48,4 @@ def test_thread_store_lists_threads_by_updated_time(tmp_path) -> None:
     listing = store.list_threads()
 
     assert {item["thread_id"] for item in listing} == {"cli_first", "cli_second"}
-    assert all(item["path"].endswith("left.jsonl") for item in listing)
+    assert all(item["path"].endswith("brain.jsonl") for item in listing)

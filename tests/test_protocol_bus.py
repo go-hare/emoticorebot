@@ -35,7 +35,7 @@ def test_priority_bus_dispatches_higher_priority_first() -> None:
         async def handler(event):
             seen.append(event.event_type)
 
-        bus.subscribe(consumer="left_runtime", handler=handler, topic=Topic.INPUT_EVENT)
+        bus.subscribe(consumer="brain_runtime", handler=handler, topic=Topic.INPUT_EVENT)
         bus.subscribe(consumer="runtime", handler=handler, topic=Topic.CONTROL_COMMAND)
 
         low = build_envelope(
@@ -53,7 +53,7 @@ def test_priority_bus_dispatches_higher_priority_first() -> None:
         )
         high = build_envelope(
             event_type=EventType.CONTROL_STOP,
-            source="left_runtime",
+            source="brain_runtime",
             target="runtime",
             session_id="sess_1",
             payload=ControlCommandPayload(command_id="cmd_1", action="stop"),
@@ -76,11 +76,11 @@ def test_target_routing_only_delivers_to_matching_consumer() -> None:
         async def worker_handler(event):
             seen.append(f"worker:{event.target}")
 
-        async def left_runtime_handler(event):
-            seen.append(f"left_runtime:{event.target}")
+        async def brain_runtime_handler(event):
+            seen.append(f"brain_runtime:{event.target}")
 
         bus.subscribe(consumer="worker", handler=worker_handler, topic=Topic.OUTPUT_EVENT)
-        bus.subscribe(consumer="left_runtime", handler=left_runtime_handler, topic=Topic.OUTPUT_EVENT)
+        bus.subscribe(consumer="brain_runtime", handler=brain_runtime_handler, topic=Topic.OUTPUT_EVENT)
 
         await bus.publish(_reply_event(reply_id="reply_1", target="worker"))
         await bus.drain()
@@ -249,4 +249,3 @@ def test_subscriber_failure_emits_warning_and_bus_keeps_running() -> None:
             await bus.stop()
 
     asyncio.run(_run())
-

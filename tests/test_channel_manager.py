@@ -134,7 +134,7 @@ def test_channel_manager_fallback_stream_suppresses_final_duplicate() -> None:
     asyncio.run(_exercise_channel_manager_fallback_stream_suppresses_final_duplicate())
 
 
-async def _exercise_channel_manager_clears_interrupted_stream_state_on_followup_message() -> None:
+async def _exercise_channel_manager_clears_interrupted_stream_state_on_subsequent_message() -> None:
     bus = TransportBus()
     manager = ChannelManager(Config(), bus)
     channel = _FakeStreamingChannel(bus)
@@ -177,8 +177,8 @@ async def _exercise_channel_manager_clears_interrupted_stream_state_on_followup_
         await asyncio.gather(dispatch, return_exceptions=True)
 
 
-def test_channel_manager_clears_interrupted_stream_state_on_followup_message() -> None:
-    asyncio.run(_exercise_channel_manager_clears_interrupted_stream_state_on_followup_message())
+def test_channel_manager_clears_interrupted_stream_state_on_subsequent_message() -> None:
+    asyncio.run(_exercise_channel_manager_clears_interrupted_stream_state_on_subsequent_message())
 
 
 async def _exercise_channel_manager_clears_superseded_stream_state() -> None:

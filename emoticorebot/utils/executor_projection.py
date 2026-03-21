@@ -4,6 +4,20 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+
+def _project_stage(snapshot: Mapping[str, Any], params: Mapping[str, Any] | None = None) -> str | list[str] | None:
+    payload = dict(params or {})
+    if "current_stage" in snapshot:
+        stage = snapshot.get("current_stage")
+    else:
+        stage = payload.get("current_stage")
+    if isinstance(stage, list):
+        items = [str(item).strip() for item in stage if str(item).strip()]
+        return items or None
+    text = str(stage or "").strip()
+    return text or None
+
+
 def normalize_task_state(state: str) -> str:
     normalized = str(state or "").strip()
     if normalized == "done":
@@ -42,7 +56,7 @@ def project_task_from_runtime_snapshot(
         "result": normalize_task_result(state, result),
         "summary": str(payload.get("summary", "") or "").strip(),
         "error": str(payload.get("error", "") or "").strip(),
-        "stage": str(payload.get("last_progress", "") or "").strip(),
+        "stage": _project_stage(payload, params),
     }
     if params:
         task["params"] = dict(params)
@@ -77,7 +91,7 @@ def project_task_from_session_view(
         "state": str(getattr(task_view, "state", "") or "running").strip() or "running",
         "result": str(getattr(task_view, "result", "") or "none").strip() or "none",
         "summary": str(getattr(task_view, "summary", "") or "").strip(),
-        "stage": str(getattr(task_view, "summary", "") or "").strip(),
+        "stage": _project_stage({}, params),
     }
     if params:
         task["params"] = dict(params)

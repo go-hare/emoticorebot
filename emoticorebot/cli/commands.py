@@ -21,7 +21,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from emoticorebot import __version__, __logo__
 from emoticorebot.config.schema import Config
-from emoticorebot.right_brain.state import TERMINAL_STATES, RightBrainState
+from emoticorebot.executor.state import TERMINAL_STATES, ExecutorState
 
 app = typer.Typer(
     name="emoticorebot",
@@ -151,6 +151,27 @@ def _pick_one_shot_task_id(agent_loop: object, session_id: str, known_task_ids: 
     return newest.task_id
 
 
+def _pick_one_shot_task_ids(
+    agent_loop: object,
+    session_id: str,
+    known_task_ids: set[str],
+    fallback_task_ids: set[str] | None,
+) -> set[str]:
+    resolved: set[str] = {
+        str(task_id or "").strip()
+        for task_id in list(fallback_task_ids or set())
+        if str(task_id or "").strip()
+    }
+    task_store = getattr(getattr(agent_loop, "kernel", None), "task_store", None)
+    if task_store is None:
+        return resolved
+    for task in task_store.for_session(session_id):
+        task_id = str(getattr(task, "task_id", "") or "").strip()
+        if task_id and task_id not in known_task_ids:
+            resolved.add(task_id)
+    return resolved
+
+
 def _is_one_shot_task_settled(agent_loop: object, task_id: str | None) -> bool:
     if not task_id:
         return False
@@ -161,7 +182,35 @@ def _is_one_shot_task_settled(agent_loop: object, task_id: str | None) -> bool:
     if task is None:
         return False
 
-    return task.state in TERMINAL_STATES or task.state is RightBrainState.DONE
+    return task.state in TERMINAL_STATES or task.state is ExecutorState.DONE
+
+
+def _are_one_shot_tasks_settled(agent_loop: object, task_ids: set[str]) -> bool:
+    return bool(task_ids) and all(_is_one_shot_task_settled(agent_loop, task_id) for task_id in task_ids)
+
+
+def _latest_one_shot_task_id(agent_loop: object, task_ids: set[str]) -> str | None:
+    if not task_ids:
+        return None
+    kernel = getattr(agent_loop, "kernel", None)
+    if kernel is None or not hasattr(kernel, "get_task"):
+        return None
+    candidates = []
+    for task_id in task_ids:
+        task = kernel.get_task(task_id)
+        if task is not None:
+            candidates.append(task)
+    if not candidates:
+        return None
+    latest = max(
+        candidates,
+        key=lambda task: (
+            str(getattr(task, "updated_at", "") or ""),
+            int(getattr(task, "state_version", 1) or 1),
+            str(getattr(task, "task_id", "") or ""),
+        ),
+    )
+    return str(getattr(latest, "task_id", "") or "").strip() or None
 
 
 async def _await_one_shot_task_id(
@@ -182,6 +231,26 @@ async def _await_one_shot_task_id(
         if task_id:
             return task_id
     return None
+
+
+async def _await_one_shot_task_ids(
+    agent_loop: object,
+    session_id: str,
+    known_task_ids: set[str],
+    fallback_task_ids: set[str] | None,
+    *,
+    retries: int = 5,
+    delay_s: float = 0.1,
+) -> set[str]:
+    task_ids = _pick_one_shot_task_ids(agent_loop, session_id, known_task_ids, fallback_task_ids)
+    if task_ids or fallback_task_ids:
+        return task_ids
+    for _ in range(retries):
+        await asyncio.sleep(delay_s)
+        task_ids = _pick_one_shot_task_ids(agent_loop, session_id, known_task_ids, None)
+        if task_ids:
+            return task_ids
+    return set()
 
 
 async def _read_interactive_input_async() -> str:
@@ -341,8 +410,8 @@ def gateway(
     agent = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        right_brain_mode=config.agents.defaults.right_brain_mode,
-        left_brain_mode=config.agents.defaults.left_brain_mode,
+        executor_mode=config.agents.defaults.executor_mode,
+        brain_mode=config.agents.defaults.brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -449,8 +518,8 @@ def agent(
     agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        right_brain_mode=config.agents.defaults.right_brain_mode,
-        left_brain_mode=config.agents.defaults.left_brain_mode,
+        executor_mode=config.agents.defaults.executor_mode,
+        brain_mode=config.agents.defaults.brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -487,7 +556,7 @@ def agent(
             completed = asyncio.Event()
             final_response: list[str] = []
             streamed: dict[str, bool] = {}
-            awaited_task_id: str | None = None
+            awaited_task_ids: set[str] = set()
             direct_error: list[BaseException] = []
             consume_error: list[BaseException] = []
 
@@ -496,7 +565,30 @@ def agent(
                 return outbound_message_id == pending_message_id
 
             async def _consume_outbound():
-                nonlocal awaited_task_id
+                nonlocal awaited_task_ids
+
+                async def _refresh_awaited_task_ids(*, matched_task_id: str | None, reply_kind: str) -> None:
+                    nonlocal awaited_task_ids
+                    fallback_task_ids = {matched_task_id} if matched_task_id else set()
+                    awaited_task_ids |= _pick_one_shot_task_ids(
+                        agent_loop,
+                        session_id,
+                        known_task_ids,
+                        fallback_task_ids or None,
+                    )
+                    if awaited_task_ids:
+                        return
+                    if reply_kind != "status" and not fallback_task_ids:
+                        return
+                    awaited_task_ids = await _await_one_shot_task_ids(
+                        agent_loop,
+                        session_id,
+                        known_task_ids,
+                        fallback_task_ids or None,
+                        retries=30 if reply_kind == "status" and not fallback_task_ids else 5,
+                        delay_s=0.2,
+                    )
+
                 while True:
                     try:
                         msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
@@ -532,39 +624,39 @@ def agent(
                             if streamed.get(stream_id):
                                 matched_task_id = str(metadata.get("task_id", "") or "").strip() or None
                                 reply_kind = str(metadata.get("reply_kind", "") or "").strip()
-                                if awaited_task_id is None:
-                                    awaited_task_id = await _await_one_shot_task_id(
-                                        agent_loop,
-                                        session_id,
-                                        known_task_ids,
-                                        matched_task_id,
-                                        retries=30 if reply_kind == "status" and not matched_task_id else 5,
-                                        delay_s=0.2,
-                                    )
+                                await _refresh_awaited_task_ids(
+                                    matched_task_id=matched_task_id,
+                                    reply_kind=reply_kind,
+                                )
                                 final_response[:] = [msg.content]
-                                if matched_task_id == awaited_task_id and reply_kind in {"answer", "safety_fallback"}:
+                                if not awaited_task_ids and reply_kind == "answer":
                                     completed.set()
                                     continue
-                                if awaited_task_id and not _is_one_shot_task_settled(agent_loop, awaited_task_id):
+                                if reply_kind != "answer":
+                                    continue
+                                if not _are_one_shot_tasks_settled(agent_loop, awaited_task_ids):
+                                    continue
+                                latest_task_id = _latest_one_shot_task_id(agent_loop, awaited_task_ids)
+                                if latest_task_id and matched_task_id and matched_task_id != latest_task_id:
                                     continue
                                 completed.set()
                                 continue
                         matched_task_id = str(metadata.get("task_id", "") or "").strip() or None
                         reply_kind = str(metadata.get("reply_kind", "") or "").strip()
-                        if awaited_task_id is None:
-                            awaited_task_id = await _await_one_shot_task_id(
-                                agent_loop,
-                                session_id,
-                                known_task_ids,
-                                matched_task_id,
-                                retries=30 if reply_kind == "status" and not matched_task_id else 5,
-                                delay_s=0.2,
-                            )
+                        await _refresh_awaited_task_ids(
+                            matched_task_id=matched_task_id,
+                            reply_kind=reply_kind,
+                        )
                         final_response[:] = [msg.content]
-                        if matched_task_id == awaited_task_id and reply_kind in {"answer", "safety_fallback"}:
+                        if not awaited_task_ids and reply_kind == "answer":
                             completed.set()
                             continue
-                        if awaited_task_id and not _is_one_shot_task_settled(agent_loop, awaited_task_id):
+                        if reply_kind != "answer":
+                            continue
+                        if awaited_task_ids and not _are_one_shot_tasks_settled(agent_loop, awaited_task_ids):
+                            continue
+                        latest_task_id = _latest_one_shot_task_id(agent_loop, awaited_task_ids)
+                        if latest_task_id and matched_task_id and matched_task_id != latest_task_id:
                             continue
                         completed.set()
                     except asyncio.TimeoutError:
@@ -603,7 +695,7 @@ def agent(
                 await direct_task
                 if streamed:
                     _finish_stream_output()
-                    if final_response and awaited_task_id:
+                    if final_response and awaited_task_ids:
                         _print_agent_response(final_response[0], render_markdown=markdown)
                 elif final_response:
                     _print_agent_response(final_response[0], render_markdown=markdown)
@@ -1072,8 +1164,8 @@ def cron_run(
     agent_loop = RuntimeHost(
         bus=bus,
         workspace=config.workspace_path,
-        right_brain_mode=config.agents.defaults.right_brain_mode,
-        left_brain_mode=config.agents.defaults.left_brain_mode,
+        executor_mode=config.agents.defaults.executor_mode,
+        brain_mode=config.agents.defaults.brain_mode,
         providers_config=config.providers,
         memory_config=config.memory,
         brave_api_key=config.tools.web.search.api_key or None,
@@ -1096,12 +1188,35 @@ def cron_run(
         known_task_ids = {task.task_id for task in agent_loop.kernel.task_store.for_session(session_key)}
         completed = asyncio.Event()
         final_response: list[str] = []
-        awaited_task_id: str | None = None
+        awaited_task_ids: set[str] = set()
         direct_error: list[BaseException] = []
         consume_error: list[BaseException] = []
 
         async def _consume_outbound() -> None:
-            nonlocal awaited_task_id
+            nonlocal awaited_task_ids
+
+            async def _refresh_awaited_task_ids(*, matched_task_id: str | None, reply_kind: str) -> None:
+                nonlocal awaited_task_ids
+                fallback_task_ids = {matched_task_id} if matched_task_id else set()
+                awaited_task_ids |= _pick_one_shot_task_ids(
+                    agent_loop,
+                    session_key,
+                    known_task_ids,
+                    fallback_task_ids or None,
+                )
+                if awaited_task_ids:
+                    return
+                if reply_kind != "status" and not fallback_task_ids:
+                    return
+                awaited_task_ids = await _await_one_shot_task_ids(
+                    agent_loop,
+                    session_key,
+                    known_task_ids,
+                    fallback_task_ids or None,
+                    retries=30 if reply_kind == "status" and not fallback_task_ids else 5,
+                    delay_s=0.2,
+                )
+
             while True:
                 try:
                     msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
@@ -1114,20 +1229,17 @@ def cron_run(
                         continue
                     task_id = str(metadata.get("task_id", "") or "").strip() or None
                     reply_kind = str(metadata.get("reply_kind", "") or "").strip()
-                    if awaited_task_id is None:
-                        awaited_task_id = await _await_one_shot_task_id(
-                            agent_loop,
-                            session_key,
-                            known_task_ids,
-                            task_id,
-                            retries=30 if reply_kind == "status" and not task_id else 5,
-                            delay_s=0.2,
-                        )
+                    await _refresh_awaited_task_ids(matched_task_id=task_id, reply_kind=reply_kind)
                     final_response[:] = [msg.content]
-                    if task_id == awaited_task_id and reply_kind in {"answer", "safety_fallback"}:
+                    if not awaited_task_ids and reply_kind == "answer":
                         completed.set()
                         continue
-                    if awaited_task_id and not _is_one_shot_task_settled(agent_loop, awaited_task_id):
+                    if reply_kind != "answer":
+                        continue
+                    if awaited_task_ids and not _are_one_shot_tasks_settled(agent_loop, awaited_task_ids):
+                        continue
+                    latest_task_id = _latest_one_shot_task_id(agent_loop, awaited_task_ids)
+                    if latest_task_id and task_id and task_id != latest_task_id:
                         continue
                     completed.set()
                 except asyncio.TimeoutError:
@@ -1203,8 +1315,8 @@ def status():
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
     if config_path.exists():
-        console.print(f"Left Brain Model: {config.agents.defaults.left_brain_mode.model}")
-        console.print(f"Right Brain Model: {config.agents.defaults.right_brain_mode.model}")
+        console.print(f"Brain Model: {config.agents.defaults.brain_mode.model}")
+        console.print(f"Executor Model: {config.agents.defaults.executor_mode.model}")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,7 @@
-"""潜意识守护进程 - 情绪衰减 / 反思 / 主动对话。
+"""潜意识守护进程 - 情绪衰减 / 主动对话。
 
-后台独立运行，不依赖用户请求触发。三条 asyncio.Task 并发执行：
+后台独立运行，不依赖用户请求触发。两条 asyncio.Task 并发执行：
 - _decay_loop:      定时情绪衰减（drive.social / drive.energy）
-- _reflection_loop: 定时触发 deep_reflection
 - _proactive_loop:  定时检查是否需要主动联系用户
 """
 
@@ -38,7 +37,6 @@ class SubconsciousDaemon:
         self._cfg = self.emotion_mgr.drive_config
         schedules = self._cfg.get("schedules", {})
         self._decay_minutes = int(schedules.get("decay_minutes", 30))
-        self._reflection_hours = float(schedules.get("reflection_hours", 1))
         self._proactive_check_minutes = int(schedules.get("proactive_check_minutes", 10))
         triggers = self._cfg.get("triggers", {}).get("proactive_chat", {})
         self._proactive_probability = float(triggers.get("probability", 0.3))
@@ -48,10 +46,9 @@ class SubconsciousDaemon:
         """启动后台 asyncio 任务（在事件循环中调用）。"""
         self._tasks = [
             asyncio.create_task(self._decay_loop(), name="subconscious_decay"),
-            asyncio.create_task(self._reflection_loop(), name="subconscious_reflection"),
             asyncio.create_task(self._proactive_loop(), name="subconscious_proactive"),
         ]
-        logger.info("SubconsciousDaemon: 3 background tasks started")
+        logger.info("SubconsciousDaemon: 2 background tasks started")
 
     def stop(self) -> None:
         """取消所有后台任务。"""
@@ -91,17 +88,6 @@ class SubconsciousDaemon:
             except Exception as e:
                 logger.warning("Decay loop error: {}", e)
 
-    async def _reflection_loop(self) -> None:
-        await asyncio.sleep(10)
-        while True:
-            try:
-                await asyncio.sleep(int(self._reflection_hours * 60 * 60))
-                await self._run_reflection_cycle()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning("Reflection loop error: {}", e)
-
     async def _proactive_loop(self) -> None:
         await asyncio.sleep(60)
         while True:
@@ -112,12 +98,6 @@ class SubconsciousDaemon:
                 break
             except Exception as e:
                 logger.warning("Proactive loop error: {}", e)
-
-    async def _run_reflection_cycle(self) -> None:
-        logger.info("Subconscious reflection started")
-        result = await self.runtime.run_deep_reflection(reason="periodic_signal", warm_limit=15)
-        if not result.memory_count:
-            logger.debug("Subconscious reflection: no updates generated")
 
     async def _do_proactive_check(self) -> None:
         if not self.emotion_mgr.drive.needs_proactive_chat():

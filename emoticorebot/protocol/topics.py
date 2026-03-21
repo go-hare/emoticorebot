@@ -7,10 +7,10 @@ from enum import StrEnum
 
 class Topic(StrEnum):
     INPUT_EVENT = "input.event"
-    LEFT_COMMAND = "left.command"
-    LEFT_EVENT = "left.event"
-    RIGHT_COMMAND = "right.command"
-    RIGHT_EVENT = "right.event"
+    BRAIN_COMMAND = "brain.command"
+    BRAIN_EVENT = "brain.event"
+    EXECUTOR_COMMAND = "executor.command"
+    EXECUTOR_EVENT = "executor.event"
     REFLECTION_EVENT = "reflection.event"
     REFLECTION_SIGNAL = "reflection.signal"
     OUTPUT_EVENT = "output.event"
@@ -26,19 +26,15 @@ class EventType(StrEnum):
     INPUT_STREAM_COMMITTED = "input.event.stream_committed"
     INPUT_STREAM_INTERRUPTED = "input.event.stream_interrupted"
 
-    LEFT_COMMAND_REPLY_REQUESTED = "left.command.reply_requested"
-    LEFT_EVENT_REPLY_READY = "left.event.reply_ready"
-    LEFT_EVENT_STREAM_DELTA_READY = "left.event.stream_delta_ready"
-    LEFT_EVENT_FOLLOWUP_READY = "left.event.followup_ready"
+    BRAIN_COMMAND_REPLY_REQUESTED = "brain.command.reply_requested"
+    BRAIN_EVENT_REPLY_READY = "brain.event.reply_ready"
+    BRAIN_EVENT_STREAM_DELTA_READY = "brain.event.stream_delta_ready"
 
-    RIGHT_COMMAND_JOB_REQUESTED = "right.command.job_requested"
-    RIGHT_EVENT_JOB_ACCEPTED = "right.event.job_accepted"
-    RIGHT_EVENT_PROGRESS = "right.event.progress"
-    RIGHT_EVENT_JOB_REJECTED = "right.event.job_rejected"
-    RIGHT_EVENT_RESULT_READY = "right.event.result_ready"
+    EXECUTOR_COMMAND_JOB_REQUESTED = "executor.command.job_requested"
+    EXECUTOR_EVENT_JOB_REJECTED = "executor.event.job_rejected"
+    EXECUTOR_EVENT_RESULT_READY = "executor.event.result_ready"
 
     REFLECTION_LIGHT = "reflection.event.light"
-    REFLECTION_DEEP = "reflection.event.deep"
 
     OUTPUT_INLINE_READY = "output.event.inline_ready"
     OUTPUT_PUSH_READY = "output.event.push_ready"
@@ -77,4 +73,3 @@ def topic_for(event_type: EventType | str) -> str:
 
 
 __all__ = ["EventType", "Topic", "topic_for"]
-

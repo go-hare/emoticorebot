@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from emoticorebot.protocol.commands import LeftReplyRequestPayload, RightBrainJobRequestPayload
+from emoticorebot.protocol.commands import BrainReplyRequestPayload, ExecutorJobRequestPayload
 from emoticorebot.protocol.envelope import BusEnvelope, build_envelope
 from emoticorebot.protocol.event_contracts import PAYLOAD_MODEL_BY_EVENT_TYPE
 from emoticorebot.protocol.events import DeliveryTargetPayload, OutputInlineReadyPayload, TurnInputPayload
@@ -33,29 +33,29 @@ def test_build_envelope_derives_topic_and_default_priority() -> None:
 
 
 def test_business_event_requires_session_id() -> None:
-    payload = RightBrainJobRequestPayload(
+    payload = ExecutorJobRequestPayload(
         job_id="job_1",
-        job_action="create_task",
+        job_action="execute",
         request_text="write a report",
         delivery_target=DeliveryTargetPayload(delivery_mode="push", channel="cli", chat_id="direct"),
     )
 
     with pytest.raises(ValueError):
         BusEnvelope(
-            topic=Topic.RIGHT_COMMAND,
-            event_type=EventType.RIGHT_COMMAND_JOB_REQUESTED,
+            topic=Topic.EXECUTOR_COMMAND,
+            event_type=EventType.EXECUTOR_COMMAND_JOB_REQUESTED,
             priority=EventPriority.P1,
-            source="left_runtime",
-            target="right_runtime",
+            source="brain_runtime",
+            target="executor_runtime",
             payload=payload,
         )
 
 
 def test_nested_payloads_validate_against_document_models() -> None:
-    payload = RightBrainJobRequestPayload.model_validate(
+    payload = ExecutorJobRequestPayload.model_validate(
         {
             "job_id": "job_1",
-            "job_action": "create_task",
+            "job_action": "execute",
             "request_text": "write a report",
             "goal": "produce a concise report",
             "delivery_target": {
@@ -79,10 +79,10 @@ def test_nested_payloads_validate_against_document_models() -> None:
     assert payload.context["origin_message"]["message_id"] == "msg_1"
 
 
-def test_left_reply_request_uses_typed_nested_models() -> None:
-    payload = LeftReplyRequestPayload.model_validate(
+def test_brain_reply_request_uses_typed_nested_models() -> None:
+    payload = BrainReplyRequestPayload.model_validate(
         {
-            "request_id": "left_req_1",
+            "request_id": "brain_req_1",
             "turn_input": {
                 "input_id": "turn_1",
                 "input_mode": "turn",
@@ -100,7 +100,7 @@ def test_left_reply_request_uses_typed_nested_models() -> None:
 
     assert isinstance(payload.turn_input, TurnInputPayload)
     assert payload.turn_input.message.message_id == "msg_1"
-    assert payload.followup_context is None
+    assert payload.executor_result is None
 
 
 def test_safe_fallback_is_nested_inside_reply_draft() -> None:
@@ -126,7 +126,7 @@ def test_safe_fallback_is_nested_inside_reply_draft() -> None:
 
 def test_priority_mapping_matches_document_examples() -> None:
     assert priority_for(EventType.CONTROL_STOP) == EventPriority.P0
-    assert priority_for(EventType.RIGHT_EVENT_RESULT_READY) == EventPriority.P2
+    assert priority_for(EventType.EXECUTOR_EVENT_RESULT_READY) == EventPriority.P2
     assert priority_for(EventType.REFLECTION_WRITE_REQUEST) == EventPriority.P4
 
 
@@ -146,11 +146,9 @@ def test_build_envelope_rejects_event_payload_type_mismatch() -> None:
 
     with pytest.raises(ValueError, match="does not match expected"):
         build_envelope(
-            event_type=EventType.RIGHT_COMMAND_JOB_REQUESTED,
-            source="left_runtime",
-            target="right_runtime",
+            event_type=EventType.EXECUTOR_COMMAND_JOB_REQUESTED,
+            source="brain_runtime",
+            target="executor_runtime",
             session_id="sess_2",
             payload=wrong_payload,
         )
-
-

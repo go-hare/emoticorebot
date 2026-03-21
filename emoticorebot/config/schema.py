@@ -202,7 +202,7 @@ class ChannelsConfig(Base):
 
 
 class ModelModeConfig(Base):
-    """left_brain / right_brain 模型模式配置（嵌套在 AgentDefaults 下）。"""
+    """brain / executor 模型模式配置（嵌套在 AgentDefaults 下）。"""
 
     model: str = "anthropic/claude-opus-4-5"
     provider: str = "auto"
@@ -215,7 +215,7 @@ class ModelModeConfig(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
     workspace: str = "~/.emoticorebot/workspace"
-    right_brain_mode: ModelModeConfig = Field(
+    executor_mode: ModelModeConfig = Field(
         default_factory=lambda: ModelModeConfig(
             model="anthropic/claude-opus-4-5",
             provider="auto",
@@ -225,7 +225,7 @@ class AgentDefaults(Base):
             memory_window=100,
         )
     )
-    left_brain_mode: ModelModeConfig = Field(
+    brain_mode: ModelModeConfig = Field(
         default_factory=lambda: ModelModeConfig(
             model="anthropic/claude-opus-4-5",
             provider="auto",

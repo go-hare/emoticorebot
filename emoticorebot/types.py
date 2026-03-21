@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-from emoticorebot.left_brain.packet import DecisionPacket as LeftDecisionPacket, TaskAction as LeftTaskAction
+from emoticorebot.brain.packet import BrainAction as BrainActionPayload, DecisionPacket as BrainDecisionPacket
 from emoticorebot.protocol.events import TaskEvent
 from emoticorebot.protocol.task_models import ReviewItem, ReviewSeverity, TraceItem
 
@@ -52,7 +52,7 @@ class ReflectionInput(TypedDict, total=False):
     channel: str  # 渠道
     chat_id: str  # 聊天对象
     emotion: EmotionState  # 情绪快照
-    left_brain: LeftDecisionPacket  # 左脑决策包
+    brain: BrainDecisionPacket  # 大脑决策包
     execution: ExecutionInfo | None  # 标准化执行信息
     task: dict[str, Any]  # 任务快照
     task_trace: list[TraceItem]  # 执行追踪
@@ -60,7 +60,7 @@ class ReflectionInput(TypedDict, total=False):
 
 
 class StateUpdateDelta(TypedDict, total=False):
-    """左脑对本轮状态记录结果的判断。字段名保留 delta，但值表示判断后的状态值。"""
+    """大脑对本轮状态记录结果的判断。字段名保留 delta，但值表示判断后的状态值。"""
 
     should_apply: bool  # 是否建议同步到实时状态
     confidence: float  # 应用该更新的置信度
@@ -99,7 +99,7 @@ class TurnReflectionOutput(TypedDict, total=False):
     next_hint: str  # 下一轮承接提示
     needs_deep_reflection: bool  # 是否需要继续触发深反思
     user_updates: list[str]  # 用户画像更新候选
-    soul_updates: list[str]  # 左脑风格更新候选
+    soul_updates: list[str]  # 大脑风格更新候选
     state_update: StateUpdateDelta  # 状态记录判断
     memory_candidates: list[MemoryCandidate]  # 长期记忆候选
     execution_review: ExecutionReview  # 执行复盘
@@ -111,12 +111,12 @@ class DeepReflectionOutput(TypedDict, total=False):
     summary: str  # 这一阶段的高层总结
     memory_candidates: list[MemoryCandidate]  # 长期记忆候选
     user_updates: list[str]  # 用户画像更新
-    soul_updates: list[str]  # 左脑风格更新
+    soul_updates: list[str]  # 大脑风格更新
 
 
 __all__ = [
-    "LeftDecisionPacket",
-    "LeftTaskAction",
+    "BrainActionPayload",
+    "BrainDecisionPacket",
     "DeepReflectionOutput",
     "EmotionState",
     "ExecutionEffectiveness",

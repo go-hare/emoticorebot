@@ -47,38 +47,38 @@ _PROVIDER_BASE_URLS: dict[str, str] = {
 
 
 class LLMFactory:
-    """根据 left_brain / right_brain 模式配置和 provider 凭证构建 LangChain chat model。
+    """根据 brain / executor 模式配置和 provider 凭证构建 LangChain chat model。
 
     Usage::
 
         factory = LLMFactory(
             providers_config=config.providers,
-            right_brain_mode=config.agents.defaults.right_brain_mode,
-            left_brain_mode=config.agents.defaults.left_brain_mode,
+            executor_mode=config.agents.defaults.executor_mode,
+            brain_mode=config.agents.defaults.brain_mode,
         )
-        right_brain_llm = factory.get_right_brain()
-        left_brain_llm = factory.get_left_brain()
+        executor_llm = factory.get_executor()
+        brain_llm = factory.get_brain()
     """
 
     def __init__(
         self,
         providers_config: "ProvidersConfig",
-        right_brain_mode: "ModelModeConfig",
-        left_brain_mode: "ModelModeConfig",
+        executor_mode: "ModelModeConfig",
+        brain_mode: "ModelModeConfig",
     ) -> None:
         self._providers = providers_config
-        self._right_brain = right_brain_mode
-        self._left_brain = left_brain_mode
+        self._executor = executor_mode
+        self._brain = brain_mode
 
     # ── 公共接口 ──────────────────────────────────────────────────────────────
 
-    def get_right_brain(self) -> Any:
-        """构建 right_brain 执行模型实例。"""
-        return self._build(self._right_brain)
+    def get_executor(self) -> Any:
+        """构建 executor 执行模型实例。"""
+        return self._build(self._executor)
 
-    def get_left_brain(self) -> Any:
-        """构建 left_brain 模型实例。"""
-        return self._build(self._left_brain)
+    def get_brain(self) -> Any:
+        """构建 brain 模型实例。"""
+        return self._build(self._brain)
 
     # ── 内部构建逻辑 ──────────────────────────────────────────────────────────
 

@@ -11,7 +11,7 @@ def test_safety_guard_redacts_sensitive_reply() -> None:
     guard = SafetyGuard()
     event = build_envelope(
         event_type=EventType.OUTPUT_INLINE_READY,
-        source="left_runtime",
+        source="brain_runtime",
         target="broadcast",
         session_id="sess_1",
         turn_id="turn_1",
@@ -37,7 +37,7 @@ def test_safety_guard_redacts_sensitive_reply_blocks() -> None:
     guard = SafetyGuard()
     event = build_envelope(
         event_type=EventType.OUTPUT_INLINE_READY,
-        source="left_runtime",
+        source="brain_runtime",
         target="broadcast",
         session_id="sess_1",
         turn_id="turn_1",
@@ -65,7 +65,7 @@ def test_safety_guard_blocks_private_key_reply() -> None:
     guard = SafetyGuard()
     event = build_envelope(
         event_type=EventType.OUTPUT_INLINE_READY,
-        source="left_runtime",
+        source="brain_runtime",
         target="broadcast",
         session_id="sess_1",
         turn_id="turn_1",
@@ -88,4 +88,3 @@ def test_safety_guard_blocks_private_key_reply() -> None:
     assert result.event is None
     assert result.blocked is not None
     assert result.blocked.policy_name == "secret_filter"
-

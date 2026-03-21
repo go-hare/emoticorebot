@@ -107,7 +107,7 @@ def test_deep_reflection_event_block_includes_updates_and_state() -> None:
                 "timestamp": "2026-03-14T17:00:00+08:00",
                 "user_input": "你好",
                 "assistant_output": "你好。",
-                "left_brain_state": {
+                "brain_state": {
                     "emotion": "开心",
                     "pad": {"pleasure": 0.7, "arousal": 0.4, "dominance": 0.5},
                     "drives": {"social": 60.0, "energy": 80.0},
@@ -235,7 +235,7 @@ def test_deep_reflection_service_accepts_model_dump_response() -> None:
                     {
                         "memory_type": "execution",
                         "summary": "复杂任务优先走最终结果式执行",
-                        "detail": "当任务涉及多步分析和工具配合时，优先在 task 内部完成收敛，再把最终结果交回 left_brain。",
+                        "detail": "当任务涉及多步分析和工具配合时，优先在 task 内部完成收敛，再把最终结果交回 brain。",
                         "confidence": 0.88,
                         "stability": 0.83,
                         "tags": ["skill", "hint"],

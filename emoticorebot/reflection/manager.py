@@ -95,21 +95,6 @@ class ReflectionManager:
             event_ids.append(event.id)
         return event_ids
 
-    def append_turn_memories(
-        self,
-        proposal: TurnReflectionProposal,
-        *,
-        event_ids: list[str],
-    ) -> list[str]:
-        records = self._prepare_turn_memory_candidates(
-            reflection_input=proposal.reflection_input,
-            turn_reflection=proposal.turn_reflection,
-            event_ids=event_ids,
-        )
-        if not records:
-            return []
-        return self._memory_store.append_many(records)
-
     async def propose_deep(self, *, events: list[dict[str, Any]]) -> DeepReflectionProposal:
         return await self._deep_reflection.propose(events)
 
@@ -192,13 +177,9 @@ class ReflectionManager:
 
     def _build_reflection_input(self, *, signal: BusEnvelope[ReflectionSignalPayload]) -> ReflectionInput:
         metadata = signal.payload.metadata if isinstance(signal.payload.metadata, dict) else {}
-        right_brain = self._build_right_brain_input(signal=signal, metadata=metadata)
-        if right_brain:
-            return right_brain
+        return self._build_brain_reflection_input(signal=signal, metadata=metadata)
 
-        return self._build_left_reflection_input(signal=signal, metadata=metadata)
-
-    def _build_left_reflection_input(
+    def _build_brain_reflection_input(
         self,
         *,
         signal: BusEnvelope[ReflectionSignalPayload],
@@ -220,189 +201,6 @@ class ReflectionManager:
             raw["turn_id"] = signal.turn_id
         return build_reflection_input(raw)
 
-    def _build_right_brain_input(
-        self,
-        *,
-        signal: BusEnvelope[ReflectionSignalPayload],
-        metadata: Mapping[str, Any],
-    ) -> ReflectionInput:
-        payload = metadata.get("right_brain_summary")
-        if not isinstance(payload, Mapping):
-            return {}
-
-        summary = dict(payload)
-        origin = summary.get("origin_message")
-        origin_message = dict(origin) if isinstance(origin, Mapping) else {}
-        trace_items = self._normalize_trace_items(summary.get("task_trace") or summary.get("trace"))
-        recent_turns = self._normalize_turns(summary.get("recent_turns"))
-        short_term = self._normalize_text_list(summary.get("short_term_memory"))
-        long_term = self._normalize_text_list(summary.get("long_term_memory"))
-        memory_refs = self._normalize_text_list(summary.get("memory_refs"))
-        tool_context = summary.get("tool_context")
-        tool_context_payload = dict(tool_context) if isinstance(tool_context, Mapping) else {}
-        output = str(
-            summary.get("result_text", "") or summary.get("summary", "") or summary.get("error", "")
-        ).strip()
-        if not output:
-            return {}
-
-        result = str(summary.get("result", "") or "").strip()
-        execution_status = "failed" if result in {"failed", "cancelled"} else "done"
-        failure_reason = (
-            str(summary.get("cancel_reason", "") or "").strip()
-            or str(summary.get("error", "") or "").strip()
-        )
-
-        raw = {
-            "session_id": str(signal.session_id or summary.get("session_id", "") or ""),
-            "turn_id": str(signal.turn_id or summary.get("turn_id", "") or ""),
-            "message_id": str(origin_message.get("message_id", "") or ""),
-            "source_type": "task_event",
-            "user_input": str(summary.get("request_text", "") or ""),
-            "output": output,
-            "assistant_output": output,
-            "channel": str(origin_message.get("channel", "") or ""),
-            "chat_id": str(origin_message.get("chat_id", "") or ""),
-            "task": dict(summary.get("task", {}) or {}),
-            "task_trace": trace_items,
-            "execution": {
-                "invoked": True,
-                "status": execution_status,
-                "summary": str(summary.get("summary", "") or output),
-                "failure_reason": failure_reason,
-            },
-            "metadata": {
-                "source_event_type": summary.get("source_event_type"),
-                "decision": summary.get("decision"),
-                "result": result,
-            "reflection_reason": str(signal.payload.reason or ""),
-                "recent_turns": recent_turns,
-                "short_term_memory": short_term,
-                "long_term_memory": long_term,
-                "memory_refs": memory_refs,
-                "tool_context": tool_context_payload,
-                "tool_usage_summary": self._normalize_tool_usage(summary.get("tool_usage_summary")),
-                "trace_count": len(trace_items),
-            },
-        }
-        return build_reflection_input(raw)
-
-    def _prepare_turn_memory_candidates(
-        self,
-        *,
-        reflection_input: ReflectionInput,
-        turn_reflection: dict[str, Any],
-        event_ids: list[str],
-    ) -> list[dict[str, Any]]:
-        candidates = turn_reflection.get("memory_candidates") if isinstance(turn_reflection, dict) else []
-        if not isinstance(candidates, list):
-            return []
-
-        session_id = str(reflection_input.get("session_id", "") or "")
-        turn_id = str(reflection_input.get("turn_id", "") or "").strip()
-        tool_names = self._extract_tool_names(reflection_input)
-
-        prepared: list[dict[str, Any]] = []
-        for item in candidates:
-            if not isinstance(item, dict):
-                continue
-            summary = str(item.get("summary", "") or "").strip()
-            detail = str(item.get("detail", "") or "").strip()
-            if not summary and not detail:
-                continue
-            prepared.append(
-                {
-                    **item,
-                    "session_id": session_id,
-                    "memory_type": str(item.get("memory_type", "") or "").strip() or "reflection",
-                    "detail": detail or summary,
-                    "source_module": "reflection_governor.turn_reflection",
-                    "source_event_ids": list(event_ids),
-                    "evidence_messages": self._evidence_messages(reflection_input),
-                    "metadata": {
-                        **dict(item.get("metadata", {}) or {}),
-                        "tool_names": tool_names,
-                    },
-                }
-            )
-        return prepared
-
-    @staticmethod
-    def _evidence_messages(reflection_input: ReflectionInput) -> list[dict[str, Any]]:
-        evidence: list[dict[str, Any]] = []
-
-        user_input = str(reflection_input.get("user_input", "") or "").strip()
-        if user_input:
-            evidence.append(
-                {
-                    "role": "user",
-                    "content": user_input,
-                    "content_blocks": [{"type": "text", "text": user_input}],
-                    "session_id": str(reflection_input.get("session_id", "") or ""),
-                    "turn_id": str(reflection_input.get("turn_id", "") or ""),
-                    "message_id": str(reflection_input.get("message_id", "") or ""),
-                }
-            )
-
-        assistant_output = str(
-            reflection_input.get("assistant_output", "") or reflection_input.get("output", "") or ""
-        ).strip()
-        if assistant_output:
-            evidence.append(
-                {
-                    "role": "assistant",
-                    "content": assistant_output,
-                    "content_blocks": [{"type": "text", "text": assistant_output}],
-                    "session_id": str(reflection_input.get("session_id", "") or ""),
-                    "turn_id": str(reflection_input.get("turn_id", "") or ""),
-                    "message_id": str(reflection_input.get("message_id", "") or ""),
-                }
-            )
-
-        recent_turns = []
-        metadata = reflection_input.get("metadata") if isinstance(reflection_input.get("metadata"), dict) else {}
-        if isinstance(metadata.get("recent_turns"), list):
-            recent_turns = list(metadata.get("recent_turns") or [])
-        for item in recent_turns:
-            if not isinstance(item, dict):
-                continue
-            content = str(item.get("content", "") or "").strip()
-            if not content:
-                continue
-            evidence.append(
-                {
-                    "role": str(item.get("role", "") or "").strip() or "assistant",
-                    "content": content,
-                    "content_blocks": [{"type": "text", "text": content}],
-                    "session_id": str(reflection_input.get("session_id", "") or ""),
-                    "turn_id": str(reflection_input.get("turn_id", "") or ""),
-                    "message_id": str(item.get("message_id", "") or reflection_input.get("message_id", "") or ""),
-                }
-            )
-        return evidence[:6]
-
-    @staticmethod
-    def _extract_tool_names(reflection_input: ReflectionInput) -> list[str]:
-        names: list[str] = []
-        for item in list(reflection_input.get("task_trace", []) or []):
-            if not isinstance(item, dict):
-                continue
-            containers: list[Mapping[str, Any]] = [item]
-            nested = item.get("data")
-            if isinstance(nested, Mapping):
-                containers.append(nested)
-            for container in containers:
-                for key in ("tool_name", "tool", "name", "node"):
-                    value = str(container.get(key, "") or "").strip()
-                    if value and value not in names:
-                        names.append(value)
-            payload = nested.get("payload") if isinstance(nested, Mapping) else None
-            if isinstance(payload, Mapping):
-                value = str(payload.get("tool_name", "") or "").strip()
-                if value and value not in names:
-                    names.append(value)
-        return names[:6]
-
     @staticmethod
     def _normalize_text_list(value: object) -> list[str]:
         if not isinstance(value, list):
@@ -414,40 +212,5 @@ class ReflectionManager:
                 items.append(text)
         return items
 
-    @staticmethod
-    def _normalize_trace_items(value: object) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        items: list[dict[str, Any]] = []
-        for entry in value:
-            if isinstance(entry, Mapping):
-                items.append(dict(entry))
-        return items
-
-    @staticmethod
-    def _normalize_turns(value: object) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        turns: list[dict[str, Any]] = []
-        for entry in value:
-            if not isinstance(entry, Mapping):
-                continue
-            role = str(entry.get("role", "") or "").strip()
-            content = str(entry.get("content", "") or "").strip()
-            if role and content:
-                turns.append({"role": role, "content": content})
-        return turns[:10]
-
-    @staticmethod
-    def _normalize_tool_usage(value: object) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        items: list[dict[str, Any]] = []
-        for entry in value:
-            if isinstance(entry, Mapping):
-                items.append(dict(entry))
-        return items
-
 
 __all__ = ["ReflectionManager", "TurnReflectionProposal"]
-

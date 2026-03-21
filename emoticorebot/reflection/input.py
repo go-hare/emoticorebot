@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from emoticorebot.types import EmotionState, ExecutionInfo, LeftDecisionPacket, ReflectionInput
+from emoticorebot.types import BrainDecisionPacket, EmotionState, ExecutionInfo, ReflectionInput
 
 _SOURCE_TYPES = {"user_turn", "task_event", "internal_task_event"}
 _EXECUTION_STATUSES = {"none", "done", "failed", "running", "partial", "completed"}
@@ -30,7 +30,7 @@ def build_reflection_input(payload: Mapping[str, Any] | None) -> ReflectionInput
         "assistant_output": output,
         "channel": _as_text(data.get("channel") or metadata.get("channel")),
         "chat_id": _as_text(data.get("chat_id") or metadata.get("chat_id")),
-        "left_brain": _normalize_left_decision_packet(data.get("left_brain")),
+        "brain": _normalize_brain_decision_packet(data.get("brain")),
         "task": task,
         "task_trace": task_trace,
         "metadata": metadata,
@@ -54,17 +54,16 @@ def _normalize_source_type(value: Any) -> str:
     return source_type if source_type in _SOURCE_TYPES else "user_turn"
 
 
-def _normalize_left_decision_packet(value: Any) -> LeftDecisionPacket:
+def _normalize_brain_decision_packet(value: Any) -> BrainDecisionPacket:
     payload = _normalize_dict(value)
     if not payload:
         return {}
 
-    normalized: LeftDecisionPacket = {}
+    normalized: BrainDecisionPacket = {}
 
     for key in (
         "intent",
         "working_hypothesis",
-        "task_reason",
         "final_message",
         "task_brief",
         "execution_summary",
@@ -76,9 +75,9 @@ def _normalize_left_decision_packet(value: Any) -> LeftDecisionPacket:
         if text:
             normalized[key] = text
 
-    task_action = _as_text(payload.get("task_action")) or "none"
-    if task_action in {"none", "create_task", "cancel_task"}:
-        normalized["task_action"] = task_action
+    actions = _normalize_actions(payload.get("actions"))
+    if actions:
+        normalized["actions"] = actions
 
     retrieval_focus = _normalize_str_list(payload.get("retrieval_focus"))
     if retrieval_focus:
@@ -156,7 +155,9 @@ def _build_execution_info(
 ) -> ExecutionInfo | None:
     execution_metadata = _normalize_dict(metadata.get("execution"))
     execution_summary = _as_text(data.get("execution_summary")) or _as_text(execution_metadata.get("summary"))
-    task_action = _as_text(execution_metadata.get("task_action"))
+    actions = _normalize_actions((_normalize_dict(data.get("brain"))).get("actions"))
+    if not actions:
+        actions = _normalize_actions(execution_metadata.get("actions"))
 
     status = _normalize_execution_status(
         state=_as_text(task.get("state")),
@@ -172,7 +173,9 @@ def _build_execution_info(
 
     summary = execution_summary or _as_text(task.get("summary")) or _as_text(task.get("analysis"))
 
-    invoked = bool(task) or bool(execution_summary) or task_action in {"create_task", "cancel_task"}
+    invoked = bool(task) or bool(execution_summary) or any(
+        str(item.get("type", "") or "").strip() == "execute" for item in actions
+    )
     if not invoked and status == "none":
         return None
 
@@ -265,6 +268,12 @@ def _normalize_str_list(value: Any) -> list[str]:
     return items
 
 
+def _normalize_actions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
 def _normalize_float_map(value: Any, *, keys: tuple[str, ...]) -> dict[str, float]:
     payload = _normalize_dict(value)
     if not payload:
@@ -290,4 +299,3 @@ def _as_text(value: Any) -> str:
 
 
 __all__ = ["build_reflection_input"]
-

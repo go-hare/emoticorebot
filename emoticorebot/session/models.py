@@ -1,4 +1,4 @@
-"""In-memory session models for the process-local dual-full-duplex runtime."""
+"""In-memory session models for the process-local brain/executor runtime."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class SessionContext:
     channel_kind: str = "chat"
     session_summary: str = ""
     last_turn_id: str | None = None
-    last_left_brain_instance_id: str | None = None
+    last_brain_instance_id: str | None = None
     active_input_stream_id: str | None = None
     active_input_stream_message: MessageRef | None = None
     active_input_stream_metadata: dict[str, Any] = field(default_factory=dict)
@@ -51,18 +51,11 @@ class SessionContext:
     last_assistant_output: str = ""
     memory_snapshot: dict[str, Any] | None = None
     tasks: dict[str, SessionTaskView] = field(default_factory=dict)
-    trace_cursor: dict[str, str] = field(default_factory=dict)
-    active_task_ids: list[str] = field(default_factory=list)
-    done_task_ids: list[str] = field(default_factory=list)
     archived: bool = False
 
     def rebuild_indexes(self) -> None:
-        ordered = sorted(self.tasks.values(), key=lambda item: (item.updated_at, item.task_id))
-        self.active_task_ids = [item.task_id for item in ordered if item.state == "running"]
-        self.done_task_ids = [item.task_id for item in ordered if item.state == "done"]
         self.archived = (
-            not self.active_task_ids
-            and not self.active_reply_stream_id
+            not self.active_reply_stream_id
             and not self.active_input_stream_id
         )
 

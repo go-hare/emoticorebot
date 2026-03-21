@@ -12,17 +12,26 @@ def _read(rel_path: str) -> str:
 
 
 def test_legacy_runtime_modules_are_removed() -> None:
-    assert not (PACKAGE_ROOT / "agent").exists()
     assert not (PACKAGE_ROOT / "session" / "manager.py").exists()
     assert (PACKAGE_ROOT / "session" / "runtime.py").exists()
-    assert (PACKAGE_ROOT / "left_brain" / "runtime.py").exists()
-    assert (PACKAGE_ROOT / "left_brain" / "packet.py").exists()
-    assert (PACKAGE_ROOT / "left_brain" / "reply_policy.py").exists()
-    assert (PACKAGE_ROOT / "left_brain" / "context.py").exists()
-    assert not (PACKAGE_ROOT / "brain").exists()
+    assert not (PACKAGE_ROOT / "left_brain" / "runtime.py").exists()
+    assert not (PACKAGE_ROOT / "left_brain" / "packet.py").exists()
+    assert not (PACKAGE_ROOT / "left_brain" / "reply_policy.py").exists()
+    assert not (PACKAGE_ROOT / "left_brain" / "context.py").exists()
+    assert (PACKAGE_ROOT / "brain" / "runtime.py").exists()
+    assert (PACKAGE_ROOT / "brain" / "packet.py").exists()
+    assert not (PACKAGE_ROOT / "brain" / "reply_policy.py").exists()
+    assert (PACKAGE_ROOT / "context" / "builder.py").exists()
     assert not (PACKAGE_ROOT / "task" / "runtime.py").exists()
     assert not (PACKAGE_ROOT / "task" / "coordinator.py").exists()
-    assert (PACKAGE_ROOT / "right_brain" / "runtime.py").exists()
+    assert (PACKAGE_ROOT / "executor" / "runtime.py").exists()
+    assert (PACKAGE_ROOT / "executor" / "agent.py").exists()
+    assert (PACKAGE_ROOT / "executor" / "store.py").exists()
+    assert (PACKAGE_ROOT / "world_model" / "schema.py").exists()
+    assert (PACKAGE_ROOT / "world_model" / "store.py").exists()
+    assert (PACKAGE_ROOT / "world_model" / "reducers.py").exists()
+    assert (PACKAGE_ROOT / "world_model" / "projectors.py").exists()
+    assert not (PACKAGE_ROOT / "right_brain" / "runtime.py").exists()
     assert not (PACKAGE_ROOT / "right_brain" / "coordinator.py").exists()
     assert not (PACKAGE_ROOT / "right_brain" / "team.py").exists()
     assert not (PACKAGE_ROOT / "right_brain" / "assignment.py").exists()
@@ -90,9 +99,9 @@ def test_command_shortcuts_preserve_message_correlation() -> None:
 def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     bootstrap = _read("emoticorebot/bootstrap.py")
     kernel = _read("emoticorebot/runtime/kernel.py")
-    left_runtime = _read("emoticorebot/left_brain/runtime.py")
+    brain_runtime = _read("emoticorebot/brain/runtime.py")
     output = _read("emoticorebot/output/runtime.py")
-    task = _read("emoticorebot/right_brain/runtime.py")
+    task = _read("emoticorebot/executor/runtime.py")
 
     assert "_turn_locks" not in bootstrap
     assert "_state_locks" not in bootstrap
@@ -104,8 +113,8 @@ def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     assert "self._active_turn_by_session" in kernel
     assert "EventType.OUTPUT_INLINE_READY" in kernel
     assert "InputNormalizer()" in kernel
-    assert "RightBrainRuntime(" in kernel
-    assert "LeftBrainRuntime(" in kernel
+    assert "ExecutorRuntime(" in kernel
+    assert "BrainRuntime(" in kernel
     assert "ReflectionRuntime(" in kernel
     assert "OutputRuntime(" in kernel
     assert "self._output_runtime = OutputRuntime(" in kernel
@@ -114,44 +123,46 @@ def test_runtime_host_uses_preemptive_turn_guards_instead_of_locks() -> None:
     assert "reply_guard=self._guard" not in kernel
     assert "self._runtime =" not in kernel
     assert "self._team =" not in kernel
-    assert "self._brain =" not in kernel
+    assert "self._brain = BrainRuntime(" in kernel
+    assert "self._left_brain =" not in kernel
     assert "self._memory =" not in kernel
     assert "self._delivery =" not in kernel
-    assert "reply_guard" not in left_runtime
-    assert "SafetyGuard" not in left_runtime
-    assert "SafetyGuard" not in left_runtime
-    assert "guard_reply_event" not in left_runtime
-    assert "OUTPUT_INLINE_READY" not in left_runtime
-    assert "OUTPUT_PUSH_READY" not in left_runtime
-    assert "OUTPUT_STREAM_" not in left_runtime
-    assert "EventType.LEFT_COMMAND_REPLY_REQUESTED" in left_runtime
-    assert "EventType.LEFT_EVENT_REPLY_READY" in left_runtime
-    assert "EventType.LEFT_EVENT_STREAM_DELTA_READY" in left_runtime
-    assert "EventType.LEFT_EVENT_FOLLOWUP_READY" in left_runtime
+    assert "reply_guard" not in brain_runtime
+    assert "SafetyGuard" not in brain_runtime
+    assert "SafetyGuard" not in brain_runtime
+    assert "guard_reply_event" not in brain_runtime
+    assert "OUTPUT_INLINE_READY" not in brain_runtime
+    assert "OUTPUT_PUSH_READY" not in brain_runtime
+    assert "OUTPUT_STREAM_" not in brain_runtime
+    assert "EventType.BRAIN_COMMAND_REPLY_REQUESTED" in brain_runtime
+    assert "EventType.BRAIN_EVENT_REPLY_READY" in brain_runtime
+    assert "EventType.BRAIN_EVENT_STREAM_DELTA_READY" in brain_runtime
+    assert "BRAIN_EVENT_FOLLOWUP_READY" not in brain_runtime
     assert "guard_reply_event" in output
     assert "self._reply_guard = reply_guard or SafetyGuard()" in output
     assert "RuntimeService" not in task
-    assert "RIGHT_COMMAND_JOB_REQUESTED" in task
-    assert "RIGHT_EVENT_JOB_ACCEPTED" in task
-    assert "RIGHT_EVENT_PROGRESS" in task
-    assert "RIGHT_EVENT_RESULT_READY" in task
-    assert "RightBrainExecutor" in task
+    assert "EXECUTOR_COMMAND_JOB_REQUESTED" in task
+    assert "EXECUTOR_EVENT_JOB_ACCEPTED" not in task
+    assert "EXECUTOR_EVENT_PROGRESS" not in task
+    assert "EXECUTOR_EVENT_RESULT_READY" in task
+    assert "ExecutorAgent" in task
     assert "self._active_runs" in task
-    assert "audit_tool" in _read("emoticorebot/right_brain/backend.py")
-    assert "EventType.INPUT_INTERRUPT" not in left_runtime
+    assert "audit_tool" not in _read("emoticorebot/executor/backend.py")
+    assert "report_progress" not in _read("emoticorebot/executor/backend.py")
+    assert "EventType.INPUT_INTERRUPT" not in brain_runtime
     assert "OUTPUT_REPLY_BLOCKED" not in _read("emoticorebot/protocol/topics.py")
     assert "SAFETY_BLOCKED" not in _read("emoticorebot/protocol/topics.py")
     assert "INPUT_VOICE_CHUNK" not in _read("emoticorebot/protocol/topics.py")
 
 
 def test_runtime_wrappers_no_longer_describe_themselves_as_compatibility_layers() -> None:
-    left_runtime = _read("emoticorebot/left_brain/runtime.py")
-    task = _read("emoticorebot/right_brain/runtime.py")
+    brain_runtime = _read("emoticorebot/brain/runtime.py")
+    task = _read("emoticorebot/executor/runtime.py")
     delivery = _read("emoticorebot/delivery/runtime.py")
     reflection = _read("emoticorebot/reflection/runtime.py")
     session = _read("emoticorebot/session/runtime.py")
 
-    assert "Compatibility" not in left_runtime
+    assert "Compatibility" not in brain_runtime
     assert "Compatibility" not in task
     assert "Compatibility" not in delivery
     assert "Compatibility" not in reflection
@@ -159,18 +170,18 @@ def test_runtime_wrappers_no_longer_describe_themselves_as_compatibility_layers(
 
 
 def test_reflection_pipeline_runs_through_kernel_reflection_governor() -> None:
-    left_runtime = _read("emoticorebot/left_brain/runtime.py")
+    brain_runtime = _read("emoticorebot/brain/runtime.py")
     governor = _read("emoticorebot/reflection/governor.py")
     reflection = _read("emoticorebot/reflection/manager.py")
     persona = _read("emoticorebot/reflection/persona.py")
     deep = _read("emoticorebot/reflection/deep.py")
-    context = _read("emoticorebot/left_brain/context.py")
+    context = _read("emoticorebot/context/builder.py")
     crystallizer = _read("emoticorebot/memory/crystallizer.py")
     kernel = _read("emoticorebot/runtime/kernel.py")
     host = _read("emoticorebot/bootstrap.py")
 
-    assert '"reflection_input"' in left_runtime
-    assert '"await_delivery"' not in left_runtime
+    assert '"reflection_input"' in brain_runtime
+    assert '"await_delivery"' not in brain_runtime
     assert "PersonaManager" in governor
     assert "ReflectionManager" in governor
     assert "OUTPUT_REPLIED" not in governor
@@ -186,7 +197,7 @@ def test_reflection_pipeline_runs_through_kernel_reflection_governor() -> None:
     assert "return await self.kernel.run_deep_reflection" in host
     assert "_schedule_turn_reflection" not in host
     assert "ReflectionCoordinator" not in host
-    assert "event_type=EventType.REFLECTION_DEEP" not in left_runtime
+    assert "event_type=EventType.REFLECTION_DEEP" not in brain_runtime
 
 
 def test_memory_phase6_is_split_into_governor_persona_and_reflection_modules() -> None:
@@ -213,13 +224,13 @@ def test_memory_phase6_is_split_into_governor_persona_and_reflection_modules() -
     assert "append_deep_memories(" in reflection
     assert '("deep", "persona")' in persona
     assert '("turn", "persona")' in persona
-    assert "query_left_brain_memories" in retrieval
+    assert "query_brain_memories" in retrieval
     assert "build_task_memory_bundle" in retrieval
     assert "class SkillMaterializer" in crystallizer
 
 
 def test_source_tree_has_no_legacy_brain_or_task_system_imports() -> None:
-    legacy_import_prefix = "from emoticorebot." + "brain"
+    legacy_import_prefix = "from emoticorebot.left_" + "brain"
     for path in PACKAGE_ROOT.rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
@@ -236,15 +247,13 @@ def test_source_tree_has_no_legacy_brain_or_task_system_imports() -> None:
         assert "from emoticorebot.runtime.event_loop import" not in source, str(path)
 
 
-def test_right_runtime_uses_deep_agent_directly_without_legacy_team_wrapper() -> None:
-    task = _read("emoticorebot/right_brain/runtime.py")
+def test_executor_runtime_uses_deep_agent_directly_without_legacy_team_wrapper() -> None:
+    task = _read("emoticorebot/executor/runtime.py")
     kernel = _read("emoticorebot/runtime/kernel.py")
 
     assert not (PACKAGE_ROOT / "execution" / "central_executor.py").exists()
     assert not (PACKAGE_ROOT / "right_brain" / "team.py").exists()
-    assert "RightBrainExecutor" in task
+    assert "ExecutorAgent" in task
     assert "coordinator" not in task
     assert "team" not in task
     assert "central_executor" not in kernel
-
-

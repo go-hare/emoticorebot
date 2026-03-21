@@ -8,14 +8,14 @@ from emoticorebot.reflection.cognitive import CognitiveEvent
 from emoticorebot.reflection.turn import TurnReflectionService, TurnReflectionUnavailable
 from emoticorebot.models.emotion_state import EmotionStateManager
 
-def test_build_turn_event_persists_full_left_brain_emotion_snapshot() -> None:
+def test_build_turn_event_persists_full_brain_emotion_snapshot() -> None:
     events = CognitiveEvent.build_turn_events(
         reflection_input={
             "message_id": "msg_test",
             "session_id": "cli:direct",
             "user_input": "真棒",
             "assistant_output": "知道就好。",
-            "left_brain": {
+            "brain": {
                 "intent": "respond_to_praise",
             },
             "emotion": {
@@ -30,11 +30,11 @@ def test_build_turn_event_persists_full_left_brain_emotion_snapshot() -> None:
     )
 
     assert len(events) == 1
-    left_brain_state = events[0].left_brain_state
-    assert left_brain_state["emotion"] == "兴奋"
-    assert left_brain_state["pad"] == {"pleasure": 0.6, "arousal": 0.9, "dominance": 0.5}
-    assert left_brain_state["drives"] == {"social": 100.0, "energy": 98.0}
-    assert left_brain_state["emotion_prompt"] == "[当前情绪: 兴奋] 非常兴奋，话比较多，喜欢感叹号"
+    brain_state = events[0].brain_state
+    assert brain_state["emotion"] == "兴奋"
+    assert brain_state["pad"] == {"pleasure": 0.6, "arousal": 0.9, "dominance": 0.5}
+    assert brain_state["drives"] == {"social": 100.0, "energy": 98.0}
+    assert brain_state["emotion_prompt"] == "[当前情绪: 兴奋] 非常兴奋，话比较多，喜欢感叹号"
 
 
 def test_build_turn_event_projects_task_to_three_state_view() -> None:
@@ -70,6 +70,44 @@ def test_build_turn_event_projects_task_to_three_state_view() -> None:
     }
 
 
+def test_build_turn_event_preserves_multi_execute_signal() -> None:
+    events = CognitiveEvent.build_turn_events(
+        reflection_input={
+            "message_id": "msg_multi",
+            "session_id": "cli:multi",
+            "user_input": "同时处理两件事",
+            "assistant_output": "我并行推进。",
+            "brain": {
+                "actions": [
+                    {"type": "execute", "goal": "检查日志"},
+                    {"type": "execute", "goal": "整理测试"},
+                ],
+            },
+            "execution": {
+                "invoked": True,
+                "status": "running",
+                "summary": "并行推进中",
+            },
+            "metadata": {
+                "task_snapshots": [
+                    {"task_id": "new", "goal": "检查日志"},
+                    {"task_id": "new", "goal": "整理测试"},
+                ]
+            },
+        },
+        importance=0.65,
+        turn_reflection={"summary": "并行推进了两条执行动作。"},
+    )
+
+    assert len(events) == 1
+    assert events[0].brain_state["task_action"] == "multi_execute"
+    assert events[0].brain_state["task_actions"] == ["execute", "execute"]
+    assert events[0].brain_state["task_action_count"] == 2
+    assert events[0].task["used"] is True
+    assert events[0].task["summary"] == "本轮并行涉及 2 个执行动作"
+    assert events[0].task["task_count"] == 2
+
+
 def test_build_cognitive_sections_shows_deep_reflection_flag() -> None:
     with TemporaryDirectory() as tmp_dir:
         workspace = Path(tmp_dir)
@@ -83,7 +121,7 @@ def test_build_cognitive_sections_shows_deep_reflection_flag() -> None:
                 turn_id="turn_deep_flag",
                 user_input="继续处理这个老问题",
                 assistant_output="这轮先完成浅反思。",
-                left_brain_state={"emotion": "平静"},
+                brain_state={"emotion": "平静"},
                 task={"used": True},
                 turn_reflection={
                     "summary": "这轮虽然结束，但暴露出重复模式。",
