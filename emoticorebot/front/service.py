@@ -33,18 +33,6 @@ class FrontService:
         messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt)]
         return await self.run(messages, stream_handler)
 
-    async def followup(
-        self,
-        *,
-        intent_text: str,
-        memory: MemoryView,
-        stream_handler: Callable[[str], Awaitable[None]] | None = None,
-    ) -> str:
-        system_text = (self.workspace / "templates" / "FRONT_FOLLOWUP.md").read_text(encoding="utf-8")
-        user_prompt = self.prompts.build_followup_prompt(intent_text=intent_text, memory=memory)
-        messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt)]
-        return await self.run(messages, stream_handler)
-
     async def run(
         self,
         messages: list[SystemMessage | HumanMessage],

@@ -1,4 +1,4 @@
-"""Schemas for state, memory, and execution coordination."""
+"""State and memory schemas for the Front -> Scheduler -> Core architecture."""
 
 from __future__ import annotations
 
@@ -17,60 +17,21 @@ def make_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:16]}"
 
 
-class Artifact(BaseModel):
-    type: Literal["file", "doc", "link", "report", "note"] = "note"
-    name: str = ""
-    value: str = ""
-
-
-class CheckState(BaseModel):
-    check_id: str
-    task_id: str
-    goal: str = ""
-    instructions: list[str] = Field(default_factory=list)
-    status: Literal["pending", "running", "done", "failed"] = "pending"
-    summary: str = ""
-    error: str = ""
-    artifacts: list[Artifact] = Field(default_factory=list)
+class WorldModel(BaseModel):
+    focus: str = ""
+    mode: Literal["chat", "acting", "waiting"] = "chat"
+    recent_intent: str = ""
+    last_tool_result: str = ""
+    open_threads: list[str] = Field(default_factory=list)
     updated_at: str = Field(default_factory=now_iso)
 
 
-class TaskState(BaseModel):
-    task_id: str
-    title: str = ""
-    goal: str = ""
-    status: Literal["running", "done", "failed"] = "running"
-    plan: list[str] = Field(default_factory=list)
-    current_step: str = ""
-    checks: dict[str, CheckState] = Field(default_factory=dict)
-    updated_at: str = Field(default_factory=now_iso)
-
-
-class RunningJob(BaseModel):
-    job_id: str
-    task_id: str
-    check_id: str
-    thread_id: str = ""
-    goal: str = ""
-    workspace: str = ""
-    status: Literal["running"] = "running"
-    started_at: str = Field(default_factory=now_iso)
-
-
-class WorldState(BaseModel):
-    focus_task_id: str = ""
-    tasks: dict[str, TaskState] = Field(default_factory=dict)
-    running_jobs: dict[str, RunningJob] = Field(default_factory=dict)
-
-
-class StatePatch(BaseModel):
-    focus_task_id: str = ""
-    upsert_tasks: list[TaskState] = Field(default_factory=list)
-    remove_task_ids: list[str] = Field(default_factory=list)
-    upsert_checks: list[CheckState] = Field(default_factory=list)
-    remove_check_ids: list[str] = Field(default_factory=list)
-    upsert_running_jobs: list[RunningJob] = Field(default_factory=list)
-    remove_job_ids: list[str] = Field(default_factory=list)
+class WorldModelUpdate(BaseModel):
+    focus: str | None = None
+    mode: Literal["chat", "acting", "waiting"] | None = None
+    recent_intent: str | None = None
+    last_tool_result: str | None = None
+    open_threads: list[str] | None = None
 
 
 class MemoryCandidate(BaseModel):
@@ -90,7 +51,6 @@ class LongTermRecord(BaseModel):
     session_id: str = ""
     thread_id: str = ""
     turn_id: str = ""
-    task_id: str = ""
     summary: str = ""
     memory_candidates: list[MemoryCandidate] = Field(default_factory=list)
     user_updates: list[str] = Field(default_factory=list)
@@ -105,7 +65,6 @@ class CognitiveEvent(BaseModel):
     session_id: str = ""
     thread_id: str = ""
     turn_id: str = ""
-    task_id: str = ""
     summary: str = ""
     outcome: str = "unknown"
     reason: str = ""
@@ -140,17 +99,3 @@ class UserEvent(BaseModel):
     user_text: str
     created_at: str = Field(default_factory=now_iso)
 
-
-class ReflectionRequest(BaseModel):
-    thread_id: str
-    session_id: str
-    user_id: str
-    reason: str
-    trigger: dict[str, Any]
-    memory: MemoryView
-    world_state: WorldState
-
-
-class ReflectionSuggestion(BaseModel):
-    state_patch: StatePatch = Field(default_factory=StatePatch)
-    memory_patch: MemoryPatch = Field(default_factory=MemoryPatch)

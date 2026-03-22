@@ -107,7 +107,7 @@ class WebFetchTool(Tool):
                 try:
                     from html.parser import HTMLParser
 
-                    class _TextExtractor(HTMLParser):
+                    class TextExtractor(HTMLParser):
                         def __init__(self):
                             super().__init__()
                             self._skip = False
@@ -127,7 +127,7 @@ class WebFetchTool(Tool):
                                 if stripped:
                                     self.parts.append(stripped)
 
-                    extractor = _TextExtractor()
+                    extractor = TextExtractor()
                     extractor.feed(text)
                     text = "\n".join(extractor.parts)
                 except Exception:

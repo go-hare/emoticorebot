@@ -1,4 +1,4 @@
-"""CLI commands for the front-core runtime."""
+"""CLI commands for the Front -> Scheduler -> Core architecture."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from emoticorebot.app.factory import build_app_context, ensure_workspace_layout
 from emoticorebot.config.loader import get_config_path, load_config, save_config
 from emoticorebot.config.schema import Config
 
-app = typer.Typer(name="emoticorebot", help="emoticorebot front-core runtime")
+app = typer.Typer(name="emoticorebot", help="emoticorebot front-scheduler-core")
 console = Console()
 exit_commands = {"exit", "quit", "/exit", "/quit", ":q"}
 
@@ -55,7 +55,7 @@ def agent(
     message: str = typer.Option("", "--message", "-m", help="Send one message and exit."),
     stream: bool = typer.Option(True, "--stream/--no-stream", help="Stream front replies."),
 ) -> None:
-    """Run the interactive front-core agent."""
+    """Run the interactive front-scheduler-core agent."""
     asyncio.run(run_agent(message=message, stream=stream))
 
 
@@ -80,19 +80,18 @@ async def send_once(context, printer: "CliPrinter", user_text: str, stream: bool
         stream_handler = printer.stream_writer()
     else:
         stream_handler = None
-    reply = await context.gateway.handle_user_text(
+    reply = await context.runtime.handle_user_text(
         thread_id=thread_id,
         session_id=thread_id,
         user_id="user",
         user_text=user_text,
         stream_handler=stream_handler,
-        reply_handler=printer.print_followup,
     )
     if stream:
         await printer.finish_stream()
     else:
         await printer.print_reply(reply)
-    await context.gateway.wait_for_thread_idle(thread_id)
+    await context.runtime.wait_for_thread_idle(thread_id)
 
 
 async def run_interactive(context, printer: "CliPrinter", stream: bool) -> None:
@@ -113,13 +112,12 @@ async def run_interactive(context, printer: "CliPrinter", stream: bool) -> None:
             break
 
         stream_handler = printer.stream_writer() if stream else None
-        reply = await context.gateway.handle_user_text(
+        reply = await context.runtime.handle_user_text(
             thread_id="cli:direct",
             session_id="cli:direct",
             user_id="user",
             user_text=user_text,
             stream_handler=stream_handler,
-            reply_handler=printer.print_followup,
         )
         if stream:
             await printer.finish_stream()
@@ -138,7 +136,7 @@ def build_prompt_session() -> PromptSession:
 
 
 class CliPrinter:
-    """Print streaming and followup messages safely."""
+    """Print streaming and final replies safely."""
 
     def __init__(self) -> None:
         self.stream_started = False
@@ -169,8 +167,3 @@ class CliPrinter:
             console.print(f"[cyan]{__logo__} emoticorebot[/cyan]")
             console.print(Text(text or ""))
             console.print()
-
-    async def print_followup(self, text: str) -> None:
-        if self.stream_started:
-            await self.finish_stream()
-        await self.print_reply(text)

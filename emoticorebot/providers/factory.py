@@ -1,28 +1,16 @@
-"""LLM factory - 根据 schema 配置构建 LangChain chat model。
+"""Model factories for front and agent runtimes.
 
-支持的 provider：
-- openai          : OpenAI 官方 API（GPT-4 系列）
-- anthropic       : Anthropic API（langchain-anthropic）
-- gemini          : Google Gemini（langchain-google-genai）
-- groq            : Groq API（langchain-groq）
-- ollama          : 本地 Ollama 服务（langchain-ollama）
-- openrouter      : OpenRouter 统一网关（模型名格式 "provider/model"）
-- deepseek        : DeepSeek API（OpenAI 兼容）
-- zhipu           : 智谱 GLM API（OpenAI 兼容）
-- dashscope       : 阿里云通义千问（OpenAI 兼容）
-- moonshot        : Moonshot/Kimi API（OpenAI 兼容）
-- minimax         : MiniMax API（OpenAI 兼容）
-- siliconflow     : 硅基流动 API（OpenAI 兼容）
-- volcengine      : 火山引擎 API（OpenAI 兼容）
-- aihubmix        : AiHubMix 网关（OpenAI 兼容，支持 extra_headers）
-- vllm            : 本地 vLLM 服务（OpenAI 兼容）
-- custom          : 任意 OpenAI 兼容自定义端点
+`LLMFactory` builds the user-facing front model with LangChain.
+`AgentsModelFactory` builds the backend Core/Sleep model bundle for OpenAI Agents SDK.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from agents import ModelSettings
+from agents.extensions.models.litellm_model import LitellmModel
 from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
@@ -44,6 +32,14 @@ _PROVIDER_BASE_URLS: dict[str, str] = {
     "volcengine": "https://ark.cn-beijing.volces.com/api/v3",
     "aihubmix": "https://aihubmix.com/v1",
 }
+
+_PREFIX_PROVIDERS = {"anthropic", "gemini", "groq"}
+
+
+@dataclass(slots=True)
+class AgentModelBundle:
+    model: Any
+    model_settings: ModelSettings
 
 
 class LLMFactory:
@@ -175,3 +171,58 @@ class LLMFactory:
             kwargs["default_headers"] = extra_headers
 
         return ChatOpenAI(**kwargs)
+
+
+class AgentsModelFactory:
+    """Build OpenAI Agents SDK models backed by LiteLLM."""
+
+    def __init__(self, providers_config: "ProvidersConfig") -> None:
+        self.providers = providers_config
+
+    def build(self, mode: "ModelModeConfig") -> AgentModelBundle:
+        provider = resolve_provider_name(mode)
+        provider_config = getattr(self.providers, provider, None)
+        api_key = (provider_config.api_key or None) if provider_config else None
+        api_base = (provider_config.api_base or None) if provider_config else None
+        extra_headers = (provider_config.extra_headers or None) if provider_config else None
+        if not api_base and provider in _PROVIDER_BASE_URLS:
+            api_base = _PROVIDER_BASE_URLS[provider]
+
+        model_name = self.normalize_agent_model_name(provider, mode.model)
+        return AgentModelBundle(
+            model=LitellmModel(model=model_name, base_url=api_base, api_key=api_key),
+            model_settings=ModelSettings(
+                temperature=mode.temperature,
+                max_tokens=mode.max_tokens,
+                parallel_tool_calls=True,
+                extra_headers=extra_headers,
+            ),
+        )
+
+    def normalize_agent_model_name(self, provider: str, model: str) -> str:
+        text = str(model or "").strip()
+        if not text:
+            return "gpt-4.1-mini"
+        if "/" in text:
+            return text
+        if provider in _PREFIX_PROVIDERS:
+            return f"{provider}/{text}"
+        return text
+
+
+def resolve_provider_name(mode: "ModelModeConfig") -> str:
+    provider = str(mode.provider or "auto").strip().lower() or "auto"
+    if provider != "auto":
+        return provider
+    model = str(mode.model or "").strip().lower()
+    if "/" in model:
+        return "openrouter"
+    if model.startswith(("claude-", "claude.")):
+        return "anthropic"
+    if model.startswith(("gpt-", "o1-", "o3-", "o4-", "chatgpt-")):
+        return "openai"
+    if model.startswith("gemini-"):
+        return "gemini"
+    if model.startswith(("llama", "mistral", "mixtral", "gemma", "qwen-", "qwen2", "qwen3", "deepseek-")):
+        return "openai"
+    return "openai"

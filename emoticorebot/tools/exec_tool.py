@@ -73,7 +73,7 @@ class ExecTool(Tool):
         cwd = str(cwd_path)
         
         # 安全检查
-        guard_error = self._guard_command(command, cwd)
+        guard_error = self.guard_command(command, cwd)
         if guard_error:
             return guard_error
         
@@ -113,7 +113,7 @@ class ExecTool(Tool):
         except Exception as e:
             return f"Error executing command: {e}"
     
-    def _guard_command(self, command: str, cwd: str) -> str | None:
+    def guard_command(self, command: str, cwd: str) -> str | None:
         """安全检查命令"""
         # 白名单优先
         if self.allow_patterns:

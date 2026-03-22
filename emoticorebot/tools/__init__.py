@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from emoticorebot.tools.base import Tool, ToolRegistry
+from emoticorebot.tools.agent_tools import AgentToolContext, AgentTools
 from emoticorebot.tools.exec_tool import ExecTool
 from emoticorebot.tools.file_tools import (
     EditFileTool,
@@ -31,6 +32,8 @@ __all__ = [
     # 基础
     "Tool",
     "ToolRegistry",
+    "AgentToolContext",
+    "AgentTools",
     # 执行
     "ExecTool",
     # 文件

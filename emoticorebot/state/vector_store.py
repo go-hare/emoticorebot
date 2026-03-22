@@ -88,28 +88,33 @@ class VectorMirror:
     def rebuild(self, candidates: list[dict[str, Any]], signature: dict[str, Any]) -> None:
         if not self.is_enabled():
             return
+        unique_candidates = self.deduplicate_candidates(candidates)
         collection = self.get_collection()
         try:
             self.get_client().delete_collection(name="long_term_memory")
         except Exception:
             pass
         collection = self.get_collection()
-        if candidates:
+        if unique_candidates:
             collection.upsert(
-                ids=[item["memory_id"] for item in candidates],
-                documents=[self.build_document(item) for item in candidates],
-                metadatas=[self.build_metadata(item) for item in candidates],
+                ids=[item["memory_id"] for item in unique_candidates],
+                documents=[self.build_document(item) for item in unique_candidates],
+                metadatas=[self.build_metadata(item) for item in unique_candidates],
             )
         write_json(self.sync_path, signature)
 
     def upsert(self, candidates: list[dict[str, Any]], signature: dict[str, Any]) -> None:
         if not self.is_enabled() or not candidates:
             return
+        unique_candidates = self.deduplicate_candidates(candidates)
+        if not unique_candidates:
+            write_json(self.sync_path, signature)
+            return
         collection = self.get_collection()
         collection.upsert(
-            ids=[item["memory_id"] for item in candidates],
-            documents=[self.build_document(item) for item in candidates],
-            metadatas=[self.build_metadata(item) for item in candidates],
+            ids=[item["memory_id"] for item in unique_candidates],
+            documents=[self.build_document(item) for item in unique_candidates],
+            metadatas=[self.build_metadata(item) for item in unique_candidates],
         )
         write_json(self.sync_path, signature)
 
@@ -163,3 +168,12 @@ class VectorMirror:
             "confidence": float(candidate.get("confidence", 0.0) or 0.0),
             "stability": float(candidate.get("stability", 0.0) or 0.0),
         }
+
+    def deduplicate_candidates(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unique_by_id: dict[str, dict[str, Any]] = {}
+        for index, candidate in enumerate(candidates, start=1):
+            memory_id = str(candidate.get("memory_id", "") or "").strip() or f"memory_candidate_{index}"
+            normalized = dict(candidate)
+            normalized["memory_id"] = memory_id
+            unique_by_id[memory_id] = normalized
+        return list(unique_by_id.values())

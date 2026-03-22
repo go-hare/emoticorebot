@@ -1,9 +1,10 @@
-"""Three-layer memory store and projection store."""
+"""Three-layer memory store."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from emoticorebot.config.schema import MemoryConfig, ProvidersConfig
@@ -25,6 +26,7 @@ class MemoryStore:
         self.memory_root = ensure_directory(self.workspace / "memory")
         self.session_root = ensure_directory(self.workspace / "session")
         self.vector_mirror = VectorMirror(workspace, providers_config, memory_config)
+        self.write_lock = Lock()
 
     @property
     def cognitive_path(self) -> Path:
@@ -35,36 +37,43 @@ class MemoryStore:
         return self.memory_root / "memory.jsonl"
 
     def append_brain_record(self, thread_id: str, payload: dict[str, Any]) -> None:
-        append_jsonl(self.path_for_thread_stream(thread_id, "brain.jsonl"), [self.normalize_raw_record(payload)])
+        row = self.normalize_raw_record(payload)
+        with self.write_lock:
+            append_jsonl(self.path_for_thread_stream(thread_id, "brain.jsonl"), [row])
 
-    def append_executor_records(self, thread_id: str, records: list[dict[str, Any]]) -> None:
-        rows = [self.normalize_raw_record(record) for record in records]
-        append_jsonl(self.path_for_thread_stream(thread_id, "executor.jsonl"), rows)
+    def append_tool_record(self, thread_id: str, payload: dict[str, Any]) -> None:
+        row = self.normalize_raw_record(payload)
+        with self.write_lock:
+            append_jsonl(self.path_for_thread_stream(thread_id, "tool.jsonl"), [row])
 
     def recent_brain_records(self, thread_id: str, limit: int) -> list[dict[str, Any]]:
         rows = read_jsonl(self.path_for_thread_stream(thread_id, "brain.jsonl"))
         return rows[-limit:] if limit > 0 else rows
 
-    def recent_executor_records(self, thread_id: str, limit: int) -> list[dict[str, Any]]:
-        rows = read_jsonl(self.path_for_thread_stream(thread_id, "executor.jsonl"))
+    def recent_tool_records(self, thread_id: str, limit: int) -> list[dict[str, Any]]:
+        rows = read_jsonl(self.path_for_thread_stream(thread_id, "tool.jsonl"))
         return rows[-limit:] if limit > 0 else rows
 
     def append_patch(self, patch: MemoryPatch) -> None:
-        if patch.cognitive_append:
-            rows = [self.normalize_cognitive_event(item.model_dump()) for item in patch.cognitive_append]
-            append_jsonl(self.cognitive_path, rows)
-        if patch.long_term_append or patch.user_updates or patch.soul_updates:
-            records = list(patch.long_term_append)
-            if patch.user_updates or patch.soul_updates:
-                records.append(
-                    LongTermRecord(
-                        summary="projection updates",
-                        user_updates=list(dict.fromkeys(patch.user_updates)),
-                        soul_updates=list(dict.fromkeys(patch.soul_updates)),
-                    )
+        cognitive_rows = [self.normalize_cognitive_event(item.model_dump()) for item in patch.cognitive_append]
+        long_term_records = list(patch.long_term_append)
+        if patch.user_updates or patch.soul_updates:
+            long_term_records.append(
+                LongTermRecord(
+                    summary="projection updates",
+                    user_updates=list(dict.fromkeys(patch.user_updates)),
+                    soul_updates=list(dict.fromkeys(patch.soul_updates)),
                 )
-            rows = [self.normalize_long_term_record(item.model_dump()) for item in records]
-            append_jsonl(self.long_term_path, rows)
+            )
+        long_term_rows = [self.normalize_long_term_record(item.model_dump()) for item in long_term_records]
+
+        with self.write_lock:
+            if cognitive_rows:
+                append_jsonl(self.cognitive_path, cognitive_rows)
+            if long_term_rows:
+                append_jsonl(self.long_term_path, long_term_rows)
+
+        if long_term_rows:
             self.refresh_vector_mirror()
             self.refresh_projections()
 
@@ -72,7 +81,7 @@ class MemoryStore:
         return MemoryView(
             raw_layer={
                 "recent_dialogue": self.recent_brain_records(thread_id, limit),
-                "recent_execution": self.recent_executor_records(thread_id, limit),
+                "recent_tools": self.recent_tool_records(thread_id, limit),
             },
             cognitive_layer=self.recent_cognitive_events(session_id, limit),
             long_term_layer={
@@ -155,10 +164,12 @@ class MemoryStore:
         if not row.record_id:
             row.record_id = f"mem_{row.created_at.replace(':', '').replace('-', '').replace('.', '')}"
         normalized_candidates: list[MemoryCandidate] = []
+        seen_memory_ids: set[str] = set()
         for candidate in row.memory_candidates:
             item = MemoryCandidate(**candidate.model_dump() if isinstance(candidate, MemoryCandidate) else candidate)
-            if not item.memory_id:
-                item.memory_id = f"cand_{row.record_id}_{len(normalized_candidates) + 1}"
+            base_memory_id = item.memory_id or f"cand_{row.record_id}_{len(normalized_candidates) + 1}"
+            item.memory_id = self.make_unique_memory_id(str(base_memory_id), seen_memory_ids)
+            seen_memory_ids.add(item.memory_id)
             normalized_candidates.append(item)
         row.memory_candidates = normalized_candidates
         row.user_updates = list(dict.fromkeys(str(item).strip() for item in row.user_updates if str(item).strip()))
@@ -167,18 +178,20 @@ class MemoryStore:
 
     def flatten_long_term_candidates(self, session_id: str) -> list[dict[str, Any]]:
         rows = read_jsonl(self.long_term_path)
-        flattened: list[dict[str, Any]] = []
+        flattened_by_id: dict[str, dict[str, Any]] = {}
         for row in rows:
             if session_id and not self.matches_session(row, session_id):
                 continue
-            for candidate in list(row.get("memory_candidates", []) or []):
+            for index, candidate in enumerate(list(row.get("memory_candidates", []) or []), start=1):
                 if not isinstance(candidate, dict):
                     continue
                 item = dict(candidate)
+                memory_id = str(item.get("memory_id", "") or "").strip() or f"cand_{row.get('record_id', 'mem')}_{index}"
+                item["memory_id"] = memory_id
                 item["record_id"] = str(row.get("record_id", "") or "")
                 item["record_summary"] = str(row.get("summary", "") or "")
-                flattened.append(item)
-        return flattened
+                flattened_by_id[memory_id] = item
+        return list(flattened_by_id.values())
 
     def score_candidate(self, candidate: dict[str, Any], query: str, vector_scores: dict[str, float]) -> float:
         tokens = self.tokenize(query)
@@ -217,3 +230,13 @@ class MemoryStore:
             return "\n".join(lines) + "\n"
         lines.extend(f"- {item}" for item in rows)
         return "\n".join(lines) + "\n"
+
+    def make_unique_memory_id(self, base_id: str, seen_memory_ids: set[str]) -> str:
+        candidate = str(base_id or "").strip() or "memory_candidate"
+        if candidate not in seen_memory_ids:
+            return candidate
+        suffix = 2
+        while f"{candidate}_{suffix}" in seen_memory_ids:
+            suffix += 1
+        return f"{candidate}_{suffix}"
+

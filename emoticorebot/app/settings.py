@@ -13,8 +13,7 @@ class RuntimeSettings:
     workspace: Path
     front_mode: ModelModeConfig
     core_mode: ModelModeConfig
-    reflection_mode: ModelModeConfig
-    execution_mode: ModelModeConfig
+    sleep_mode: ModelModeConfig
     providers: ProvidersConfig
     memory: MemoryConfig
     tools: ToolsConfig
@@ -25,8 +24,7 @@ def build_runtime_settings(config: Config) -> RuntimeSettings:
         workspace=config.workspace_path,
         front_mode=config.agents.defaults.brain_mode,
         core_mode=config.agents.defaults.executor_mode,
-        reflection_mode=config.agents.defaults.executor_mode,
-        execution_mode=config.agents.defaults.executor_mode,
+        sleep_mode=config.agents.defaults.executor_mode,
         providers=config.providers,
         memory=config.memory,
         tools=config.tools,

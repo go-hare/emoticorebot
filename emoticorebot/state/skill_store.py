@@ -1,176 +1,161 @@
-"""Workspace skill generation from crystallized reflection records."""
+"""Workspace skill storage and retrieval."""
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
+from typing import Any
 
-from emoticorebot.state.schemas import LongTermRecord, MemoryCandidate, MemoryPatch
+import yaml
+
 from emoticorebot.utils.helpers import ensure_dir
 
 
 class SkillStore:
-    """Generate workspace skills from crystallized long-term records."""
+    """Owns workspace skills and generated crystallized skills."""
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.root = ensure_dir(workspace / "skills")
+        self.generated_root = ensure_dir(self.root / "generated")
 
-    def write_from_memory_patch(self, patch: MemoryPatch, reason: str) -> list[Path]:
-        paths: list[Path] = []
-        for record in patch.long_term_append:
-            path = self.write_from_record(record, reason)
-            if path is not None:
-                paths.append(path)
-        return paths
+    def search(self, query: str, limit: int = 4) -> list[dict[str, str]]:
+        text = str(query or "").strip().lower()
+        rows: list[tuple[float, dict[str, str]]] = []
+        for path in sorted(self.root.rglob("SKILL.md")):
+            record = self.read_skill(path)
+            if not record:
+                continue
+            score = self.score_skill(record, text)
+            if score <= 0:
+                continue
+            rows.append((score, record))
+        rows.sort(key=lambda item: item[0], reverse=True)
+        return [record for _, record in rows[:limit]]
 
-    def write_from_record(self, record: LongTermRecord, reason: str) -> Path | None:
-        normalized = LongTermRecord.model_validate(record.model_dump())
-        candidates = self.skill_candidates(normalized.memory_candidates)
-        if not candidates:
-            return None
-        slug = self.skill_slug(normalized, candidates)
-        skill_dir = ensure_dir(self.root / slug)
-        skill_path = skill_dir / "SKILL.md"
-        skill_path.write_text(self.render_skill(slug, normalized, candidates, reason), encoding="utf-8")
-        return skill_path
-
-    def skill_candidates(self, candidates: list[MemoryCandidate]) -> list[MemoryCandidate]:
-        allowed = {"working", "execution", "reflection"}
-        return [item for item in candidates if item.memory_type in allowed]
-
-    def skill_slug(self, record: LongTermRecord, candidates: list[MemoryCandidate]) -> str:
-        primary = candidates[0]
-        raw = primary.memory_id or record.record_id or primary.summary or record.summary or "reflection-skill"
-        cleaned = raw.replace("_", "-").replace(" ", "-").lower()
-        cleaned = re.sub(r"[^a-z0-9-]+", "-", cleaned)
-        cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-")
-        if cleaned.startswith("mem-"):
-            cleaned = cleaned[4:]
-        if cleaned.startswith("memory-"):
-            cleaned = cleaned[7:]
-        if cleaned.startswith("record-"):
-            cleaned = cleaned[7:]
-        return cleaned or "reflection-skill"
-
-    def render_skill(
-        self,
-        slug: str,
-        record: LongTermRecord,
-        candidates: list[MemoryCandidate],
-        reason: str,
-    ) -> str:
-        title = self.skill_title(slug, candidates)
-        description = self.skill_description(slug, record, candidates)
-        metadata = {
-            "emoticorebot": {
-                "source": "reflection",
-                "reason": reason,
-                "record_id": record.record_id,
-                "session_id": record.session_id,
-                "thread_id": record.thread_id,
-            }
-        }
-        lines = [
-            "---",
-            f"name: {slug}",
-            f'description: "{description}"',
-            f"metadata: {json.dumps(metadata, ensure_ascii=False)}",
-            "---",
-            "",
-            f"# {title}",
-            "",
-            "Auto-generated from crystallized reflection. Keep this skill concise and update it when the same pattern becomes clearer.",
-            "",
-            "## Core Lesson",
-            record.summary or candidates[0].summary,
-            "",
-            "## When To Use",
-        ]
-        for line in self.when_to_use_lines(candidates):
-            lines.append(f"- {line}")
-        lines.extend(["", "## Guidance"])
-        for candidate in candidates:
-            lines.extend(self.render_candidate(candidate))
-        if record.user_updates:
-            lines.extend(["", "## User Context"])
-            for item in record.user_updates:
-                if item.strip():
-                    lines.append(f"- {item.strip()}")
-        if record.soul_updates:
-            lines.extend(["", "## Style Context"])
-            for item in record.soul_updates:
-                if item.strip():
-                    lines.append(f"- {item.strip()}")
-        return "\n".join(lines).rstrip() + "\n"
-
-    def skill_title(self, slug: str, candidates: list[MemoryCandidate]) -> str:
-        primary = candidates[0].summary.strip() or slug.replace("-", " ")
-        return primary
-
-    def skill_description(self, slug: str, record: LongTermRecord, candidates: list[MemoryCandidate]) -> str:
-        primary = candidates[0]
-        tags = [tag.strip() for tag in primary.tags if tag.strip()]
-        tag_text = ", ".join(tags[:4]) if tags else primary.memory_type
-        base = primary.summary.strip() or record.summary.strip() or slug
-        return f"Auto-generated reflection skill. Use when handling {tag_text} work, especially when {base}."
-
-    def when_to_use_lines(self, candidates: list[MemoryCandidate]) -> list[str]:
+    def render_context(self, query: str, limit: int = 4) -> str:
+        skills = self.search(query, limit=limit)
+        if not skills:
+            return ""
         lines: list[str] = []
-        for candidate in candidates:
-            summary = candidate.summary.strip()
-            if summary and summary not in lines:
-                lines.append(summary)
-            for tag in candidate.tags[:4]:
-                tag_text = str(tag or "").strip()
-                if tag_text:
-                    item = f"Tasks involving {tag_text}"
-                    if item not in lines:
-                        lines.append(item)
-        lines.append("Repeated failures point to the same workflow gap or missing check")
-        return lines
+        for skill in skills:
+            lines.extend(
+                [
+                    f"### {skill['title']}",
+                    f"- path: {skill['path']}",
+                ]
+            )
+            description = skill.get("description", "")
+            excerpt = skill.get("excerpt", "")
+            if description:
+                lines.append(f"- description: {description}")
+            if excerpt:
+                lines.append(excerpt)
+            lines.append("")
+        return "\n".join(lines).strip()
 
-    def render_candidate(self, candidate: MemoryCandidate) -> list[str]:
-        lines = [
+    def write_generated_skill(
+        self,
+        *,
+        slug: str,
+        title: str,
+        description: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Path:
+        safe_slug = self.normalize_slug(slug or title or "generated-skill")
+        skill_dir = ensure_dir(self.generated_root / safe_slug)
+        path = skill_dir / "SKILL.md"
+        front_matter = {
+            "name": safe_slug,
+            "description": description or title or safe_slug,
+            "metadata": metadata or {},
+        }
+        body = [
+            "---",
+            yaml.safe_dump(front_matter, allow_unicode=True, sort_keys=False).strip(),
+            "---",
             "",
-            f"### {candidate.summary.strip() or candidate.memory_id or candidate.memory_type}",
+            f"# {title or safe_slug}",
             "",
-            f"- Type: `{candidate.memory_type}`",
+            content.strip(),
+            "",
         ]
-        detail = candidate.detail.strip()
-        if detail:
-            lines.append(f"- Detail: {detail}")
-        tags = [tag.strip() for tag in candidate.tags if tag.strip()]
-        if tags:
-            lines.append(f"- Tags: {', '.join(tags)}")
-        checkpoints = self.checkpoints_from_candidate(candidate)
-        if checkpoints:
-            lines.append("- Checkpoints:")
-            for item in checkpoints:
-                lines.append(f"  - {item}")
-        return lines
+        path.write_text("\n".join(body), encoding="utf-8")
+        return path
 
-    def checkpoints_from_candidate(self, candidate: MemoryCandidate) -> list[str]:
-        metadata = dict(candidate.metadata or {})
-        checkpoints: list[str] = []
-        error_types = metadata.get("error_types")
-        if isinstance(error_types, list):
-            for item in error_types:
-                text = str(item or "").strip().replace("_", " ")
-                if text:
-                    checkpoints.append(f"Watch for {text}")
-        lesson = str(metadata.get("lesson_learned", "") or "").strip().replace("_", " ")
-        if lesson:
-            checkpoints.append(f"Apply lesson: {lesson}")
-        if "working_dir" in candidate.detail:
-            checkpoints.append("Confirm working directory before file or shell operations")
-        if "路径" in candidate.detail or "path" in candidate.detail.lower():
-            checkpoints.append("Confirm the path is valid relative to the workspace")
-        if "参数" in candidate.detail or "param" in candidate.detail.lower():
-            checkpoints.append("Confirm required parameters are present before execution")
-        deduped: list[str] = []
-        for item in checkpoints:
-            if item not in deduped:
-                deduped.append(item)
-        return deduped
+    def read_skill(self, path: Path) -> dict[str, str] | None:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+        front_matter, body = self.split_front_matter(raw)
+        title = self.extract_title(body) or path.parent.name
+        description = str(front_matter.get("description", "") or "").strip()
+        return {
+            "path": str(path),
+            "title": title,
+            "description": description,
+            "excerpt": self.make_excerpt(body),
+            "content": body.strip(),
+        }
+
+    def split_front_matter(self, raw: str) -> tuple[dict[str, Any], str]:
+        text = str(raw or "")
+        if not text.startswith("---\n"):
+            return {}, text
+        parts = text.split("\n---\n", 1)
+        if len(parts) != 2:
+            return {}, text
+        front_matter_text = parts[0][4:]
+        body = parts[1]
+        try:
+            payload = yaml.safe_load(front_matter_text) or {}
+        except Exception:
+            payload = {}
+        return payload if isinstance(payload, dict) else {}, body
+
+    def extract_title(self, body: str) -> str:
+        for line in body.splitlines():
+            text = line.strip()
+            if text.startswith("# "):
+                return text[2:].strip()
+        return ""
+
+    def make_excerpt(self, body: str, max_lines: int = 6) -> str:
+        rows: list[str] = []
+        for line in body.splitlines():
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            rows.append(text)
+            if len(rows) >= max_lines:
+                break
+        return "\n".join(rows)
+
+    def score_skill(self, record: dict[str, str], query: str) -> float:
+        if not query:
+            return 0.1
+        tokens = self.tokenize(query)
+        haystack = " ".join(
+            [
+                record.get("title", ""),
+                record.get("description", ""),
+                record.get("excerpt", ""),
+                record.get("content", ""),
+            ]
+        ).lower()
+        skill_tokens = self.tokenize(haystack)
+        if not tokens or not skill_tokens:
+            return 0.0
+        return len(tokens & skill_tokens) / max(1, len(tokens))
+
+    def tokenize(self, text: str) -> set[str]:
+        return {token for token in re.split(r"[^\w\u4e00-\u9fff]+", str(text or "").lower()) if token}
+
+    def normalize_slug(self, value: str) -> str:
+        text = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+        text = re.sub(r"[^a-z0-9-]+", "-", text)
+        text = re.sub(r"-{2,}", "-", text).strip("-")
+        return text or "generated-skill"
+
