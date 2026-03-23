@@ -6,22 +6,14 @@
 
 `emoticorebot` is a companion AI runtime built around a simple pipeline:
 
-`Front -> Runtime -> Core -> Sleep`
+`Front -> Runtime -> BrainKernel`
 
 - `Front`
-  - lightweight, user-facing, streaming-first
+  - lightweight, user-facing, built with LangChain
 - `Runtime`
-  - pure scheduler, no LLM decision-making
-- `Core`
-  - the only main brain, powered by OpenAI Agents SDK
-- `Sleep`
-  - async reflection and crystallization
-- `Memory / World Model / Skills`
-  - app-owned stores, not framework-owned black boxes
-
-Current architecture doc:
-
-- [docs/openai-agents-architecture.zh-CN.md](docs/openai-agents-architecture.zh-CN.md)
+  - pure bridge: receives messages, forwards them to the resident kernel, waits for output
+- `BrainKernel`
+  - the only main brain, tool loop + memory + sleep all owned inside the kernel
 
 ---
 
@@ -86,23 +78,17 @@ After onboarding, the workspace keeps these key files and folders:
   AGENTS.md
   TOOLS.md
   HEARTBEAT.md
-  current_state.md
   memory/
     cognitive_events.jsonl
     memory.jsonl
-    vector/
   session/
     <thread_id>/
       brain.jsonl
+      front.jsonl
       tool.jsonl
-  state/
-    world_model.json
   skills/
   templates/
     FRONT.md
-    FRONT_FOLLOWUP.md
-    CORE_MAIN.md
-    SLEEP.md
 ```
 
 ---
@@ -112,15 +98,13 @@ After onboarding, the workspace keeps these key files and folders:
 ```text
 emoticorebot/
   app/
+  brain_kernel/
   channels/
   cli/
   config/
-  core/
   front/
   providers/
   runtime/
-  sleep/
-  state/
   templates/
   tools/
   skills/

@@ -6,22 +6,14 @@
 
 `emoticorebot` 当前采用一条极简主线：
 
-`Front -> Runtime -> Core -> Sleep`
+`Front -> Runtime -> BrainKernel`
 
 - `Front`
-  - 只负责前台表达，优先流式和轻量
+  - 只负责前台表达，使用 LangChain
 - `Runtime`
-  - 只负责调度，不负责 LLM 决策
-- `Core`
-  - 唯一主脑，直接做工具循环，使用 OpenAI Agents SDK
-- `Sleep`
-  - 异步反思、沉淀、结晶
-- `Memory / World Model / Skills`
-  - 由应用自己掌控
-
-当前架构文档：
-
-- [docs/openai-agents-architecture.zh-CN.md](docs/openai-agents-architecture.zh-CN.md)
+  - 只负责桥接，收消息、投递常驻内核、等待输出
+- `BrainKernel`
+  - 唯一主脑，工具循环、记忆、sleep 都在内核里自己完成
 
 ---
 
@@ -86,23 +78,17 @@ emoticorebot agent
   AGENTS.md
   TOOLS.md
   HEARTBEAT.md
-  current_state.md
   memory/
     cognitive_events.jsonl
     memory.jsonl
-    vector/
   session/
     <thread_id>/
       brain.jsonl
+      front.jsonl
       tool.jsonl
-  state/
-    world_model.json
   skills/
   templates/
     FRONT.md
-    FRONT_FOLLOWUP.md
-    CORE_MAIN.md
-    SLEEP.md
 ```
 
 ---
@@ -112,15 +98,13 @@ emoticorebot agent
 ```text
 emoticorebot/
   app/
+  brain_kernel/
   channels/
   cli/
   config/
-  core/
   front/
   providers/
   runtime/
-  sleep/
-  state/
   templates/
   tools/
   skills/

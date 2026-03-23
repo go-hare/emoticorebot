@@ -1,4 +1,4 @@
-"""CLI commands for the Front -> Scheduler -> Core architecture."""
+"""CLI commands for the front + resident-kernel runtime."""
 
 from __future__ import annotations
 
@@ -17,8 +17,9 @@ from emoticorebot import __logo__, __version__
 from emoticorebot.app.factory import build_app_context, ensure_workspace_layout
 from emoticorebot.config.loader import get_config_path, load_config, save_config
 from emoticorebot.config.schema import Config
+from emoticorebot.desktop import DesktopBridgeServer
 
-app = typer.Typer(name="emoticorebot", help="emoticorebot front-scheduler-core")
+app = typer.Typer(name="emoticorebot", help="emoticorebot front-to-kernel runtime")
 console = Console()
 exit_commands = {"exit", "quit", "/exit", "/quit", ":q"}
 
@@ -55,8 +56,18 @@ def agent(
     message: str = typer.Option("", "--message", "-m", help="Send one message and exit."),
     stream: bool = typer.Option(True, "--stream/--no-stream", help="Stream front replies."),
 ) -> None:
-    """Run the interactive front-scheduler-core agent."""
+    """Run the interactive front-to-kernel agent."""
     asyncio.run(run_agent(message=message, stream=stream))
+
+
+@app.command()
+def desktop(
+    host: str = typer.Option("127.0.0.1", "--host", help="Desktop bridge host."),
+    port: int = typer.Option(8765, "--port", min=1, max=65535, help="Desktop bridge port."),
+    thread_id: str = typer.Option("desktop:main", "--thread-id", help="Default desktop thread id."),
+) -> None:
+    """Run the desktop shell bridge."""
+    asyncio.run(run_desktop(host=host, port=port, thread_id=thread_id))
 
 
 async def run_agent(message: str, stream: bool) -> None:
@@ -68,10 +79,36 @@ async def run_agent(message: str, stream: bool) -> None:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
     printer = CliPrinter()
-    if message.strip():
-        await send_once(context, printer, message.strip(), stream=stream)
-        return
-    await run_interactive(context, printer, stream=stream)
+    await context.runtime.start()
+    try:
+        if message.strip():
+            await send_once(context, printer, message.strip(), stream=stream)
+            return
+        await run_interactive(context, printer, stream=stream)
+    finally:
+        await context.runtime.stop()
+
+
+async def run_desktop(host: str, port: int, thread_id: str) -> None:
+    config = load_config()
+    ensure_workspace_layout(config.workspace_path)
+    try:
+        context = build_app_context(config)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    bridge = DesktopBridgeServer(
+        runtime=context.runtime,
+        workspace=context.settings.workspace,
+        default_thread_id=thread_id,
+    )
+    console.print(f"[cyan]{__logo__} desktop bridge[/cyan] ws://{host}:{port}")
+    try:
+        await bridge.serve(host=host, port=port)
+    finally:
+        await bridge.stop()
+        await context.runtime.stop()
 
 
 async def send_once(context, printer: "CliPrinter", user_text: str, stream: bool) -> None:

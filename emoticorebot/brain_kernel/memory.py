@@ -131,26 +131,6 @@ class MemoryView(BaseModel):
     cognitive_layer: list[dict[str, Any]] = Field(default_factory=list)
     long_term_layer: dict[str, Any] = Field(default_factory=dict)
     projections: dict[str, str] = Field(default_factory=dict)
-    current_state: str = ""
-
-
-class FileCurrentStateStore:
-    """Read and write current_state.md in a standalone workspace."""
-
-    def __init__(self, workspace: Path):
-        self.workspace = Path(workspace)
-        self.path = self.workspace / "current_state.md"
-
-    def ensure(self, content: str) -> None:
-        if self.path.exists():
-            return
-        write_text(self.path, content)
-
-    def read(self) -> str:
-        return read_text(self.path)
-
-    def write(self, content: str) -> None:
-        write_text(self.path, content)
 
 
 class JsonlMemoryStore:
@@ -228,7 +208,6 @@ class JsonlMemoryStore:
                 "user_anchor": read_text(self.workspace / "USER.md"),
                 "soul_anchor": read_text(self.workspace / "SOUL.md"),
             },
-            current_state=read_text(self.workspace / "current_state.md"),
         )
 
     def recent_brain_records(self, conversation_id: str, limit: int) -> list[dict[str, Any]]:
@@ -539,7 +518,6 @@ class CoreMemory(Memory):
         blocks: list[Block] = []
         user_anchor = str(memory.projections.get("user_anchor", "") or "").strip()
         soul_anchor = str(memory.projections.get("soul_anchor", "") or "").strip()
-        current_state = str(memory.current_state or "").strip()
         long_term_summary = str(memory.long_term_layer.get("summary", "") or "").strip()
         cognitive_summary = cls._render_cognitive(memory.cognitive_layer)
         recent_dialogue = cls._render_rows(memory.raw_layer.get("recent_dialogue", []), key="role")
@@ -550,8 +528,6 @@ class CoreMemory(Memory):
             blocks.append(Human(value=user_anchor))
         if soul_anchor:
             blocks.append(Persona(value=soul_anchor))
-        if current_state:
-            blocks.append(Block(label="current_state", value=current_state, description="Current internal state"))
         if cognitive_summary:
             blocks.append(Block(label="cognitive_memory", value=cognitive_summary, description="Recent cognitive summaries"))
         if long_term_summary:

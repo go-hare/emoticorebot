@@ -376,7 +376,6 @@ Runtime Scheduler
 - `memory/memory.jsonl`
 - `USER.md`
 - `SOUL.md`
-- `current_state.md`
 
 规则：
 

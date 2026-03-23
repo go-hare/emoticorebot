@@ -10,7 +10,7 @@ from typing import Any, Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from .memory import FileCurrentStateStore, JsonlMemoryStore, LongTermRecord, MemoryCandidate, MemoryPatch, make_id
+from .memory import JsonlMemoryStore, LongTermRecord, MemoryCandidate, MemoryPatch, make_id
 
 SleepPlanner = Callable[["SleepDigest"], Awaitable["SleepOutcome"]]
 
@@ -33,7 +33,6 @@ class SleepDigest(BaseModel):
     front_events: list[SleepEvent] = Field(default_factory=list)
     kernel_events: list[SleepEvent] = Field(default_factory=list)
     long_term_summary: str = ""
-    current_state: str = ""
 
 
 class SleepOutcome(BaseModel):
@@ -41,7 +40,6 @@ class SleepOutcome(BaseModel):
     memory_candidates: list[MemoryCandidate] = Field(default_factory=list)
     user_updates: list[str] = Field(default_factory=list)
     soul_updates: list[str] = Field(default_factory=list)
-    current_state: str = ""
     notes: str = ""
 
 
@@ -52,12 +50,10 @@ class SleepAgent:
         self,
         *,
         memory_store: JsonlMemoryStore,
-        current_state_store: FileCurrentStateStore | None = None,
         planner: SleepPlanner | None = None,
         model: Any | None = None,
     ) -> None:
         self.memory_store = memory_store
-        self.current_state_store = current_state_store
         self.planner = planner
         self.model = model
 
@@ -120,7 +116,6 @@ class SleepAgent:
             front_events=front_events,
             kernel_events=kernel_events,
             long_term_summary=str(memory.long_term_layer.get("summary", "") or "").strip(),
-            current_state=str(memory.current_state or "").strip(),
         )
 
     def build_default_outcome(self, digest: SleepDigest) -> SleepOutcome:
@@ -156,12 +151,10 @@ class SleepAgent:
         )
 
         user_updates = self._extract_user_updates(digest.latest_user_text)
-        current_state = digest.current_state or "# Current State\n\n- calm\n"
         return SleepOutcome(
             summary=summary,
             memory_candidates=[memory_candidate],
             user_updates=user_updates,
-            current_state=current_state,
             notes="heuristic consolidation",
         )
 
@@ -193,9 +186,6 @@ class SleepAgent:
         turn_id: str,
         outcome: SleepOutcome,
     ) -> None:
-        if outcome.current_state and self.current_state_store is not None:
-            self.current_state_store.write(outcome.current_state)
-
         has_memory = bool(outcome.memory_candidates or outcome.user_updates or outcome.soul_updates)
         if not has_memory:
             return
@@ -294,7 +284,6 @@ class SleepAgent:
                     "Prefer stable, reusable memory only. Avoid fluff. Avoid inventing facts.\n"
                     "Keep memory_candidates to at most 3 items.\n"
                     "Allowed memory_type values: relationship, fact, working, execution, reflection.\n"
-                    "current_state must be markdown and compact.\n"
                     "When the user states a stable preference, desire, identity, or naming preference, "
                     "include it in user_updates."
                 )
@@ -304,7 +293,7 @@ class SleepAgent:
                     "Turn digest JSON:\n"
                     f"{digest_json}\n\n"
                     "Return a JSON object with keys: summary, memory_candidates, user_updates, "
-                    "soul_updates, current_state, notes."
+                    "soul_updates, notes."
                 )
             ),
         ]
@@ -337,7 +326,6 @@ class SleepAgent:
 
     def _normalize_outcome(self, outcome: SleepOutcome, *, digest: SleepDigest, source: str) -> SleepOutcome:
         summary = str(outcome.summary or "").strip() or self._clip(f"User asked: {digest.latest_user_text}", 160)
-        current_state = str(outcome.current_state or "").strip() or digest.current_state or "# Current State\n\n- calm\n"
 
         normalized_candidates: list[MemoryCandidate] = []
         for item in list(outcome.memory_candidates)[:3]:
@@ -354,7 +342,6 @@ class SleepAgent:
             memory_candidates=normalized_candidates,
             user_updates=self._dedupe_strings(outcome.user_updates)[:4],
             soul_updates=self._dedupe_strings(outcome.soul_updates)[:4],
-            current_state=current_state,
             notes=str(outcome.notes or source).strip() or source,
         )
 
@@ -373,7 +360,6 @@ class SleepAgent:
             memory_candidates=merged_candidates[:3],
             user_updates=merged_user_updates,
             soul_updates=merged_soul_updates,
-            current_state=outcome.current_state or heuristic.current_state,
             notes=f"{notes}; heuristic_backfill",
         )
 

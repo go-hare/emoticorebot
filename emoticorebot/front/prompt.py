@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from emoticorebot.state.schemas import MemoryView
+from emoticorebot.brain_kernel import MemoryView
 
 
 class FrontPromptBuilder:
@@ -14,13 +14,24 @@ class FrontPromptBuilder:
         self.workspace = workspace
 
     def build_user_prompt(self, *, user_text: str, memory: MemoryView) -> str:
-        sections: list[str] = []
+        sections: list[str] = [
+            "## 外显目标",
+            "默认高陪伴、高在场。先接住用户，再表达内容。",
+            "哪怕只是说会去看、会去处理，也要像在桌边陪着回应，不要像客服播报。",
+            "",
+            "## 关系信号",
+            "允许很轻的称呼、确认、安抚或陪着推进的语气，但不要每句都堆这些东西。",
+            "优先短句、真一点、贴近一点，避免模板化的甜和夸张语气。",
+            "",
+        ]
         needs_verification = self.requires_verification(user_text)
         if needs_verification:
             sections.extend(
                 [
                     "## 回复约束",
-                    "这是一个需要核实事实的请求。你只能表达会查看、会处理、会继续跟进，不能提前判断文件存在与否、内容是什么、命令结果是什么、错误原因是什么。",
+                    "这是一个需要核实事实的请求。先接住用户，再表达会查看、会处理、会继续跟进。",
+                    "不能提前判断文件存在与否、内容是什么、命令结果是什么、错误原因是什么。",
+                    "回复尽量控制在一到两句里，短一点，但不要冷。",
                     "",
                 ]
             )
@@ -32,13 +43,10 @@ class FrontPromptBuilder:
         )
         user_anchor = str(memory.projections.get("user_anchor", "") or "").strip()
         soul_anchor = str(memory.projections.get("soul_anchor", "") or "").strip()
-        current_state = str(memory.current_state or "").strip()
         if soul_anchor:
             sections.extend(["", "## 灵魂锚点", soul_anchor])
         if user_anchor:
             sections.extend(["", "## 用户画像", user_anchor])
-        if current_state:
-            sections.extend(["", "## 当前状态", current_state])
         if not needs_verification:
             recent_dialogue = list(memory.raw_layer.get("recent_dialogue", []) or [])
             if recent_dialogue:

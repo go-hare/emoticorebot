@@ -11,7 +11,6 @@ from emoticorebot.brain_kernel import (
     ClientTool,
     ChildToolRule,
     CognitiveEvent,
-    FileCurrentStateStore,
     FrontEvent,
     FunctionTool,
     InitToolRule,
@@ -81,8 +80,7 @@ def test_child_tool_rule_prefills_after_parent_call() -> None:
 
 def test_sleep_agent_writes_long_term_memory(tmp_path: Path) -> None:
     memory_store = JsonlMemoryStore(tmp_path)
-    current_state_store = FileCurrentStateStore(tmp_path)
-    agent = SleepAgent(memory_store=memory_store, current_state_store=current_state_store)
+    agent = SleepAgent(memory_store=memory_store)
 
     outcome = asyncio.run(
         agent.run_for_turn(
@@ -101,8 +99,7 @@ def test_sleep_agent_writes_long_term_memory(tmp_path: Path) -> None:
 
 def test_sleep_agent_builds_unified_digest(tmp_path: Path) -> None:
     memory_store = JsonlMemoryStore(tmp_path)
-    current_state_store = FileCurrentStateStore(tmp_path)
-    agent = SleepAgent(memory_store=memory_store, current_state_store=current_state_store)
+    agent = SleepAgent(memory_store=memory_store)
     memory_store.append_front_record(
         "conv",
         {
@@ -165,7 +162,6 @@ class FakeSleepStructuredModel:
             ],
             "user_updates": ["我想要有陪伴感的机器人"],
             "soul_updates": ["对陪伴感需求保持高敏感"],
-            "current_state": "# Current State\n\n- reflective\n",
             "notes": "llm reflection",
         }
 
@@ -179,9 +175,8 @@ class FakeSleepModel:
 
 def test_sleep_agent_can_use_llm_model_for_reflection(tmp_path: Path) -> None:
     memory_store = JsonlMemoryStore(tmp_path)
-    current_state_store = FileCurrentStateStore(tmp_path)
     model = FakeSleepModel()
-    agent = SleepAgent(memory_store=memory_store, current_state_store=current_state_store, model=model)
+    agent = SleepAgent(memory_store=memory_store, model=model)
 
     outcome = asyncio.run(
         agent.run_for_turn(
@@ -200,7 +195,6 @@ def test_sleep_agent_can_use_llm_model_for_reflection(tmp_path: Path) -> None:
     assert outcome.memory_candidates[0].metadata["source"] == "llm_reflection"
     assert outcome.user_updates == ["我想要有陪伴感的机器人"]
     assert outcome.soul_updates == ["对陪伴感需求保持高敏感"]
-    assert current_state_store.read().strip() == "# Current State\n\n- reflective"
     assert memory_store.long_term_path.exists()
     assert "我想要有陪伴感的机器人" in (tmp_path / "USER.md").read_text(encoding="utf-8")
     assert "对陪伴感需求保持高敏感" in (tmp_path / "SOUL.md").read_text(encoding="utf-8")
@@ -288,9 +282,8 @@ def test_brain_kernel_can_store_front_event(tmp_path: Path) -> None:
 
 def test_brain_kernel_assigns_default_model_to_sleep_agent(tmp_path: Path) -> None:
     memory_store = JsonlMemoryStore(tmp_path)
-    current_state_store = FileCurrentStateStore(tmp_path)
     model = FakeSleepModel()
-    sleep_agent = SleepAgent(memory_store=memory_store, current_state_store=current_state_store)
+    sleep_agent = SleepAgent(memory_store=memory_store)
 
     _kernel = BrainKernel(agent_id="alice", model=model, memory_store=memory_store, sleep_agent=sleep_agent)
 
@@ -318,8 +311,7 @@ async def _remember_note(note: str) -> str:
 
 def test_brain_kernel_can_execute_local_tool_loop(tmp_path: Path) -> None:
     memory_store = JsonlMemoryStore(tmp_path)
-    current_state_store = FileCurrentStateStore(tmp_path)
-    sleep_agent = SleepAgent(memory_store=memory_store, current_state_store=current_state_store)
+    sleep_agent = SleepAgent(memory_store=memory_store)
     model = FakeLocalToolModel()
     tool = FunctionTool(
         name="remember_note",
@@ -692,7 +684,6 @@ def test_brain_kernel_resident_service_can_record_front_event(tmp_path: Path) ->
 def test_brain_kernel_resident_service_runs_sleep_agent_in_background(tmp_path: Path) -> None:
     async def _exercise() -> None:
         memory_store = JsonlMemoryStore(tmp_path)
-        current_state_store = FileCurrentStateStore(tmp_path)
         sleep_started = asyncio.Event()
         sleep_release = asyncio.Event()
 
@@ -703,12 +694,10 @@ def test_brain_kernel_resident_service_runs_sleep_agent_in_background(tmp_path: 
             return SleepOutcome(
                 summary="background sleep completed",
                 user_updates=["我想要陪伴感"],
-                current_state="# Current State\n\n- calm\n",
             )
 
         sleep_agent = SleepAgent(
             memory_store=memory_store,
-            current_state_store=current_state_store,
             planner=_planner,
         )
         model = ImmediateReplyModel()

@@ -1,0 +1,37 @@
+import type { ISpriteConfig } from "../types/ISpriteConfig";
+import koreaCatSprite from "../assets/avatar/shimeji_skoreacat.png";
+
+export const avatarSpriteConfig: ISpriteConfig = {
+  name: "shimeji-skoreacat",
+  imageSrc: koreaCatSprite,
+  frameSize: 128,
+  scale: 1.05,
+  states: {
+    stand: { start: 0, end: 0 },
+    walk: { start: 8, end: 11 },
+    sit: { start: 16, end: 16 },
+    greet: { start: 24, end: 31 },
+    jump: { start: 32, end: 32 },
+    fall: { start: 40, end: 42 },
+    drag: { start: 48, end: 48 },
+    crawl: { start: 56, end: 63 },
+    climb: { start: 64, end: 71 },
+    idle: { start: 16, end: 16 },
+    listening: { start: 0, end: 0 },
+    replying: { start: 24, end: 31 },
+    settling: { start: 16, end: 16 },
+    idle_breathe_soft: { start: 16, end: 16 },
+    idle_breathe_even: { start: 0, end: 0 },
+    idle_breathe_light: { start: 0, end: 0 },
+    listen_nod: { start: 24, end: 31 },
+    listen_still: { start: 0, end: 0 },
+    speak_soft: { start: 24, end: 31 },
+    speak_bright: { start: 24, end: 31 },
+    speak_playful: { start: 8, end: 11 },
+    speak_clear: { start: 24, end: 31 },
+    speak_gentle: { start: 24, end: 31 },
+    settle_soft: { start: 16, end: 16 },
+    settle_ready: { start: 0, end: 0 },
+    settle_light: { start: 8, end: 11 },
+  },
+};
