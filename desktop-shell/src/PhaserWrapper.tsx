@@ -6,13 +6,20 @@ import SurfaceAvatarScene from "./scenes/SurfaceAvatarScene";
 
 interface PhaserWrapperProps {
   packet: DesktopPacket;
+  speechPulseTick: number;
   spriteConfig: ISpriteConfig | null;
 }
 
-function FallbackAvatar({ packet }: { packet: DesktopPacket }) {
+function FallbackAvatar({
+  packet,
+  speechPulseTick,
+}: {
+  packet: DesktopPacket;
+  speechPulseTick: number;
+}) {
   return (
     <div className={`fallback-avatar mood-${packet.mood} phase-${packet.phase}`}>
-      <div className={`fallback-core animation-${packet.animation}`} />
+      <div className={`fallback-core animation-${packet.animation} pulse-${speechPulseTick % 2}`} />
       <div className="fallback-shadow" />
     </div>
   );
@@ -20,6 +27,7 @@ function FallbackAvatar({ packet }: { packet: DesktopPacket }) {
 
 export default function PhaserWrapper({
   packet,
+  speechPulseTick,
   spriteConfig,
 }: PhaserWrapperProps) {
   const phaserDom = useRef<HTMLDivElement>(null);
@@ -64,8 +72,19 @@ export default function PhaserWrapper({
     gameRef.current.events.emit("surface:update", packet);
   }, [packet, spriteConfig]);
 
+  useEffect(() => {
+    if (!gameRef.current) {
+      return;
+    }
+    gameRef.current.events.emit("speech:pulse", {
+      phase: packet.phase,
+      mood: packet.mood,
+      tick: speechPulseTick,
+    });
+  }, [packet.mood, packet.phase, speechPulseTick]);
+
   if (!spriteConfig) {
-    return <FallbackAvatar packet={packet} />;
+    return <FallbackAvatar packet={packet} speechPulseTick={speechPulseTick} />;
   }
 
   return <div className="avatar-canvas" ref={phaserDom} />;

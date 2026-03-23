@@ -193,6 +193,13 @@ textarea {
   animation: pulse-talk 1.1s ease-in-out infinite;
 }
 
+.phase-replying .fallback-core.pulse-0,
+.phase-replying .fallback-core.pulse-1 {
+  animation:
+    pulse-talk 1.1s ease-in-out infinite,
+    speech-blip 180ms ease-out;
+}
+
 .animation-listen_nod {
   animation: nodding 1.8s ease-in-out infinite;
 }
@@ -211,6 +218,71 @@ textarea {
 
 .bubble-card.is-live {
   border-color: rgba(244, 194, 125, 0.35);
+  transform: translateY(-2px);
+  box-shadow:
+    0 14px 30px rgba(244, 168, 99, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.bubble-card {
+  position: relative;
+  overflow: hidden;
+  transition:
+    transform 220ms ease,
+    border-color 220ms ease,
+    background 220ms ease,
+    box-shadow 220ms ease;
+}
+
+.bubble-card::after {
+  content: "";
+  position: absolute;
+  inset: auto -12% -35% -12%;
+  height: 120px;
+  background: radial-gradient(circle, rgba(255, 210, 134, 0.18), transparent 68%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+}
+
+.bubble-card.is-live::after {
+  opacity: 1;
+  animation: bubble-glow 2.4s ease-in-out infinite;
+}
+
+.bubble-card.phase-listening {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.03)),
+    rgba(255, 255, 255, 0.03);
+}
+
+.bubble-card.phase-replying {
+  background:
+    linear-gradient(180deg, rgba(255, 183, 112, 0.12), rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.04);
+}
+
+.bubble-card.phase-replying.pulse-0,
+.bubble-card.phase-replying.pulse-1 {
+  animation: speech-card-blip 180ms ease-out;
+}
+
+.bubble-card.phase-settling {
+  background:
+    linear-gradient(180deg, rgba(174, 216, 210, 0.08), rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.04);
+}
+
+.bubble-card.phase-settling .bubble-text {
+  color: rgba(246, 238, 225, 0.84);
+}
+
+.bubble-card.mood-playful.is-live {
+  border-color: rgba(255, 158, 122, 0.42);
+}
+
+.bubble-card.mood-soothing {
+  border-color: rgba(164, 205, 209, 0.2);
 }
 
 .bubble-label {
@@ -223,6 +295,16 @@ textarea {
   margin: 0;
   font-size: 17px;
   line-height: 1.55;
+}
+
+.bubble-text.pulse-0,
+.bubble-text.pulse-1 {
+  transform-origin: left center;
+}
+
+.bubble-card.phase-replying .bubble-text.pulse-0,
+.bubble-card.phase-replying .bubble-text.pulse-1 {
+  animation: speech-text-blip 180ms ease-out;
 }
 
 .bubble-user {
@@ -321,6 +403,57 @@ textarea {
   }
   75% {
     transform: rotate(3deg);
+  }
+}
+
+@keyframes bubble-glow {
+  0%,
+  100% {
+    transform: translateY(6px) scale(0.96);
+    opacity: 0.72;
+  }
+  50% {
+    transform: translateY(-2px) scale(1.02);
+    opacity: 1;
+  }
+}
+
+@keyframes speech-blip {
+  0% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-5px) scale(1.04);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes speech-card-blip {
+  0% {
+    transform: translateY(-2px) scale(1);
+  }
+  50% {
+    transform: translateY(-4px) scale(1.01);
+  }
+  100% {
+    transform: translateY(-2px) scale(1);
+  }
+}
+
+@keyframes speech-text-blip {
+  0% {
+    transform: translateX(0) scale(1);
+    opacity: 0.92;
+  }
+  50% {
+    transform: translateX(2px) scale(1.015);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(0) scale(1);
+    opacity: 1;
   }
 }
 

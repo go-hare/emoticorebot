@@ -23,6 +23,7 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [draft, setDraft] = useState("");
   const [replyText, setReplyText] = useState("");
+  const [speechPulseTick, setSpeechPulseTick] = useState(0);
   const [lastUserText, setLastUserText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [threadId, setThreadId] = useState(DEFAULT_PACKET.thread_id);
@@ -46,6 +47,7 @@ export default function App() {
             break;
           case "reply_chunk":
             setReplyText((current) => current + event.payload.chunk);
+            setSpeechPulseTick((current) => current + 1);
             break;
           case "reply_done":
             setReplyText(event.payload.text);
@@ -127,16 +129,22 @@ export default function App() {
             <span className="phase-tag">{prettify(packet.phase)}</span>
             <span className="mood-tag">{prettify(packet.mood)}</span>
           </div>
-          <PhaserWrapper packet={packet} spriteConfig={avatarSpriteConfig} />
+          <PhaserWrapper
+            packet={packet}
+            speechPulseTick={speechPulseTick}
+            spriteConfig={avatarSpriteConfig}
+          />
           <div className="stage-footer">
             <span>{prettify(packet.animation)}</span>
             <span>{prettify(packet.body_state)}</span>
           </div>
         </section>
 
-        <section className={`bubble-card ${packet.bubble_visible ? "is-live" : ""}`}>
+        <section
+          className={`bubble-card ${packet.bubble_visible ? "is-live" : ""} phase-${packet.phase} mood-${packet.mood} pulse-${speechPulseTick % 2}`}
+        >
           <p className="bubble-label">最近回应</p>
-          <p className="bubble-text">{bubbleText}</p>
+          <p className={`bubble-text pulse-${speechPulseTick % 2}`}>{bubbleText}</p>
           {lastUserText ? <p className="bubble-user">你: {lastUserText}</p> : null}
         </section>
 
