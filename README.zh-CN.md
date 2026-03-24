@@ -4,123 +4,76 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-`emoticorebot` 是一个面向桌面陪伴场景的 Agent 主干项目。
+`emoticorebot` 是一个面向桌面陪伴式 Agent 的主干项目。它不是把聊天、任务、情绪和记忆拆成几套彼此割裂的系统，而是试图把“先回应、再执行、持续陪伴”收进同一个核心里。项目的目标不是做一个臃肿的平台，而是提供一个足够清楚、足够稳定、能继续长出来的 Agent 主干，让它既能像桌面伙伴一样自然互动，也能像后台主脑一样持续推进任务。
 
-当前版本坚持一条很简单的主线：
+在这套设计里，用户不会每次都先撞上一个缓慢的后台执行器。前台层会先接住用户，结合情绪状态、PAD、陪伴风格和桌面表达给出自然回应；后台常驻内核再继续处理真正的任务理解、工具调用、多任务 run、记忆沉淀和 sleep。中间只保留一层很薄的 Runtime 负责桥接，把整套系统收在一条简单但完整的主线上。
+
+它强调的不是“再套很多层执行架构”，而是把最重要的几件事收进一条清楚的主线里：
 
 `Front -> Runtime -> BrainKernel`
 
+一句话说，它想做的是：
+
+**先回应你，持续陪着你，再由后台主脑把事情真正做完。**
+
+---
+
+## 特点
+
+- 前台优先
+  用户输入先到 `Front`，可以先得到一句自然回应，而不是每次都卡在后台推理上。
+- 情绪驱动
+  项目内置 affect runtime，维护 PAD、活力值、压力值等状态，让表达不是死模板。
+- 桌面陪伴表达
+  除了文本回复，系统还会输出 companion / surface 状态，用来驱动桌面体的在场感、动作感和气质变化。
+- 常驻单脑
+  `BrainKernel` 在进程里常驻运行，任务、工具、记忆、sleep 都归它负责。
+- 原生多任务
+  多任务不是外挂调度层，而是内核内部的 run 模型，支持 foreground / background 任务状态。
+- 记忆与睡眠内建
+  前台事件、脑内记录、长期记忆沉淀和 sleep agent 都已经在主干里。
+- 多前端复用
+  CLI、桌面端，以及后续的语音、视频、机器人端，都可以复用同一条输出链路。
+
+---
+
+## 核心结构
+
 - `Front`
-  负责前台表达，也就是“嘴”。先接住用户，再把后台结果润色成自然回复。
+  前台表达层，也可以理解成“嘴”。负责即时回应、陪伴语气和结果润色。
 - `Runtime`
-  负责桥接。接收输入、转发给前台和常驻内核、再把输出分发给桌面端或 CLI。
+  桥接层。负责接收输入、连接前台与内核、统一输出分发。
 - `BrainKernel`
-  负责真正干活。任务、多任务、工具、记忆、sleep 都在内核内部完成。
+  唯一主脑。负责任务理解、工具调用、多任务、记忆和 sleep。
+
+这套分工很明确：
+
+- `Front` 负责怎么说
+- `BrainKernel` 负责怎么做
+- `Runtime` 负责怎么接
 
 ---
 
-## 这个项目现在是什么
+## 适合什么
 
-它不是一个大而全的平台，而是一个已经能跑起来的 Agent 主干：
+`emoticorebot` 更适合下面这类项目：
 
-- 前台可以即时回应
-- 后台内核常驻运行
-- 支持 run 级多任务
-- 支持工具调用
-- 支持记忆和 sleep agent
-- 能接 CLI 和桌面壳
+- 桌面陪伴机器人
+- 需要“先回应，再执行”的 Agent
+- 希望主脑常驻运行，而不是每轮临时函数调用的系统
+- 希望把多任务、记忆、sleep 收进同一个核心里的项目
 
-这套结构更适合“桌面陪伴机器人”这种方向：
+它不强调“大而全”，而强调：
 
-- `Front` 负责说话方式和陪伴感
-- `BrainKernel` 负责任务理解和执行
-- `Runtime` 不做语义决策，只负责接线
+- 主干清楚
+- 交互自然
+- 方便继续演进
 
 ---
 
-## 这套主干的优势
+## 快速开始
 
-- 架构简单
-  没有额外叠很多执行层，主干清楚，后续替换和演进成本更低。
-- 前台响应快
-  `Front` 先回用户，不需要每次都等后台内核完整跑完。
-- 职责清晰
-  前台负责表达，内核负责干活，Runtime 只负责桥接，不互相抢职责。
-- 易于接前端
-  CLI、桌面端、后续语音或视频端，都可以复用同一条输出链路。
-- 多任务能力内聚
-  多任务不是外挂在外面的调度系统，而是内核内部的 run 模型。
-- 记忆和睡眠是内建的
-  不需要再额外拼一套记忆服务，主干本身就能沉淀长期信息。
-
----
-
-## 当前项目的运行方式
-
-一轮消息的大致流程是：
-
-1. 用户输入先进入 `Runtime`
-2. `Front` 先给出即时回复
-3. Runtime 再把这一轮输入异步投给常驻 `BrainKernel`
-4. 内核处理完成后，结果再回到 `Front`
-5. 最终输出统一发给桌面端、CLI 和未来的其他前端
-
-当前文本输出已经收敛成统一通道，不再按不同渠道各写一套回调逻辑。
-
----
-
-## 当前能力
-
-- 单一主脑：只有一个真正的后台脑 `BrainKernel`
-- 前台先说：用户说话后，Front 先回应，不等内核完成
-- 常驻内核：内核在当前进程里长期运行
-- 多任务：一个会话里可以有多个 run，包含 foreground / background
-- 记忆：包含前台事件、脑内记录和长期记忆沉淀
-- 睡眠：每轮结束后可以由 sleep agent 做记忆整理
-
----
-
-## 当前边界
-
-- 同一会话内部仍然是单队列串行
-- 一个很长的 LLM 回合会阻塞该会话后续事件
-- `brainMode / executorMode` 还是历史字段名
-- 桌面壳目前是开发态接入，不是最终产品形态
-
----
-
-## 项目结构
-
-```text
-emoticorebot/
-  desktop-shell/      Tauri + Vite 桌面壳
-  emoticorebot/
-    app/              应用装配
-    brain_kernel/     常驻内核
-    cli/              CLI 和桌面启动入口
-    config/           配置
-    desktop/          桌面桥接
-    front/            前台表达层
-    providers/        模型工厂
-    runtime/          运行时桥接
-    tools/            工具
-  tests/
-  start_desktop.cmd
-```
-
-如果你要快速读代码，建议从这里开始：
-
-- `emoticorebot/app/factory.py`
-- `emoticorebot/runtime/scheduler.py`
-- `emoticorebot/front/service.py`
-- `emoticorebot/brain_kernel/agent.py`
-- `emoticorebot/brain_kernel/resident.py`
-- `emoticorebot/brain_kernel/routing.py`
-- `emoticorebot/brain_kernel/sleep_agent.py`
-
----
-
-## 安装
+### 安装
 
 ```bash
 git clone https://github.com/go-hare/emoticorebot.git
@@ -128,17 +81,18 @@ cd emoticorebot
 pip install -e .
 ```
 
----
+如果要启动桌面壳，还需要：
 
-## 快速开始
+- Node.js / npm
+- Rust / cargo
 
-### 1. 初始化工作区
+### 初始化工作区
 
 ```bash
 python -m emoticorebot onboard
 ```
 
-### 2. 配置模型
+### 配置模型
 
 编辑 `~/.emoticorebot/config.json`。
 
@@ -173,19 +127,19 @@ DeepSeek 示例：
 - `brainMode` 当前对应 `Front`
 - `executorMode` 当前对应 `BrainKernel`
 
-### 3. 启动 CLI
+### 启动 CLI
 
 ```bash
 python -m emoticorebot agent
 ```
 
-### 4. 启动桌面桥
+### 启动桌面桥
 
 ```bash
 python -m emoticorebot desktop
 ```
 
-### 5. 启动桌面开发模式
+### 启动桌面开发模式
 
 ```bash
 python -m emoticorebot desktop-dev
@@ -199,11 +153,46 @@ start_desktop.cmd
 
 ---
 
-## 桌面启动注意事项
+## 项目结构
 
-- `desktop-dev` 需要 `npm` 和 `cargo`
-- 如果双击 `start_desktop.cmd` 出现 `exit code 9009`，通常是当前 `cmd` 环境里找不到 `python` 或 `py`
-- 如果 `tauri dev` 报 `failed to get cargo metadata: program not found`，说明当前环境找不到 `cargo`
+```text
+emoticorebot/
+  desktop-shell/      Tauri + Vite 桌面壳
+  emoticorebot/
+    app/              应用装配
+    brain_kernel/     常驻内核
+    cli/              CLI 和桌面启动入口
+    companion/        陪伴表达和 surface orchestration
+    config/           配置
+    desktop/          桌面桥接
+    front/            前台表达层
+    runtime/          运行时桥接
+    affect/           情绪 / PAD / 活力 / 压力
+    tools/            工具
+  tests/
+  start_desktop.cmd
+```
+
+如果你要从代码入口开始看，建议从这里开始：
+
+- `emoticorebot/app/factory.py`
+- `emoticorebot/runtime/scheduler.py`
+- `emoticorebot/front/service.py`
+- `emoticorebot/brain_kernel/agent.py`
+- `emoticorebot/brain_kernel/resident.py`
+- `emoticorebot/brain_kernel/routing.py`
+- `emoticorebot/brain_kernel/sleep_agent.py`
+
+---
+
+## 当前边界
+
+- 同一会话内部仍然是单队列串行
+- 一个很长的 LLM 回合会阻塞该会话后续事件
+- `brainMode / executorMode` 仍是历史字段名
+- 桌面壳现在更偏开发态集成
+
+这些是当前版本的边界，不是隐藏行为。
 
 ---
 

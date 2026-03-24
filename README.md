@@ -4,125 +4,76 @@
   <img src="emoticorebot_logo.png" alt="emoticorebot logo" width="180"/>
 </p>
 
-`emoticorebot` is a lightweight agent core for desktop companion scenarios.
+`emoticorebot` is a backbone project for desktop companion agents. It is not trying to split chat, task execution, emotion, and memory into disconnected subsystems. Instead, it tries to keep "respond first, execute next, stay present throughout" inside one coherent core. The goal is not to become a bloated platform, but to offer a clear and durable agent backbone that can feel natural as a desktop companion while still acting like a resident backend brain.
 
-The current project keeps one simple backbone:
+In this design, the user does not always hit a slow backend executor first. The front layer responds early, shaped by affect state, PAD, companion style, and desktop expression; the resident backend kernel then continues with actual task understanding, tool use, multitask runs, memory consolidation, and sleep. A very thin Runtime sits in the middle as the bridge, keeping the whole system on one simple but complete path.
+
+Instead of stacking more orchestration layers, it keeps the core path simple and explicit:
 
 `Front -> Runtime -> BrainKernel`
 
+In one sentence:
+
+**respond first, stay present, then let the backend brain actually finish the work.**
+
+---
+
+## Highlights
+
+- Front-first interaction
+  User input reaches `Front` first, so the system can answer naturally before the backend finishes a full turn.
+- Affect-driven expression
+  The project includes an affect runtime with PAD, vitality, and pressure state, so expression is not just fixed phrasing.
+- Companion-style surface output
+  Beyond text, the system emits companion and surface-state signals for desktop presence, motion, and expression.
+- One resident brain
+  `BrainKernel` stays alive in-process and owns tasks, tools, memory, and sleep in one place.
+- Native multitask support
+  Multitask behavior lives inside the kernel through a run model with foreground and background task state.
+- Built-in memory and sleep
+  Front events, brain traces, long-term consolidation, and a sleep agent are already part of the backbone.
+- Reusable client path
+  CLI, desktop, and future voice/video/robot clients can all reuse the same output path.
+
+---
+
+## Core Structure
+
 - `Front`
-  the user-facing layer, or the "mouth"; it responds first and rewrites backend output into natural text
+  The user-facing layer, or the "mouth". It handles immediate replies, tone, and rewriting backend output.
 - `Runtime`
-  the bridge; it receives input, forwards turns to the front layer and the resident kernel, then fan-outs output
+  The bridge. It receives input, connects the front layer with the resident kernel, and fans output back out.
 - `BrainKernel`
-  the only real brain; tasks, multitask runs, tools, memory, and sleep all live inside the kernel
+  The only real brain. It handles task understanding, tool use, multitask runs, memory, and sleep.
+
+The split is intentional:
+
+- `Front` decides how to say it
+- `BrainKernel` decides how to do it
+- `Runtime` decides how to wire it
 
 ---
 
-## What This Project Is
+## What It Fits
 
-This is not trying to be a giant platform. It is a working agent backbone with:
+`emoticorebot` is a better fit for projects like:
 
-- immediate front replies
-- a resident backend kernel
-- run-level multitask support
-- tool calling
-- memory
-- a sleep agent
-- CLI and desktop shell integration
+- desktop companion agents
+- systems that should answer before backend execution fully completes
+- resident-kernel designs instead of pure function-call flows
+- projects that want multitask, memory, and sleep inside one core
 
-It is especially aimed at desktop companion use cases:
+It is not trying to be a giant platform. The bias is toward:
 
-- `Front` owns tone, presence, and expression
-- `BrainKernel` owns task understanding and execution
-- `Runtime` does not make semantic decisions; it only bridges
+- a clear backbone
+- natural interaction
+- easier long-term evolution
 
 ---
 
-## Why This Backbone
+## Quick Start
 
-- Simple architecture
-  There is no extra executor stack piled on top of the core path, which keeps evolution and replacement cheaper.
-- Fast front-facing response
-  `Front` can answer immediately instead of waiting for the backend kernel to finish every turn.
-- Clear responsibility split
-  Front handles expression, the kernel handles work, and Runtime only bridges.
-- Easy client integration
-  CLI, desktop, and future voice/video clients can all reuse the same output path.
-- Multitask support stays inside the kernel
-  Multitask behavior is owned by the run model itself, not by an external orchestration layer.
-- Memory and sleep are built in
-  Long-term consolidation is part of the backbone instead of a separate stitched-on service.
-
----
-
-## How It Runs
-
-A turn roughly looks like this:
-
-1. user input enters `Runtime`
-2. `Front` replies immediately
-3. Runtime asynchronously publishes the turn into the resident `BrainKernel`
-4. the kernel processes the turn
-5. the result goes back through `Front`
-6. final output is sent to desktop, CLI, and future clients through one unified output line
-
-Text output is already unified. Different clients consume the same front output stream.
-
----
-
-## Current Capabilities
-
-- one real backend brain
-- front-first interaction
-- resident in-process kernel
-- foreground/background runs inside one conversation
-- memory and sleep consolidation
-- desktop bridge and CLI entrypoints
-
----
-
-## Current Boundaries
-
-- a single conversation is still processed serially
-- a long LLM turn blocks later events in that same conversation
-- `brainMode / executorMode` are still legacy config names
-- the desktop shell is still a dev integration, not a polished product shell
-
----
-
-## Project Layout
-
-```text
-emoticorebot/
-  desktop-shell/      Tauri + Vite desktop shell
-  emoticorebot/
-    app/              app assembly
-    brain_kernel/     resident kernel
-    cli/              CLI and desktop launchers
-    config/           config schema and loader
-    desktop/          desktop bridge
-    front/            front expression layer
-    providers/        model factory
-    runtime/          runtime bridge
-    tools/            tool implementations
-  tests/
-  start_desktop.cmd
-```
-
-Useful code entrypoints:
-
-- `emoticorebot/app/factory.py`
-- `emoticorebot/runtime/scheduler.py`
-- `emoticorebot/front/service.py`
-- `emoticorebot/brain_kernel/agent.py`
-- `emoticorebot/brain_kernel/resident.py`
-- `emoticorebot/brain_kernel/routing.py`
-- `emoticorebot/brain_kernel/sleep_agent.py`
-
----
-
-## Install
+### Install
 
 ```bash
 git clone https://github.com/go-hare/emoticorebot.git
@@ -130,17 +81,18 @@ cd emoticorebot
 pip install -e .
 ```
 
----
+If you want the desktop shell, you also need:
 
-## Quick Start
+- Node.js / npm
+- Rust / cargo
 
-### 1. Initialize the workspace
+### Initialize the workspace
 
 ```bash
 python -m emoticorebot onboard
 ```
 
-### 2. Configure models
+### Configure models
 
 Edit `~/.emoticorebot/config.json`.
 
@@ -175,19 +127,19 @@ Notes:
 - `brainMode` currently maps to `Front`
 - `executorMode` currently maps to `BrainKernel`
 
-### 3. Start the CLI
+### Start the CLI
 
 ```bash
 python -m emoticorebot agent
 ```
 
-### 4. Start the desktop bridge
+### Start the desktop bridge
 
 ```bash
 python -m emoticorebot desktop
 ```
 
-### 5. Start desktop dev mode
+### Start desktop dev mode
 
 ```bash
 python -m emoticorebot desktop-dev
@@ -201,11 +153,46 @@ start_desktop.cmd
 
 ---
 
-## Desktop Startup Notes
+## Project Layout
 
-- `desktop-dev` requires `npm` and `cargo`
-- if `start_desktop.cmd` exits with `9009`, the new `cmd.exe` environment usually cannot find `python` or `py`
-- if `tauri dev` reports `failed to get cargo metadata: program not found`, the current environment cannot find `cargo`
+```text
+emoticorebot/
+  desktop-shell/      Tauri + Vite desktop shell
+  emoticorebot/
+    app/              app assembly
+    brain_kernel/     resident kernel
+    cli/              CLI and desktop launchers
+    companion/        companion expression and surface orchestration
+    config/           configuration
+    desktop/          desktop bridge
+    front/            front expression layer
+    runtime/          runtime bridge
+    affect/           affect, PAD, vitality, pressure
+    tools/            tool implementations
+  tests/
+  start_desktop.cmd
+```
+
+Good entrypoints for reading the code:
+
+- `emoticorebot/app/factory.py`
+- `emoticorebot/runtime/scheduler.py`
+- `emoticorebot/front/service.py`
+- `emoticorebot/brain_kernel/agent.py`
+- `emoticorebot/brain_kernel/resident.py`
+- `emoticorebot/brain_kernel/routing.py`
+- `emoticorebot/brain_kernel/sleep_agent.py`
+
+---
+
+## Current Boundaries
+
+- a single conversation is still processed serially
+- one long LLM turn blocks later events in that same conversation
+- `brainMode / executorMode` are still legacy config names
+- the desktop shell is still more of a dev integration than a polished product shell
+
+These are current design boundaries, not hidden behavior.
 
 ---
 
