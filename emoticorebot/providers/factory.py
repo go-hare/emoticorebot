@@ -1,23 +1,4 @@
-"""LLM factory - 根据 schema 配置构建 LangChain chat model。
-
-支持的 provider：
-- openai          : OpenAI 官方 API（GPT-4 系列）
-- anthropic       : Anthropic API（langchain-anthropic）
-- gemini          : Google Gemini（langchain-google-genai）
-- groq            : Groq API（langchain-groq）
-- ollama          : 本地 Ollama 服务（langchain-ollama）
-- openrouter      : OpenRouter 统一网关（模型名格式 "provider/model"）
-- deepseek        : DeepSeek API（OpenAI 兼容）
-- zhipu           : 智谱 GLM API（OpenAI 兼容）
-- dashscope       : 阿里云通义千问（OpenAI 兼容）
-- moonshot        : Moonshot/Kimi API（OpenAI 兼容）
-- minimax         : MiniMax API（OpenAI 兼容）
-- siliconflow     : 硅基流动 API（OpenAI 兼容）
-- volcengine      : 火山引擎 API（OpenAI 兼容）
-- aihubmix        : AiHubMix 网关（OpenAI 兼容，支持 extra_headers）
-- vllm            : 本地 vLLM 服务（OpenAI 兼容）
-- custom          : 任意 OpenAI 兼容自定义端点
-"""
+"""Model factory for front and kernel LangChain runtimes."""
 
 from __future__ import annotations
 
@@ -45,40 +26,42 @@ _PROVIDER_BASE_URLS: dict[str, str] = {
     "aihubmix": "https://aihubmix.com/v1",
 }
 
+_PREFIX_PROVIDERS = {"anthropic", "gemini", "groq"}
+
 
 class LLMFactory:
-    """根据 main_brain / execution 模式配置和 provider 凭证构建 LangChain chat model。
+    """根据 brain / executor 模式配置和 provider 凭证构建 LangChain chat model。
 
     Usage::
 
         factory = LLMFactory(
             providers_config=config.providers,
-            execution_mode=config.agents.defaults.execution_mode,
-            main_brain_mode=config.agents.defaults.main_brain_mode,
+            executor_mode=config.agents.defaults.executor_mode,
+            brain_mode=config.agents.defaults.brain_mode,
         )
-        execution_llm = factory.get_execution()
-        main_brain_llm = factory.get_main_brain()
+        executor_llm = factory.get_executor()
+        brain_llm = factory.get_brain()
     """
 
     def __init__(
         self,
         providers_config: "ProvidersConfig",
-        execution_mode: "ModelModeConfig",
-        main_brain_mode: "ModelModeConfig",
+        executor_mode: "ModelModeConfig",
+        brain_mode: "ModelModeConfig",
     ) -> None:
         self._providers = providers_config
-        self._execution = execution_mode
-        self._main_brain = main_brain_mode
+        self._executor = executor_mode
+        self._brain = brain_mode
 
     # ── 公共接口 ──────────────────────────────────────────────────────────────
 
-    def get_execution(self) -> Any:
-        """构建 execution 执行模型实例。"""
-        return self._build(self._execution)
+    def get_executor(self) -> Any:
+        """构建 executor 执行模型实例。"""
+        return self._build(self._executor)
 
-    def get_main_brain(self) -> Any:
-        """构建 main_brain 模型实例。"""
-        return self._build(self._main_brain)
+    def get_brain(self) -> Any:
+        """构建 brain 模型实例。"""
+        return self._build(self._brain)
 
     # ── 内部构建逻辑 ──────────────────────────────────────────────────────────
 
@@ -101,7 +84,7 @@ class LLMFactory:
         if m.startswith("glm-"):
             return "openai"
         if m.startswith(("qwen-", "qwen2", "qwen3")):
-            return "openai"    
+            return "openai"
         if m.startswith(("llama", "mistral", "mixtral", "gemma")):
             return "openai"
         return "openai"
@@ -175,3 +158,20 @@ class LLMFactory:
             kwargs["default_headers"] = extra_headers
 
         return ChatOpenAI(**kwargs)
+
+def resolve_provider_name(mode: "ModelModeConfig") -> str:
+    provider = str(mode.provider or "auto").strip().lower() or "auto"
+    if provider != "auto":
+        return provider
+    model = str(mode.model or "").strip().lower()
+    if "/" in model:
+        return "openrouter"
+    if model.startswith(("claude-", "claude.")):
+        return "anthropic"
+    if model.startswith(("gpt-", "o1-", "o3-", "o4-", "chatgpt-")):
+        return "openai"
+    if model.startswith("gemini-"):
+        return "gemini"
+    if model.startswith(("llama", "mistral", "mixtral", "gemma", "qwen-", "qwen2", "qwen3", "deepseek-")):
+        return "openai"
+    return "openai"

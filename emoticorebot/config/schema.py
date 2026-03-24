@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings
 class Base(BaseModel):
     """Base model that accepts both camelCase and snake_case keys."""
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class WhatsAppConfig(Base):
@@ -202,7 +202,7 @@ class ChannelsConfig(Base):
 
 
 class ModelModeConfig(Base):
-    """main_brain / execution 模型模式配置（嵌套在 AgentDefaults 下）。"""
+    """brain / executor 模型模式配置（嵌套在 AgentDefaults 下）。"""
 
     model: str = "anthropic/claude-opus-4-5"
     provider: str = "auto"
@@ -215,7 +215,7 @@ class ModelModeConfig(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
     workspace: str = "~/.emoticorebot/workspace"
-    execution_mode: ModelModeConfig = Field(
+    executor_mode: ModelModeConfig = Field(
         default_factory=lambda: ModelModeConfig(
             model="anthropic/claude-opus-4-5",
             provider="auto",
@@ -225,7 +225,7 @@ class AgentDefaults(Base):
             memory_window=100,
         )
     )
-    main_brain_mode: ModelModeConfig = Field(
+    brain_mode: ModelModeConfig = Field(
         default_factory=lambda: ModelModeConfig(
             model="anthropic/claude-opus-4-5",
             provider="auto",

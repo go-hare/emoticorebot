@@ -21,7 +21,7 @@ from typing import Any
 from emoticorebot.tools.base import Tool
 
 
-class _WorkspaceTool(Tool):
+class WorkspaceTool(Tool):
     """带 workspace / allowed_dir 安全边界的文件工具基类。"""
 
     def __init__(self, workspace: str | Path, allowed_dir: str | Path | None = None):
@@ -45,7 +45,7 @@ class _WorkspaceTool(Tool):
 # 基础 CRUD 工具
 # ---------------------------------------------------------------------------
 
-class ReadFileTool(_WorkspaceTool):
+class ReadFileTool(WorkspaceTool):
     """读取文件内容，支持行范围。"""
 
     @property
@@ -95,7 +95,7 @@ class ReadFileTool(_WorkspaceTool):
             return f"Error reading file: {e}"
 
 
-class WriteFileTool(_WorkspaceTool):
+class WriteFileTool(WorkspaceTool):
     """写入文件（覆盖），自动创建父目录。"""
 
     @property
@@ -130,7 +130,7 @@ class WriteFileTool(_WorkspaceTool):
             return f"Error writing file: {e}"
 
 
-class EditFileTool(_WorkspaceTool):
+class EditFileTool(WorkspaceTool):
     """通过 old_string / new_string 精准替换文件内容。"""
 
     @property
@@ -179,7 +179,7 @@ class EditFileTool(_WorkspaceTool):
             return f"Error editing file: {e}"
 
 
-class ListDirTool(_WorkspaceTool):
+class ListDirTool(WorkspaceTool):
     """列出目录内容。"""
 
     @property
@@ -225,7 +225,7 @@ class ListDirTool(_WorkspaceTool):
 # 精细化行操作工具
 # ---------------------------------------------------------------------------
 
-class SearchFilesTool(_WorkspaceTool):
+class SearchFilesTool(WorkspaceTool):
     """在工作区内搜索关键词，返回匹配行。"""
 
     @property
@@ -267,7 +267,7 @@ class SearchFilesTool(_WorkspaceTool):
             return f"Error searching: {e}"
 
 
-class InsertLinesTool(_WorkspaceTool):
+class InsertLinesTool(WorkspaceTool):
     """在指定行后插入内容。"""
 
     @property
@@ -312,7 +312,7 @@ class InsertLinesTool(_WorkspaceTool):
             return f"Error inserting lines: {e}"
 
 
-class DeleteLinesTool(_WorkspaceTool):
+class DeleteLinesTool(WorkspaceTool):
     """删除指定行范围（含边界）。"""
 
     @property
@@ -355,7 +355,7 @@ class DeleteLinesTool(_WorkspaceTool):
             return f"Error deleting lines: {e}"
 
 
-class ReplaceLinesTool(_WorkspaceTool):
+class ReplaceLinesTool(WorkspaceTool):
     """替换指定行范围（含边界）。"""
 
     @property
@@ -406,7 +406,7 @@ class ReplaceLinesTool(_WorkspaceTool):
 
 
 __all__ = [
-    "_WorkspaceTool",
+    "WorkspaceTool",
     "ReadFileTool",
     "WriteFileTool",
     "EditFileTool",

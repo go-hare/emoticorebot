@@ -19,5 +19,4 @@ triggers:
 
 schedules:
   decay_minutes: 30
-  reflection_hours: 1
   proactive_check_minutes: 10
