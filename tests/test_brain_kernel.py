@@ -21,6 +21,7 @@ from emoticorebot.brain_kernel import (
     SleepAgent,
     SleepEvent,
     SleepOutcome,
+    TaskType,
     ToolCallNode,
 )
 
@@ -451,6 +452,21 @@ class ImmediateReplyModel:
         return AIMessage(content="前台回复先返回。")
 
 
+class FakeTaskRouterModel:
+    def __init__(self, task_type: TaskType) -> None:
+        self.task_type = task_type
+
+    def with_structured_output(self, schema):
+        task_type = self.task_type
+
+        class _Structured:
+            async def ainvoke(self, messages):
+                _ = messages
+                return schema(task_type=task_type)
+
+        return _Structured()
+
+
 def test_brain_kernel_can_pause_for_client_tool_and_resume(tmp_path: Path) -> None:
     memory_store = JsonlMemoryStore(tmp_path)
     model = FakeClientToolModel()
@@ -576,6 +592,31 @@ def test_brain_kernel_can_queue_background_task_without_stealing_foreground(tmp_
     assert second.run.id in second.conversation.background_run_ids
     assert second.route is not None
     assert second.route.kind == "start_background"
+
+
+def test_brain_kernel_does_not_create_run_for_none_task_type(tmp_path: Path) -> None:
+    memory_store = JsonlMemoryStore(tmp_path)
+    kernel = BrainKernel(
+        agent_id="alice",
+        model=ImmediateReplyModel(),
+        task_router_model=FakeTaskRouterModel(TaskType.none),
+        memory_store=memory_store,
+    )
+
+    result = asyncio.run(
+        kernel.handle_user_input(
+            conversation_id="conv",
+            text="以后叫我阿青",
+        )
+    )
+
+    assert result.task_type == TaskType.none
+    assert result.run is None
+    assert result.context is not None
+    assert result.context.input_text == "以后叫我阿青"
+    assert result.conversation is not None
+    assert result.conversation.active_run_ids == []
+    assert kernel.list_runs("conv") == []
 
 
 def test_brain_kernel_can_switch_foreground_run(tmp_path: Path) -> None:

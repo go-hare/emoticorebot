@@ -13,6 +13,7 @@ from emoticorebot.brain_kernel import (
     BrainTurnContext,
     MemoryView,
     Run,
+    TaskType,
 )
 from emoticorebot.companion import CompanionIntent, SurfaceExpression
 from emoticorebot.runtime.scheduler import FrontOutputPacket, RuntimeScheduler
@@ -65,8 +66,9 @@ class FakeFront:
 
 
 class FakeKernel:
-    def __init__(self, output_kind: BrainOutputType = BrainOutputType.response) -> None:
+    def __init__(self, output_kind: BrainOutputType = BrainOutputType.response, task_type: TaskType = TaskType.simple) -> None:
         self.output_kind = output_kind
+        self.task_type = task_type
         self.is_running = False
         self.start_calls = 0
         self.stop_calls = 0
@@ -143,8 +145,9 @@ class FakeKernel:
             return BrainOutput(event_id=event_id, type=BrainOutputType.error, error="kernel exploded")
 
         response = BrainResponse(
+            task_type=self.task_type,
             reply=f"kernel raw for: {text}",
-            run=Run(agent_id="alice", conversation_id=conversation_id, goal=text),
+            run=None if self.task_type == TaskType.none else Run(agent_id="alice", conversation_id=conversation_id, goal=text),
             context=BrainTurnContext(
                 agent_id="alice",
                 conversation_id=conversation_id,
@@ -244,20 +247,33 @@ def test_runtime_scheduler_forwards_user_turn_into_kernel_and_front() -> None:
                 "front_event": {
                     "event_type": "dialogue",
                     "user_text": "帮我看看日志",
-                    "front_reply": "beautified reply",
-                    "emotion": "attentive_warm",
-                    "tags": ["focused", "warm_clear", "beside", "attentive_warm"],
+                    "front_reply": "front live hint",
                     "metadata": {
-                        "source": "runtime_scheduler",
-                        "kernel_output": "kernel raw for: 帮我看看日志",
-                        "mode": "focused",
-                        "warmth": kernel.front_events[0]["front_event"]["metadata"]["warmth"],
-                        "initiative": kernel.front_events[0]["front_event"]["metadata"]["initiative"],
-                        "intensity": kernel.front_events[0]["front_event"]["metadata"]["intensity"],
-                        "text_style": "warm_clear",
-                        "presence": "beside",
-                        "expression": "attentive_warm",
-                        "motion_hint": "small_nod",
+                        "source": "runtime_front_hint",
+                    },
+                },
+            },
+            {
+                "conversation_id": "thread-1",
+                "user_id": "user-1",
+                "turn_id": kernel.front_events[0]["turn_id"],
+                "front_event": {
+                    "event_type": "dialogue",
+                    "user_text": "帮我看看日志",
+                    "front_reply": "beautified reply",
+                        "emotion": "attentive_warm",
+                        "tags": ["focused", "warm_clear", "beside", "attentive_warm"],
+                        "metadata": {
+                            "source": "runtime_scheduler",
+                            "kernel_output": "kernel raw for: 帮我看看日志",
+                            "mode": "focused",
+                            "warmth": kernel.front_events[1]["front_event"]["metadata"]["warmth"],
+                            "initiative": kernel.front_events[1]["front_event"]["metadata"]["initiative"],
+                            "intensity": kernel.front_events[1]["front_event"]["metadata"]["intensity"],
+                            "text_style": "warm_clear",
+                            "presence": "beside",
+                            "expression": "attentive_warm",
+                            "motion_hint": "small_nod",
                     },
                 },
             }
@@ -334,7 +350,10 @@ def test_runtime_scheduler_handle_user_text_emits_two_reply_done_events() -> Non
                 "surface_expression": front.calls[0]["surface_expression"],
             }
         ]
-        assert kernel.front_events[0]["front_event"]["front_reply"] == "beautified reply"
+        assert [event["front_event"]["front_reply"] for event in kernel.front_events] == [
+            "front live hint",
+            "beautified reply",
+        ]
 
         runtime.unsubscribe_front_outputs(output_queue)
         await runtime.stop()
@@ -442,6 +461,55 @@ def test_runtime_scheduler_surface_state_falls_back_to_idle_on_front_error() -> 
         assert [state["phase"] for state in surface_states] == ["listening", "replying", "idle"]
         assert surface_states[-1]["motion_hint"] == "minimal"
         assert runtime.get_thread_surface_state("thread-fallback") == surface_states[-1]
+
+        runtime.unsubscribe_front_outputs(output_queue)
+        await runtime.stop()
+
+    asyncio.run(_exercise())
+
+
+def test_runtime_scheduler_discards_none_task_outputs_after_front_hint() -> None:
+    async def _exercise() -> None:
+        front = FakeFront()
+        kernel = FakeKernel(task_type=TaskType.none)
+        runtime = RuntimeScheduler(workspace=Path("/tmp"), front=front, kernel=kernel)
+        surface_states: list[dict[str, object]] = []
+        output_queue = runtime.subscribe_front_outputs()
+        await runtime.start()
+
+        reply = await runtime.handle_user_text(
+            thread_id="thread-memory-only",
+            session_id="thread-memory-only",
+            user_id="user-1",
+            user_text="以后叫我阿青",
+            surface_state_handler=surface_states.append,
+        )
+        await runtime.wait_for_thread_idle("thread-memory-only", timeout=1.0)
+        packets = _drain_front_packets(output_queue)
+
+        assert reply == "front live hint"
+        assert [(packet.type, packet.text or packet.error) for packet in packets] == [
+            ("reply_chunk", "front live hint"),
+            ("reply_done", "front live hint"),
+        ]
+        assert front.calls == []
+        assert kernel.front_events == [
+            {
+                "conversation_id": "thread-memory-only",
+                "user_id": "user-1",
+                "turn_id": kernel.front_events[0]["turn_id"],
+                "front_event": {
+                    "event_type": "dialogue",
+                    "user_text": "以后叫我阿青",
+                    "front_reply": "front live hint",
+                    "metadata": {
+                        "source": "runtime_front_hint",
+                    },
+                },
+            }
+        ]
+        assert [state["phase"] for state in surface_states] == ["listening", "idle"]
+        assert runtime.get_thread_surface_state("thread-memory-only") == surface_states[-1]
 
         runtime.unsubscribe_front_outputs(output_queue)
         await runtime.stop()

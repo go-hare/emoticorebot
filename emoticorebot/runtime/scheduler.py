@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from emoticorebot.affect import AffectRuntime, AffectState
-from emoticorebot.brain_kernel import BrainKernel, BrainOutput, BrainOutputType, MemoryView, make_id
+from emoticorebot.brain_kernel import BrainKernel, BrainOutput, BrainOutputType, MemoryView, TaskType, make_id
 from emoticorebot.companion import CompanionIntent, SurfaceExpression, build_companion_surface
 from emoticorebot.front.service import FrontService
 
@@ -126,6 +126,13 @@ class RuntimeScheduler:
                 user_text=user_text,
                 memory=memory,
             )
+            await self._publish_initial_front_event(
+                thread_id=thread_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                user_text=user_text,
+                front_reply=front_reply,
+            )
             event_id = make_id("brain_event")
             self._pending_kernel_deliveries[event_id] = {
                 "thread_id": thread_id,
@@ -223,6 +230,8 @@ class RuntimeScheduler:
 
     def _render_kernel_output(self, output: BrainOutput) -> str:
         if output.type == BrainOutputType.response and output.response is not None:
+            if output.response.task_type == TaskType.none:
+                return ""
             reply = str(output.response.reply or "").strip()
             if reply:
                 return reply
@@ -235,7 +244,9 @@ class RuntimeScheduler:
                     return f"内核正在等待外部工具结果后继续：{tool_names}"
                 return "内核正在等待外部工具结果后继续。"
 
-            return str(output.response.run.result_summary or "").strip()
+            if output.response.run is not None:
+                return str(output.response.run.result_summary or "").strip()
+            return ""
 
         if output.type == BrainOutputType.error:
             error = str(output.error or "").strip() or "unknown error"
@@ -319,6 +330,28 @@ class RuntimeScheduler:
             "linger_hint": "remain_available",
             "speaking_phase": "listening",
             "settling_phase": "listening",
+            "idle_phase": "idle_ready",
+            "recommended_hold_ms": 0,
+        }
+        state.update(self._build_affect_payload(affect_state))
+        return state
+
+    def _build_idle_state(
+        self,
+        thread_id: str,
+        *,
+        affect_state: AffectState | None,
+    ) -> dict[str, Any]:
+        state = {
+            "thread_id": thread_id,
+            "phase": "idle",
+            "presence": "beside",
+            "motion_hint": "minimal",
+            "body_state": "resting_beside",
+            "breathing_hint": "soft_slow",
+            "linger_hint": "quiet_stay",
+            "speaking_phase": "replying",
+            "settling_phase": "resting",
             "idle_phase": "idle_ready",
             "recommended_hold_ms": 0,
         }
@@ -478,8 +511,49 @@ class RuntimeScheduler:
             )
         )
 
+    async def _publish_initial_front_event(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        turn_id: str,
+        user_text: str,
+        front_reply: str,
+    ) -> None:
+        if not front_reply.strip():
+            return
+        try:
+            await self.kernel.publish_front_event(
+                conversation_id=thread_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                front_event={
+                    "event_type": "dialogue",
+                    "user_text": user_text,
+                    "front_reply": front_reply,
+                    "metadata": {
+                        "source": "runtime_front_hint",
+                    },
+                },
+            )
+        except Exception:
+            return
+
     async def _deliver_kernel_output(self, *, output: BrainOutput, delivery: dict[str, Any]) -> None:
         try:
+            if (
+                output.type == BrainOutputType.response
+                and output.response is not None
+                and output.response.task_type == TaskType.none
+            ):
+                thread_id = str(delivery["thread_id"])
+                await self._push_surface_state(
+                    thread_id,
+                    self._build_idle_state(thread_id, affect_state=delivery["affect_state"]),
+                    surface_state_handler=delivery["surface_state_handler"],
+                )
+                return
+
             kernel_output = self._render_kernel_output(output)
             if not kernel_output:
                 return

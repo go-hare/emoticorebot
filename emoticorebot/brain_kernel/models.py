@@ -79,6 +79,12 @@ class TurnRouteKind(StrEnum):
     cancel_run = "cancel_run"
 
 
+class TaskType(StrEnum):
+    none = "none"
+    simple = "simple"
+    complex = "complex"
+
+
 class TurnRoute(BaseModel):
     kind: TurnRouteKind
     target_run_id: str = ""
@@ -93,9 +99,10 @@ class ConversationState(BaseModel):
 
 
 class BrainResponse(BaseModel):
+    task_type: TaskType = TaskType.simple
     reply: str = ""
-    run: Run
-    context: BrainTurnContext
+    run: Run | None = None
+    context: BrainTurnContext | None = None
     tool_trace: list[ToolExecutionRecord] = Field(default_factory=list)
     pending_tool_calls: list[PendingToolCall] = Field(default_factory=list)
     sleep_outcome: SleepOutcome | None = None

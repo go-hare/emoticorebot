@@ -12,7 +12,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from .memory import CognitiveEvent, MemoryPatch, MemoryView, make_id
-from .models import BrainResponse, BrainTurnContext, PendingToolCall, ToolResult, TurnRoute, TurnRouteKind
+from .models import BrainResponse, BrainTurnContext, PendingToolCall, TaskType, ToolResult, TurnRoute, TurnRouteKind
 from .resident import PendingSleepJob
 from .run_store import Run
 from .sleep_agent import SleepOutcome
@@ -49,6 +49,7 @@ class PendingRunState:
     latest_input_text: str
     latest_front_reply: str
     max_steps: int
+    task_type: TaskType = TaskType.simple
     steps_taken: int = 0
     last_function_response: str | None = None
     route: TurnRoute | None = None
@@ -156,6 +157,7 @@ class BrainKernelTurnMixin:
         latest_front_reply: str,
         max_steps: int | None,
         background: bool | None,
+        task_type: TaskType,
         existing_run: Run | None,
         route: TurnRoute | None,
         metadata: dict[str, Any] | None,
@@ -230,6 +232,7 @@ class BrainKernelTurnMixin:
             latest_input_text=input_text,
             latest_front_reply=latest_front_reply,
             max_steps=max_steps or self.max_steps,
+            task_type=task_type,
             route=route,
         )
         return await self._advance_run(state)
@@ -297,6 +300,7 @@ class BrainKernelTurnMixin:
                 state.run = self.mark_run_running(state.run.id, current_tool=pending_tool_calls[0].tool_name)
                 self._pending_runs[state.run.id] = state
                 return self._make_response(
+                    task_type=state.task_type,
                     run=state.run,
                     context=state.context,
                     tool_trace=list(state.tool_trace),
@@ -340,6 +344,7 @@ class BrainKernelTurnMixin:
             )
         self._pending_runs.pop(state.run.id, None)
         return self._make_response(
+            task_type=state.task_type,
             reply=reply,
             run=state.run,
             context=state.context,
@@ -381,6 +386,7 @@ class BrainKernelTurnMixin:
     def _make_response(
         self,
         *,
+        task_type: TaskType = TaskType.simple,
         run: Run,
         context: BrainTurnContext,
         reply: str = "",
@@ -390,6 +396,7 @@ class BrainKernelTurnMixin:
         route: TurnRoute | None = None,
     ) -> BrainResponse:
         return BrainResponse(
+            task_type=task_type,
             reply=reply,
             run=run,
             context=context,

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Sequence
 from typing import Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel
 
 from .memory import CoreMemory, JsonlMemoryStore, MemoryView, make_id
 from .models import (
@@ -14,6 +18,7 @@ from .models import (
     BrainResponse,
     BrainTurnContext,
     FrontEvent,
+    TaskType,
     ToolResult,
     TurnRouteKind,
 )
@@ -23,6 +28,10 @@ from .run_store import Run, RunStore
 from .sleep_agent import SleepAgent
 from .tooling import BaseToolRule, ToolRulesSolver
 from .turns import BrainKernelTurnMixin, PendingRunState
+
+
+class TaskRouteDecision(BaseModel):
+    task_type: TaskType = TaskType.simple
 
 
 class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResidentMixin):
@@ -38,11 +47,13 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         run_store: RunStore | None = None,
         memory_store: JsonlMemoryStore | None = None,
         sleep_agent: SleepAgent | None = None,
+        task_router_model: Any | None = None,
         system_prompt: str = "",
         max_steps: int = 8,
     ) -> None:
         self.agent_id = agent_id.strip() or "agent"
         self.model = model
+        self.task_router_model = task_router_model
         self.tools = list(tools or [])
         self.run_store = run_store or RunStore()
         self.memory_store = memory_store
@@ -111,11 +122,33 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         target_run_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> BrainResponse:
+        memory_view = memory or self._build_memory_view(conversation_id=conversation_id, query=text)
+        task_type = await self._classify_task_type(
+            conversation_id=conversation_id,
+            text=text,
+            memory=memory_view,
+        )
+        if task_type == TaskType.none:
+            return BrainResponse(
+                task_type=TaskType.none,
+                context=self.build_turn_context(
+                    conversation_id=conversation_id,
+                    input_kind="user",
+                    input_text=text,
+                    memory=memory_view,
+                    tool_solver=self._make_tool_solver(),
+                    available_tools=[],
+                ),
+                conversation=self.get_conversation_state(conversation_id),
+            )
+
+        resolved_metadata = dict(metadata or {})
+        resolved_metadata.setdefault("task_type", task_type.value)
         route = self.route_turn(
             conversation_id=conversation_id,
             text=text,
             target_run_id=target_run_id,
-            metadata=metadata,
+            metadata=resolved_metadata,
         )
         if route.kind in {TurnRouteKind.switch_run, TurnRouteKind.cancel_run}:
             return self._handle_control_turn(
@@ -131,15 +164,16 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
             user_id=user_id,
             turn_id=turn_id,
             tools=tools,
-            memory=memory,
+            memory=memory_view,
             model=model,
             system_prompt=system_prompt,
             latest_front_reply=latest_front_reply,
             max_steps=max_steps,
             background=background,
+            task_type=task_type,
             existing_run=existing_run,
             route=route,
-            metadata=metadata,
+            metadata=resolved_metadata,
         )
 
     async def handle_observation(
@@ -171,6 +205,7 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
             latest_front_reply=latest_front_reply,
             max_steps=max_steps,
             background=background,
+            task_type=TaskType.simple,
             existing_run=None,
             route=None,
             metadata=metadata,
@@ -365,6 +400,108 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         if self.memory_store is None:
             return MemoryView()
         return self.memory_store.build_memory_view(conversation_id, self.agent_id, query)
+
+    async def _classify_task_type(
+        self,
+        *,
+        conversation_id: str,
+        text: str,
+        memory: MemoryView,
+    ) -> TaskType:
+        llm = self.task_router_model or self.model
+        if llm is None:
+            return TaskType.simple
+
+        context = self.build_turn_context(
+            conversation_id=conversation_id,
+            input_kind="user",
+            input_text=text,
+            memory=memory,
+            tool_solver=self._make_tool_solver(),
+            available_tools=[],
+        )
+        messages = [
+            SystemMessage(
+                content=(
+                    "You classify the user's turn for a companion robot kernel.\n"
+                    'Return a JSON object with exactly one field: {"task_type": "none" | "simple" | "complex"}.\n'
+                    '"none": social chat, acknowledgement, emotional expression, preference or memory information '
+                    "that should not enter task execution.\n"
+                    '"simple": regular tasks that the current kernel can handle directly with its existing tool loop.\n'
+                    '"complex": larger, longer-horizon, more open-ended, or multi-stage tasks that should eventually '
+                    "go to a deeper agent path. For now complex still falls back to the simple kernel path.\n"
+                    "Use the active runs and memory in the prompt when deciding."
+                )
+            ),
+            HumanMessage(content=self._build_input_prompt(context=context)),
+        ]
+
+        try:
+            response = await self._invoke_task_router(messages=messages, model=llm)
+            return self._coerce_task_type(response)
+        except Exception:
+            return TaskType.simple
+
+    async def _invoke_task_router(self, *, messages: list[Any], model: Any) -> Any:
+        if hasattr(model, "with_structured_output"):
+            structured = model.with_structured_output(TaskRouteDecision)
+            if hasattr(structured, "ainvoke"):
+                return await structured.ainvoke(messages)
+            if hasattr(structured, "invoke"):
+                return structured.invoke(messages)
+
+        bound_model = model.bind(response_format={"type": "json_object"}) if hasattr(model, "bind") else model
+        if hasattr(bound_model, "ainvoke"):
+            return await bound_model.ainvoke(messages)
+        if hasattr(bound_model, "invoke"):
+            return bound_model.invoke(messages)
+        raise RuntimeError("Task router model does not support invoke or ainvoke.")
+
+    def _coerce_task_type(self, response: Any) -> TaskType:
+        if isinstance(response, TaskRouteDecision):
+            return response.task_type
+        if isinstance(response, BaseModel):
+            try:
+                return TaskRouteDecision.model_validate(response.model_dump()).task_type
+            except Exception:
+                return TaskType.simple
+        if isinstance(response, dict):
+            try:
+                return TaskRouteDecision.model_validate(response).task_type
+            except Exception:
+                return TaskType.simple
+
+        content = getattr(response, "content", response)
+        if isinstance(content, str):
+            return self._parse_task_type_json(content)
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                else:
+                    parts.append(str(item))
+            return self._parse_task_type_json("\n".join(parts))
+        return self._parse_task_type_json(str(content))
+
+    def _parse_task_type_json(self, text: str) -> TaskType:
+        value = str(text or "").strip()
+        if not value:
+            return TaskType.simple
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            start = value.find("{")
+            end = value.rfind("}")
+            if start < 0 or end <= start:
+                return TaskType.simple
+            payload = json.loads(value[start : end + 1])
+        if not isinstance(payload, dict):
+            return TaskType.simple
+        try:
+            return TaskRouteDecision.model_validate(payload).task_type
+        except Exception:
+            return TaskType.simple
 
     def _build_system_prompt(self, *, system_prompt: str, context: BrainTurnContext) -> str:
         prompt = system_prompt.strip() or self.system_prompt or (

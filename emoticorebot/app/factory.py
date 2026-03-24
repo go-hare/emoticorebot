@@ -55,6 +55,7 @@ def build_app_context(config: Config | None = None) -> AppContext:
     kernel = BrainKernel(
         agent_id="emoticorebot",
         model=front_factory.get_executor(),
+        task_router_model=front_factory.get_brain(),
         tools=build_kernel_tools(settings),
         memory_store=memory_store,
         sleep_agent=sleep_agent,
