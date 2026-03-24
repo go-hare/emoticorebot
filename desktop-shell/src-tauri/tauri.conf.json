@@ -42,14 +42,14 @@
     "windows": [
       {
         "label": "main",
-        "title": "EmotiCore Shell",
-        "width": 460,
-        "height": 720,
-        "resizable": true,
+        "title": "EmotiCore Overlay",
+        "width": 64,
+        "height": 64,
+        "resizable": false,
         "transparent": true,
         "alwaysOnTop": true,
-        "decorations": false,
-        "skipTaskbar": true
+        "skipTaskbar": true,
+        "fullscreen": true
       }
     ],
     "systemTray": {

@@ -9,6 +9,7 @@ export interface ISpriteConfig {
   name: string;
   imageSrc: string;
   frameSize: number;
+  sheetColumns?: number;
   scale?: number;
   states: Record<string, SpriteStateRange>;
   frameRates?: Record<string, number>;
