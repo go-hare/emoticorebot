@@ -46,6 +46,12 @@ def append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
     ensure_directory(path.parent)
+    if path.exists() and path.stat().st_size > 0:
+        with path.open("rb+") as handle:
+            handle.seek(-1, 2)
+            if handle.read(1) != b"\n":
+                handle.seek(0, 2)
+                handle.write(b"\n")
     with path.open("a", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")

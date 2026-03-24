@@ -99,17 +99,18 @@ def test_desktop_state_adapter_can_consume_runtime_surface_updates() -> None:
     async def _exercise() -> None:
         adapter = DesktopStateAdapter()
         runtime = RuntimeScheduler(workspace=Path("/tmp"), front=FakeFront(), kernel=FakeKernel())
+        await runtime.start()
 
         reply = await runtime.handle_user_text(
             thread_id="thread-desktop",
             session_id="thread-desktop",
             user_id="user-1",
             user_text="帮我看看日志",
-            stream_handler=None,
             surface_state_handler=adapter.handle_surface_state,
         )
+        await runtime.wait_for_thread_idle("thread-desktop", timeout=1.0)
 
-        assert reply == "beautified reply"
+        assert reply == "front live hint"
         latest = adapter.get_thread_packet("thread-desktop")
         assert latest is not None
         assert latest["phase"] == "idle"

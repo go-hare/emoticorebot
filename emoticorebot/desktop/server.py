@@ -49,6 +49,8 @@ class DesktopBridgeServer:
         self.adapter = DesktopStateAdapter()
         self._connections: set[MessageSink] = set()
         self._packet_task: asyncio.Task[None] | None = None
+        self._front_output_task: asyncio.Task[None] | None = None
+        self._front_output_queue: asyncio.Queue | None = None
         self._turn_tasks: set[asyncio.Task[None]] = set()
         self._thread_locks: dict[str, asyncio.Lock] = {}
         self._stop_event = asyncio.Event()
@@ -58,10 +60,13 @@ class DesktopBridgeServer:
         return self.workspace / "memony" / "affect_state.json"
 
     async def start(self) -> None:
-        if self._packet_task is not None and not self._packet_task.done():
-            return
         self._stop_event.clear()
-        self._packet_task = asyncio.create_task(self._pump_packets())
+        if self._packet_task is None or self._packet_task.done():
+            self._packet_task = asyncio.create_task(self._pump_packets())
+        if self._front_output_task is None or self._front_output_task.done():
+            if self._front_output_queue is None:
+                self._front_output_queue = self.runtime.subscribe_front_outputs()
+            self._front_output_task = asyncio.create_task(self._pump_front_outputs())
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -74,6 +79,18 @@ class DesktopBridgeServer:
             except asyncio.CancelledError:
                 pass
             self._packet_task = None
+
+        front_output_task = self._front_output_task
+        if front_output_task is not None:
+            front_output_task.cancel()
+            try:
+                await front_output_task
+            except asyncio.CancelledError:
+                pass
+            self._front_output_task = None
+        if self._front_output_queue is not None:
+            self.runtime.unsubscribe_front_outputs(self._front_output_queue)
+            self._front_output_queue = None
 
         turn_tasks = list(self._turn_tasks)
         for task in turn_tasks:
@@ -164,25 +181,12 @@ class DesktopBridgeServer:
         lock = self._thread_locks.setdefault(thread_id, asyncio.Lock())
 
         async with lock:
-            chunks: list[str] = []
-
-            async def stream_handler(chunk: str) -> None:
-                chunks.append(chunk)
-                await self._safe_send(
-                    websocket,
-                    {
-                        "type": "reply_chunk",
-                        "payload": {"thread_id": thread_id, "chunk": chunk},
-                    },
-                )
-
             try:
-                reply = await self.runtime.handle_user_text(
+                await self.runtime.handle_user_text(
                     thread_id=thread_id,
                     session_id=thread_id,
                     user_id=user_id,
                     user_text=user_text,
-                    stream_handler=stream_handler,
                     surface_state_handler=self.adapter.handle_surface_state,
                 )
             except Exception as exc:
@@ -193,25 +197,30 @@ class DesktopBridgeServer:
                         "payload": {"thread_id": thread_id, "error": str(exc)},
                     },
                 )
-                return
-
-            final_text = reply if reply.strip() else "".join(chunks).strip()
-            await self._safe_send(
-                websocket,
-                {
-                    "type": "reply_done",
-                    "payload": {"thread_id": thread_id, "text": final_text},
-                },
-            )
-            snapshot = load_affect_state_snapshot(self.workspace)
-            if snapshot is not None:
-                await self._safe_send(websocket, {"type": "affect_state", "payload": snapshot})
 
     async def _pump_packets(self) -> None:
         try:
             while True:
                 packet = await self.adapter.next_packet()
                 await self._broadcast({"type": "surface_state", "payload": packet})
+        except asyncio.CancelledError:
+            raise
+
+    async def _pump_front_outputs(self) -> None:
+        queue = self._front_output_queue
+        if queue is None:
+            return
+        try:
+            while True:
+                packet = await queue.get()
+                try:
+                    await self._broadcast(packet.as_event())
+                    if packet.type == "reply_done":
+                        snapshot = load_affect_state_snapshot(self.workspace)
+                        if snapshot is not None:
+                            await self._broadcast({"type": "affect_state", "payload": snapshot})
+                finally:
+                    queue.task_done()
         except asyncio.CancelledError:
             raise
 

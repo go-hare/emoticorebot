@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Sequence
@@ -327,7 +328,7 @@ class BrainKernelTurnMixin:
                 user_id=state.user_id,
                 turn_id=state.turn_id,
                 latest_user_text=state.latest_input_text,
-                latest_front_reply=state.latest_front_reply or reply,
+                latest_front_reply=state.latest_front_reply,
             )
         else:
             sleep_outcome = await self.run_sleep_cycle(
@@ -413,6 +414,9 @@ class BrainKernelTurnMixin:
     ) -> None:
         if self._sleep_queue is None or self.sleep_agent is None or not user_id:
             return
+        latest_front_reply = str(latest_front_reply or "").strip()
+        if not latest_front_reply and conversation_id and turn_id:
+            self._front_reply_events.setdefault((conversation_id, turn_id), asyncio.Event())
         await self._sleep_queue.put(
             PendingSleepJob(
                 conversation_id=conversation_id,

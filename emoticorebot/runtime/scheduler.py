@@ -4,14 +4,39 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
 from emoticorebot.affect import AffectRuntime, AffectState
-from emoticorebot.brain_kernel import BrainKernel, BrainOutput, BrainOutputType, make_id
+from emoticorebot.brain_kernel import BrainKernel, BrainOutput, BrainOutputType, MemoryView, make_id
 from emoticorebot.companion import CompanionIntent, SurfaceExpression, build_companion_surface
 from emoticorebot.front.service import FrontService
+
+
+@dataclass(slots=True, frozen=True)
+class FrontOutputPacket:
+    """One frontend-visible output event emitted by the runtime."""
+
+    type: str
+    thread_id: str
+    turn_id: str
+    text: str = ""
+    error: str = ""
+
+    def as_event(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "thread_id": self.thread_id,
+            "turn_id": self.turn_id,
+        }
+        if self.type == "reply_chunk":
+            payload["chunk"] = self.text
+        elif self.type == "reply_done":
+            payload["text"] = self.text
+        elif self.type == "turn_error":
+            payload["error"] = self.error
+        return {"type": self.type, "payload": payload}
 
 
 class RuntimeScheduler:
@@ -33,9 +58,11 @@ class RuntimeScheduler:
         self._listener_task: asyncio.Task[None] | None = None
         self._listener_error: BaseException | None = None
         self._pending_outputs: dict[str, asyncio.Future[BrainOutput]] = {}
-        self._buffered_outputs: dict[str, BrainOutput] = {}
+        self._pending_kernel_deliveries: dict[str, dict[str, Any]] = {}
+        self._delivery_tasks: set[asyncio.Task[None]] = set()
         self._active_turns: dict[str, int] = {}
         self._thread_surface_state: dict[str, dict[str, Any]] = {}
+        self._front_output_subscribers: set[asyncio.Queue[FrontOutputPacket]] = set()
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -44,6 +71,8 @@ class RuntimeScheduler:
 
             self._listener_error = None
             await self.kernel.start()
+            self._pending_kernel_deliveries = {}
+            self._delivery_tasks = set()
             self._listener_task = asyncio.create_task(self._listen_kernel_outputs())
 
     async def stop(self) -> None:
@@ -61,9 +90,11 @@ class RuntimeScheduler:
             else:
                 self._listener_task = None
 
-            self._buffered_outputs.clear()
+            self._pending_kernel_deliveries.clear()
             self._thread_surface_state.clear()
+            self._front_output_subscribers.clear()
             self._fail_pending_outputs(RuntimeError("Runtime scheduler stopped."))
+            await self._cancel_delivery_tasks()
 
     async def handle_user_text(
         self,
@@ -72,13 +103,14 @@ class RuntimeScheduler:
         session_id: str,
         user_id: str,
         user_text: str,
-        stream_handler: Callable[[str], Awaitable[None]] | None,
         surface_state_handler: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> str:
         _ = session_id
-        await self.start()
+        self._ensure_running()
         self._raise_if_listener_failed()
         await self._mark_thread_active(thread_id)
+        delivery_registered = False
+        turn_id = make_id("turn")
 
         try:
             affect_state = self._evolve_affect_state(user_text)
@@ -87,82 +119,44 @@ class RuntimeScheduler:
                 self._build_listening_state(thread_id, affect_state=affect_state),
                 surface_state_handler=surface_state_handler,
             )
-            event_id = await self.kernel.publish_user_input(
-                conversation_id=thread_id,
-                user_id=user_id,
-                turn_id=make_id("turn"),
-                text=user_text,
-                latest_front_reply="",
-            )
-            output = await self._await_kernel_output(event_id)
-            kernel_output = self._render_kernel_output(output)
-            if not kernel_output:
-                return ""
-            companion_intent, surface_expression = build_companion_surface(
+            memory = self._build_front_memory_view(thread_id=thread_id, user_text=user_text)
+            front_reply = await self._emit_front_reply(
+                thread_id=thread_id,
+                turn_id=turn_id,
                 user_text=user_text,
-                kernel_output=kernel_output,
-                affect_state=affect_state,
+                memory=memory,
             )
-            await self._push_surface_state(
-                thread_id,
-                self._build_surface_state(
-                    thread_id,
-                    phase="replying",
-                    affect_state=affect_state,
-                    companion_intent=companion_intent,
-                    surface_expression=surface_expression,
-                ),
-                surface_state_handler=surface_state_handler,
-            )
-
+            event_id = make_id("brain_event")
+            self._pending_kernel_deliveries[event_id] = {
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "turn_id": turn_id,
+                "user_text": user_text,
+                "affect_state": affect_state,
+                "surface_state_handler": surface_state_handler,
+            }
             try:
-                presented = await self.front.present(
-                    user_text=user_text,
-                    kernel_output=kernel_output,
-                    affect_state=affect_state,
-                    companion_intent=companion_intent,
-                    surface_expression=surface_expression,
-                    stream_handler=stream_handler,
+                await self.kernel.publish_user_input(
+                    event_id=event_id,
+                    conversation_id=thread_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    text=user_text,
+                    latest_front_reply=front_reply,
                 )
-            except Exception:
-                await self._push_surface_state(
-                    thread_id,
-                    self._build_surface_state(
-                        thread_id,
-                        phase="idle",
-                        affect_state=affect_state,
-                        companion_intent=companion_intent,
-                        surface_expression=surface_expression,
-                    ),
-                    surface_state_handler=surface_state_handler,
+            except Exception as exc:
+                self._pending_kernel_deliveries.pop(event_id, None)
+                await self._publish_turn_error(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    error=str(exc),
                 )
-                return kernel_output
-
-            await self._push_surface_state(
-                thread_id,
-                self._build_surface_state(
-                    thread_id,
-                    phase="settling",
-                    affect_state=affect_state,
-                    companion_intent=companion_intent,
-                    surface_expression=surface_expression,
-                ),
-                surface_state_handler=surface_state_handler,
-            )
-            await self._push_surface_state(
-                thread_id,
-                self._build_surface_state(
-                    thread_id,
-                    phase="idle",
-                    affect_state=affect_state,
-                    companion_intent=companion_intent,
-                    surface_expression=surface_expression,
-                ),
-                surface_state_handler=surface_state_handler,
-            )
-            return presented.strip() or kernel_output
+                return front_reply
+            delivery_registered = True
+            return front_reply
         finally:
-            await self._mark_thread_idle(thread_id)
+            if not delivery_registered:
+                await self._mark_thread_idle(thread_id)
 
     async def wait_for_thread_idle(self, thread_id: str, timeout: float = 600.0) -> None:
         async with asyncio.timeout(timeout):
@@ -177,6 +171,14 @@ class RuntimeScheduler:
             return None
         return dict(state)
 
+    def subscribe_front_outputs(self) -> asyncio.Queue[FrontOutputPacket]:
+        queue: asyncio.Queue[FrontOutputPacket] = asyncio.Queue()
+        self._front_output_subscribers.add(queue)
+        return queue
+
+    def unsubscribe_front_outputs(self, queue: asyncio.Queue[FrontOutputPacket]) -> None:
+        self._front_output_subscribers.discard(queue)
+
     async def _listen_kernel_outputs(self) -> None:
         try:
             while True:
@@ -184,8 +186,15 @@ class RuntimeScheduler:
                 future = self._pending_outputs.pop(output.event_id, None)
                 if future is not None and not future.done():
                     future.set_result(output)
-                elif output.type != BrainOutputType.stopped:
-                    self._buffered_outputs[output.event_id] = output
+                    continue
+
+                delivery = self._pending_kernel_deliveries.pop(output.event_id, None)
+                if delivery is not None:
+                    self._schedule_kernel_delivery(output=output, delivery=delivery)
+                    continue
+
+                if output.type == BrainOutputType.recorded:
+                    continue
 
                 if output.type == BrainOutputType.stopped:
                     break
@@ -200,21 +209,15 @@ class RuntimeScheduler:
                 self._fail_pending_outputs(RuntimeError("Brain kernel listener stopped."))
             self._listener_task = None
 
-    async def _await_kernel_output(self, event_id: str) -> BrainOutput:
-        future = self._register_output_waiter(event_id)
+    async def _await_kernel_output(self, future: asyncio.Future[BrainOutput], event_id: str) -> BrainOutput:
         try:
             return await future
         finally:
             self._pending_outputs.pop(event_id, None)
 
     def _register_output_waiter(self, event_id: str) -> asyncio.Future[BrainOutput]:
-        buffered = self._buffered_outputs.pop(event_id, None)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[BrainOutput] = loop.create_future()
-        if buffered is not None:
-            future.set_result(buffered)
-            return future
-
         self._pending_outputs[event_id] = future
         return future
 
@@ -247,10 +250,32 @@ class RuntimeScheduler:
             if not future.done():
                 future.set_exception(error)
 
+    async def _cancel_delivery_tasks(self) -> None:
+        tasks = list(self._delivery_tasks)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._delivery_tasks.clear()
+
+    def _schedule_kernel_delivery(self, *, output: BrainOutput, delivery: dict[str, Any]) -> None:
+        task = asyncio.create_task(self._deliver_kernel_output(output=output, delivery=delivery))
+        self._delivery_tasks.add(task)
+        task.add_done_callback(self._delivery_tasks.discard)
+
     def _raise_if_listener_failed(self) -> None:
         if self._listener_error is None:
             return
         raise RuntimeError("Brain kernel output listener failed.") from self._listener_error
+
+    def _ensure_running(self) -> None:
+        listener = self._listener_task
+        if listener is not None and not listener.done() and self.kernel.is_running:
+            return
+        raise RuntimeError("Runtime scheduler is not running. Start it during project startup.")
 
     async def _mark_thread_active(self, thread_id: str) -> None:
         async with self._idle_condition:
@@ -359,3 +384,264 @@ class RuntimeScheduler:
             "affect_vitality": affect_state.vitality,
             "affect_pressure": affect_state.pressure,
         }
+
+    async def _emit_front_reply(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        user_text: str,
+        memory: MemoryView,
+    ) -> str:
+        try:
+            hint = (
+                await self.front.reply(
+                    user_text=user_text,
+                    memory=memory,
+                    stream_handler=self._build_front_stream_handler(
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                    ),
+                )
+            ).strip()
+        except Exception as exc:
+            await self._publish_turn_error(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                error=str(exc),
+            )
+            return ""
+        await self._publish_reply_done(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            text=hint,
+        )
+        return hint
+
+    def _build_front_memory_view(self, *, thread_id: str, user_text: str) -> MemoryView:
+        memory_store = getattr(self.kernel, "memory_store", None)
+        if memory_store is None:
+            return MemoryView()
+        try:
+            return memory_store.build_memory_view(thread_id, self.kernel.agent_id, user_text)
+        except Exception:
+            return MemoryView()
+
+    def _build_front_stream_handler(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+    ) -> Callable[[str], Awaitable[None]]:
+        async def _emit(chunk: str) -> None:
+            text = str(chunk or "")
+            if not text:
+                return
+            self._publish_front_output(
+                FrontOutputPacket(
+                    type="reply_chunk",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    text=text,
+                )
+            )
+
+        return _emit
+
+    def _publish_front_output(self, packet: FrontOutputPacket) -> None:
+        for subscriber in list(self._front_output_subscribers):
+            subscriber.put_nowait(packet)
+
+    async def _publish_reply_done(self, *, thread_id: str, turn_id: str, text: str) -> None:
+        final_text = str(text or "").strip()
+        if not final_text:
+            return
+        self._publish_front_output(
+            FrontOutputPacket(
+                type="reply_done",
+                thread_id=thread_id,
+                turn_id=turn_id,
+                text=final_text,
+            )
+        )
+
+    async def _publish_turn_error(self, *, thread_id: str, turn_id: str, error: str) -> None:
+        error_text = str(error or "").strip()
+        if not error_text:
+            return
+        self._publish_front_output(
+            FrontOutputPacket(
+                type="turn_error",
+                thread_id=thread_id,
+                turn_id=turn_id,
+                error=error_text,
+            )
+        )
+
+    async def _deliver_kernel_output(self, *, output: BrainOutput, delivery: dict[str, Any]) -> None:
+        try:
+            kernel_output = self._render_kernel_output(output)
+            if not kernel_output:
+                return
+
+            thread_id = str(delivery["thread_id"])
+            user_text = str(delivery["user_text"])
+            companion_intent, surface_expression = build_companion_surface(
+                user_text=user_text,
+                kernel_output=kernel_output,
+                affect_state=delivery["affect_state"],
+            )
+            await self._push_surface_state(
+                thread_id,
+                self._build_surface_state(
+                    thread_id=thread_id,
+                    phase="replying",
+                    affect_state=delivery["affect_state"],
+                    companion_intent=companion_intent,
+                    surface_expression=surface_expression,
+                ),
+                surface_state_handler=delivery["surface_state_handler"],
+            )
+
+            try:
+                presented = await self.front.present(
+                    user_text=user_text,
+                    kernel_output=kernel_output,
+                    affect_state=delivery["affect_state"],
+                    companion_intent=companion_intent,
+                    surface_expression=surface_expression,
+                    stream_handler=self._build_front_stream_handler(
+                        thread_id=thread_id,
+                        turn_id=str(delivery["turn_id"]),
+                    ),
+                )
+            except Exception as exc:
+                await self._push_surface_state(
+                    thread_id,
+                    self._build_surface_state(
+                        thread_id=thread_id,
+                        phase="idle",
+                        affect_state=delivery["affect_state"],
+                        companion_intent=companion_intent,
+                        surface_expression=surface_expression,
+                    ),
+                    surface_state_handler=delivery["surface_state_handler"],
+                )
+                fallback = kernel_output
+                await self._publish_reply_done(
+                    thread_id=thread_id,
+                    turn_id=str(delivery["turn_id"]),
+                    text=fallback,
+                )
+                await self._publish_turn_error(
+                    thread_id=thread_id,
+                    turn_id=str(delivery["turn_id"]),
+                    error=str(exc),
+                )
+                return
+
+            final_reply = presented.strip() or kernel_output
+            await self._record_front_delivery(
+                thread_id=thread_id,
+                user_id=str(delivery["user_id"]),
+                turn_id=str(delivery["turn_id"]),
+                user_text=user_text,
+                front_reply=final_reply,
+                kernel_output=kernel_output,
+                affect_state=delivery["affect_state"],
+                companion_intent=companion_intent,
+                surface_expression=surface_expression,
+                wait_for_record=False,
+            )
+            await self._push_surface_state(
+                thread_id,
+                self._build_surface_state(
+                    thread_id=thread_id,
+                    phase="settling",
+                    affect_state=delivery["affect_state"],
+                    companion_intent=companion_intent,
+                    surface_expression=surface_expression,
+                ),
+                surface_state_handler=delivery["surface_state_handler"],
+            )
+            await self._push_surface_state(
+                thread_id,
+                self._build_surface_state(
+                    thread_id=thread_id,
+                    phase="idle",
+                    affect_state=delivery["affect_state"],
+                    companion_intent=companion_intent,
+                    surface_expression=surface_expression,
+                ),
+                surface_state_handler=delivery["surface_state_handler"],
+            )
+            await self._publish_reply_done(
+                thread_id=thread_id,
+                turn_id=str(delivery["turn_id"]),
+                text=final_reply,
+            )
+        finally:
+            await self._mark_thread_idle(str(delivery["thread_id"]))
+
+    async def _record_front_delivery(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        turn_id: str,
+        user_text: str,
+        front_reply: str,
+        kernel_output: str,
+        affect_state: AffectState | None,
+        companion_intent: CompanionIntent,
+        surface_expression: SurfaceExpression,
+        wait_for_record: bool = True,
+    ) -> None:
+        if not front_reply.strip():
+            return
+
+        metadata: dict[str, Any] = {
+            "source": "runtime_scheduler",
+            "kernel_output": kernel_output,
+            "mode": companion_intent.mode,
+            "warmth": companion_intent.warmth,
+            "initiative": companion_intent.initiative,
+            "intensity": companion_intent.intensity,
+            "text_style": surface_expression.text_style,
+            "presence": surface_expression.presence,
+            "expression": surface_expression.expression,
+            "motion_hint": surface_expression.motion_hint,
+        }
+        metadata.update(self._build_affect_payload(affect_state))
+
+        try:
+            event_id = make_id("brain_event")
+            future = self._register_output_waiter(event_id) if wait_for_record else None
+            await self.kernel.publish_front_event(
+                event_id=event_id,
+                conversation_id=thread_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                front_event={
+                    "event_type": "dialogue",
+                    "user_text": user_text,
+                    "front_reply": front_reply,
+                    "emotion": surface_expression.expression,
+                    "tags": [
+                        tag
+                        for tag in [
+                            companion_intent.mode,
+                            surface_expression.text_style,
+                            surface_expression.presence,
+                            surface_expression.expression,
+                        ]
+                        if str(tag or "").strip()
+                    ],
+                    "metadata": metadata,
+                },
+            )
+            if wait_for_record and future is not None:
+                await self._await_kernel_output(future, event_id)
+        except Exception:
+            self._pending_outputs.pop(event_id, None)
+            return

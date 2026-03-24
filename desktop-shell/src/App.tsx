@@ -23,6 +23,7 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [draft, setDraft] = useState("");
   const [replyText, setReplyText] = useState("");
+  const [lastCompletedReply, setLastCompletedReply] = useState("");
   const [speechPulseTick, setSpeechPulseTick] = useState(0);
   const [lastUserText, setLastUserText] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -32,6 +33,7 @@ export default function App() {
   );
   const [affectState, setAffectState] = useState<AffectStateSnapshot | null>(null);
   const clientRef = useRef<DesktopBridgeClient | null>(null);
+  const isReplyStreamingRef = useRef(false);
 
   useEffect(() => {
     const client = new DesktopBridgeClient(defaultBridgeUrl, {
@@ -46,15 +48,24 @@ export default function App() {
             setPacket(event.payload);
             break;
           case "reply_chunk":
-            setReplyText((current) => current + event.payload.chunk);
+            setReplyText((current) =>
+              isReplyStreamingRef.current ? current + event.payload.chunk : event.payload.chunk,
+            );
+            isReplyStreamingRef.current = true;
             setSpeechPulseTick((current) => current + 1);
             break;
           case "reply_done":
             setReplyText(event.payload.text);
+            if (event.payload.text.trim()) {
+              setLastCompletedReply(event.payload.text);
+            }
+            isReplyStreamingRef.current = false;
             setIsSending(false);
             break;
           case "turn_error":
             setReplyText(`连接内核时出错：${event.payload.error}`);
+            setLastCompletedReply(`连接内核时出错：${event.payload.error}`);
+            isReplyStreamingRef.current = false;
             setIsSending(false);
             break;
           case "affect_state":
@@ -62,6 +73,8 @@ export default function App() {
             break;
           case "error":
             setReplyText(`桌面桥接异常：${event.payload.message}`);
+            setLastCompletedReply(`桌面桥接异常：${event.payload.message}`);
+            isReplyStreamingRef.current = false;
             setIsSending(false);
             break;
         }
@@ -97,6 +110,7 @@ export default function App() {
     setDraft("");
     setLastUserText(text);
     setReplyText("");
+    isReplyStreamingRef.current = false;
     setIsSending(true);
     try {
       clientRef.current.sendUserInput({
@@ -109,7 +123,8 @@ export default function App() {
     }
   };
 
-  const bubbleText = replyText || (packet.phase === "listening" ? "我在听着。" : "待在你旁边。");
+  const bubbleText = replyText || lastCompletedReply || "";
+  const bubbleLabel = bubbleText ? "当前回应" : "";
   const vitality = affectState?.vitality;
   const pressure = affectState?.pressure;
 
@@ -143,7 +158,7 @@ export default function App() {
         <section
           className={`bubble-card ${packet.bubble_visible ? "is-live" : ""} phase-${packet.phase} mood-${packet.mood} pulse-${speechPulseTick % 2}`}
         >
-          <p className="bubble-label">最近回应</p>
+          <p className="bubble-label">{bubbleLabel}</p>
           <p className={`bubble-text pulse-${speechPulseTick % 2}`}>{bubbleText}</p>
           {lastUserText ? <p className="bubble-user">你: {lastUserText}</p> : null}
         </section>

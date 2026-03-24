@@ -52,6 +52,8 @@ class BrainKernelResidentMixin:
             self._conversation_foregrounds = {}
             self._conversation_tasks = {}
             self._conversation_queues = {}
+            self._front_reply_events = {}
+            self._front_reply_cache = {}
             self._sleep_worker_task = None
             self._sleep_queue = None
 
@@ -136,12 +138,17 @@ class BrainKernelResidentMixin:
                 break
 
             try:
+                latest_front_reply = await self._resolve_sleep_front_reply(
+                    conversation_id=job.conversation_id,
+                    turn_id=job.turn_id,
+                    latest_front_reply=job.latest_front_reply,
+                )
                 await self.run_sleep_cycle(
                     conversation_id=job.conversation_id,
                     user_id=job.user_id,
                     turn_id=job.turn_id,
                     latest_user_text=job.latest_user_text,
-                    latest_front_reply=job.latest_front_reply,
+                    latest_front_reply=latest_front_reply,
                 )
             except Exception as exc:
                 if self._output_queue is not None:
@@ -152,6 +159,40 @@ class BrainKernelResidentMixin:
                             error=f"Sleep worker failed: {exc}",
                         )
                     )
+
+    async def _resolve_sleep_front_reply(
+        self,
+        *,
+        conversation_id: str,
+        turn_id: str,
+        latest_front_reply: str,
+        timeout: float = 30.0,
+    ) -> str:
+        reply = str(latest_front_reply or "").strip()
+        if reply or not conversation_id or not turn_id:
+            return reply
+
+        key = (conversation_id, turn_id)
+        cached = self._front_reply_cache.pop(key, "")
+        if cached:
+            self._front_reply_events.pop(key, None)
+            return cached
+
+        event = self._front_reply_events.get(key)
+        if event is None:
+            event = asyncio.Event()
+            self._front_reply_events[key] = event
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return ""
+        finally:
+            current = self._front_reply_events.get(key)
+            if current is event:
+                self._front_reply_events.pop(key, None)
+
+        return self._front_reply_cache.pop(key, "")
 
     async def _process_event(self, event: BrainEvent) -> BrainOutput:
         if event.type == BrainEventType.user_input:

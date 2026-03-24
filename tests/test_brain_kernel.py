@@ -251,6 +251,35 @@ def test_memory_store_builds_three_layer_memory_view(tmp_path: Path) -> None:
     assert view.cognitive_layer[0]["summary"] == "用户在确认机器人主干架构"
 
 
+def test_append_patch_handles_existing_jsonl_without_trailing_newline(tmp_path: Path) -> None:
+    memory_store = JsonlMemoryStore(tmp_path)
+    memory_store.long_term_path.write_text(
+        '{"record_id":"mem_old","summary":"old","memory_candidates":[],"user_updates":[],"soul_updates":[]}',
+        encoding="utf-8",
+    )
+
+    memory_store.append_patch(
+        MemoryPatch(
+            long_term_append=[
+                {
+                    "record_id": "mem_new",
+                    "summary": "new",
+                    "memory_candidates": [],
+                    "user_updates": ["喜欢极简设计"],
+                    "soul_updates": [],
+                }
+            ]
+        )
+    )
+
+    rows = memory_store.query_long_term(query="极简设计", agent_id="", limit=10)
+    text = memory_store.long_term_path.read_text(encoding="utf-8")
+
+    assert '\n{"record_id": "mem_new"' in text
+    assert "喜欢极简设计" in (tmp_path / "USER.md").read_text(encoding="utf-8")
+    assert rows == []
+
+
 def test_brain_kernel_can_store_front_event(tmp_path: Path) -> None:
     memory_store = JsonlMemoryStore(tmp_path)
     kernel = BrainKernel(agent_id="alice", memory_store=memory_store)
@@ -278,6 +307,44 @@ def test_brain_kernel_can_store_front_event(tmp_path: Path) -> None:
     assert rows[0]["emotion"] == "warm"
     view = memory_store.build_memory_view("conv", "alice", "阿青")
     assert view.raw_layer["recent_front_events"]
+
+
+def test_brain_kernel_can_wait_for_front_reply_for_same_turn(tmp_path: Path) -> None:
+    memory_store = JsonlMemoryStore(tmp_path)
+    kernel = BrainKernel(agent_id="alice", memory_store=memory_store)
+
+    async def _exercise() -> str:
+        kernel._front_reply_events[("conv", "turn_1")] = asyncio.Event()
+
+        async def _publish() -> None:
+            await asyncio.sleep(0.05)
+            await kernel.handle_front_event(
+                conversation_id="conv",
+                user_id="user",
+                turn_id="turn_1",
+                front_event=FrontEvent(
+                    event_type="dialogue",
+                    user_text="以后叫我阿青",
+                    front_reply="好呀，我记住了",
+                    emotion="warm",
+                    tags=["relationship"],
+                ),
+            )
+
+        task = asyncio.create_task(_publish())
+        try:
+            return await kernel._resolve_sleep_front_reply(
+                conversation_id="conv",
+                turn_id="turn_1",
+                latest_front_reply="",
+                timeout=1.0,
+            )
+        finally:
+            await task
+
+    reply = asyncio.run(_exercise())
+
+    assert reply == "好呀，我记住了"
 
 
 def test_brain_kernel_assigns_default_model_to_sleep_agent(tmp_path: Path) -> None:
@@ -709,6 +776,7 @@ def test_brain_kernel_resident_service_runs_sleep_agent_in_background(tmp_path: 
             user_id="user",
             turn_id="turn_background_sleep",
             text="帮我记住这次对话",
+            latest_front_reply="我会记住这次对话。",
         )
         output = await asyncio.wait_for(kernel.recv_output(), timeout=1)
         assert output.event_id == event_id

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+
+from langchain_core.messages import AIMessage
 
 from emoticorebot.affect import AffectState, PADVector
 from emoticorebot.brain_kernel import MemoryView
@@ -11,6 +14,15 @@ from emoticorebot.front.service import FrontService
 
 class DummyModel:
     pass
+
+
+class RecordingModel:
+    def __init__(self) -> None:
+        self.messages = None
+
+    async def ainvoke(self, messages):
+        self.messages = messages
+        return AIMessage(content="模型前台回应")
 
 
 def test_front_service_formats_companion_surface_hints_in_chinese() -> None:
@@ -110,3 +122,24 @@ def test_front_service_keeps_opening_short_when_kernel_output_is_long() -> None:
     )
 
     assert "后台信息较多，接住句只占很短一句，正文仍然以有效信息为主。" in prompt
+
+
+def test_front_service_reply_uses_model_in_front_layer(tmp_path: Path) -> None:
+    async def _exercise() -> None:
+        templates_dir = tmp_path / "templates"
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        (templates_dir / "FRONT.md").write_text("front system", encoding="utf-8")
+        model = RecordingModel()
+        service = FrontService(workspace=tmp_path, model=model)
+
+        reply = await service.reply(
+            user_text="帮我看看日志",
+            memory=MemoryView(),
+        )
+
+        assert reply == "模型前台回应"
+        assert model.messages is not None
+        assert "## 回复约束" in model.messages[1].content
+        assert "先接住用户，再表达会查看、会处理、会继续跟进。" in model.messages[1].content
+
+    asyncio.run(_exercise())

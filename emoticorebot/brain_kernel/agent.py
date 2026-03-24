@@ -61,6 +61,8 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         self._conversation_tasks: dict[str, asyncio.Task[None]] = {}
         self._sleep_queue: asyncio.Queue[PendingSleepJob | None] | None = None
         self._sleep_worker_task: asyncio.Task[None] | None = None
+        self._front_reply_events: dict[tuple[str, str], asyncio.Event] = {}
+        self._front_reply_cache: dict[tuple[str, str], str] = {}
 
     def build_turn_context(
         self,
@@ -187,6 +189,11 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
             return event
 
         resolved_turn_id = turn_id or make_id("front_turn")
+        self._remember_front_reply(
+            conversation_id=conversation_id,
+            turn_id=resolved_turn_id,
+            front_reply=event.front_reply,
+        )
         self.memory_store.append_front_record(
             conversation_id,
             {
@@ -214,6 +221,8 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         self._conversation_foregrounds = {}
         self._conversation_queues = {}
         self._conversation_tasks = {}
+        self._front_reply_events = {}
+        self._front_reply_cache = {}
         self._sleep_queue = asyncio.Queue() if self.sleep_agent is not None else None
         self._sleep_worker_task = (
             asyncio.create_task(self._sleep_worker_loop()) if self._sleep_queue is not None else None
@@ -235,6 +244,7 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
     async def publish_user_input(
         self,
         *,
+        event_id: str = "",
         conversation_id: str,
         text: str,
         user_id: str = "",
@@ -245,6 +255,7 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         metadata: dict[str, Any] | None = None,
     ) -> str:
         event = BrainEvent(
+            event_id=event_id or make_id("brain_event"),
             type=BrainEventType.user_input,
             conversation_id=conversation_id,
             target_run_id=target_run_id,
@@ -261,6 +272,7 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
     async def publish_observation(
         self,
         *,
+        event_id: str = "",
         conversation_id: str,
         text: str,
         user_id: str = "",
@@ -270,6 +282,7 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         metadata: dict[str, Any] | None = None,
     ) -> str:
         event = BrainEvent(
+            event_id=event_id or make_id("brain_event"),
             type=BrainEventType.observation,
             conversation_id=conversation_id,
             text=text,
@@ -285,11 +298,13 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
     async def publish_tool_results(
         self,
         *,
+        event_id: str = "",
         run_id: str,
         tool_results: Sequence[ToolResult | dict[str, Any]] | ToolResult | dict[str, Any],
         latest_front_reply: str = "",
     ) -> str:
         event = BrainEvent(
+            event_id=event_id or make_id("brain_event"),
             type=BrainEventType.tool_results,
             conversation_id=self._resolve_run_conversation_id(run_id),
             run_id=run_id,
@@ -302,12 +317,14 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
     async def publish_front_event(
         self,
         *,
+        event_id: str = "",
         conversation_id: str,
         front_event: FrontEvent | dict[str, Any],
         user_id: str = "",
         turn_id: str = "",
     ) -> str:
         event = BrainEvent(
+            event_id=event_id or make_id("brain_event"),
             type=BrainEventType.front_event,
             conversation_id=conversation_id,
             user_id=user_id,
@@ -376,6 +393,16 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         if isinstance(front_event, FrontEvent):
             return front_event
         return FrontEvent.model_validate(front_event)
+
+    def _remember_front_reply(self, *, conversation_id: str, turn_id: str, front_reply: str) -> None:
+        reply = str(front_reply or "").strip()
+        if not conversation_id or not turn_id or not reply:
+            return
+        key = (conversation_id, turn_id)
+        self._front_reply_cache[key] = reply
+        waiter = self._front_reply_events.get(key)
+        if waiter is not None:
+            waiter.set()
 
     def _summarize_front_event(self, event: FrontEvent) -> str:
         parts: list[str] = []

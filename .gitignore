@@ -22,6 +22,8 @@ __pycache__/
 poetry.lock
 .pytest_cache/
 botpy.log
+desktop-shell/node_modules/
+desktop-shell/src-tauri/target/
 tests/
 !tests/
 !tests/**/*.py
