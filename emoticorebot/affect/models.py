@@ -109,6 +109,28 @@ class AffectState:
 
 
 @dataclass(frozen=True, slots=True)
+class EmotionSignal:
+    """A lightweight semantic emotion read for the current user turn."""
+
+    primary_emotion: str = "neutral"
+    intensity: float = 0.0
+    confidence: float = 0.0
+    support_need: str = "quiet_company"
+    wants_action: bool = False
+    trigger_text: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "primary_emotion": str(self.primary_emotion or "neutral").strip() or "neutral",
+            "intensity": round(_clamp(self.intensity, 0.0, 1.0), 6),
+            "confidence": round(_clamp(self.confidence, 0.0, 1.0), 6),
+            "support_need": str(self.support_need or "quiet_company").strip() or "quiet_company",
+            "wants_action": bool(self.wants_action),
+            "trigger_text": str(self.trigger_text or "").strip(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AffectTurnResult:
     """One affect evolution result for a user turn."""
 
@@ -117,6 +139,7 @@ class AffectTurnResult:
     user_pad: PADVector
     delta_pad: PADVector
     pressure_delta: float
+    emotion_signal: EmotionSignal | None = None
 
 
 def _coerce_float(value: Any, default: float) -> float:

@@ -8,7 +8,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from emoticorebot.affect import AffectState
+from emoticorebot.affect import AffectState, EmotionSignal
 from emoticorebot.brain_kernel import MemoryView
 from emoticorebot.companion import CompanionIntent, SurfaceExpression
 from emoticorebot.front.prompt import FrontPromptBuilder
@@ -137,6 +137,26 @@ _LIFECYCLE_PHASE_HINTS = {
     "idle_ready": "说完后进入轻待命状态，随时可以继续回应。",
 }
 
+_PRIMARY_EMOTION_HINTS = {
+    "neutral": "情绪不必过度渲染，保持自然在场就好。",
+    "happy": "底色是开心和轻松，可以暖一点，但别飘。",
+    "excited": "情绪更亮一些，可以真心替用户提气，但别吵。",
+    "sad": "更需要被接住，语气放轻一点。",
+    "hurt": "更像被刺到或委屈到，先护住再说内容。",
+    "anxious": "底色偏紧张不安，先稳住节奏和安全感。",
+    "frustrated": "更像被卡住或被惹烦，既要接住，也要帮着推进。",
+    "lonely": "更需要陪着和在场感，不要一上来就给方案。",
+    "overwhelmed": "像是快扛不住了，先减压，再一点点往前带。",
+}
+
+_SUPPORT_NEED_HINTS = {
+    "comfort": "优先安抚、接住、减压。",
+    "encourage": "优先提气和真心认可，往前托一下。",
+    "focused": "除了接住情绪，也要顺手帮用户把事往前推。",
+    "quiet_company": "安静陪着更重要，不必说太满。",
+    "celebrate": "陪着高兴一下，让亮度出来，但别浮夸。",
+}
+
 
 class FrontService:
     """Fast conversational layer that talks to the user first."""
@@ -151,10 +171,15 @@ class FrontService:
         *,
         user_text: str,
         memory: MemoryView,
+        emotion_signal: EmotionSignal | None = None,
         stream_handler: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         system_text = self._front_system_text()
-        user_prompt = self.prompts.build_user_prompt(user_text=user_text, memory=memory)
+        user_prompt = self.prompts.build_user_prompt(
+            user_text=user_text,
+            memory=memory,
+            emotion_signal=emotion_signal,
+        )
         messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt)]
         return await self.run(messages, stream_handler)
 
@@ -164,6 +189,7 @@ class FrontService:
         user_text: str,
         kernel_output: str,
         affect_state: AffectState | None = None,
+        emotion_signal: EmotionSignal | None = None,
         companion_intent: CompanionIntent | None = None,
         surface_expression: SurfaceExpression | None = None,
         stream_handler: Callable[[str], Awaitable[None]] | None = None,
@@ -178,6 +204,7 @@ class FrontService:
                     user_text=user_text,
                     kernel_output=kernel_output,
                     affect_state=affect_state,
+                    emotion_signal=emotion_signal,
                     companion_intent=companion_intent,
                     surface_expression=surface_expression,
                 )
@@ -219,6 +246,7 @@ class FrontService:
         user_text: str,
         kernel_output: str,
         affect_state: AffectState | None = None,
+        emotion_signal: EmotionSignal | None = None,
         companion_intent: CompanionIntent | None = None,
         surface_expression: SurfaceExpression | None = None,
     ) -> str:
@@ -244,6 +272,14 @@ class FrontService:
                     "",
                     "## 情绪动力学",
                     self._format_affect_state(affect_state),
+                ]
+            )
+        if emotion_signal is not None:
+            sections.extend(
+                [
+                    "",
+                    "## 语义情绪",
+                    self._format_emotion_signal(emotion_signal),
                 ]
             )
         if companion_intent is not None:
@@ -295,6 +331,21 @@ class FrontService:
                 f"- 外显偏置: {_describe_affect_bias(affect_state)}",
             ]
         )
+
+    def _format_emotion_signal(self, emotion_signal: EmotionSignal) -> str:
+        trigger_text = str(emotion_signal.trigger_text or "").strip()
+        wants_action_text = "是，这一轮别只接住，也要顺手推进。" if emotion_signal.wants_action else "否，先把人在场感和接住感放前面。"
+        lines = [
+            "- 当前主情绪: "
+            f"{emotion_signal.primary_emotion}（{_describe_hint(_PRIMARY_EMOTION_HINTS, emotion_signal.primary_emotion, '按当前语境自然回应。')}）",
+            f"- 强度: {emotion_signal.intensity:.2f}（{_describe_scaled_value(emotion_signal.intensity, '情绪比较轻，别演重了', '情绪已经在场，要明确接住', '情绪很明显，先顺着它把人稳住')}）",
+            f"- 置信度: {emotion_signal.confidence:.2f}（{_describe_scaled_value(emotion_signal.confidence, '只当轻线索，不要过度解读', '可以把它当成本轮主要方向', '基本可以按这个情绪方向组织语气')}）",
+            f"- 更适合的支持方式: {emotion_signal.support_need}（{_describe_hint(_SUPPORT_NEED_HINTS, emotion_signal.support_need, '保持自然陪伴。')}）",
+            f"- 是否希望你顺手做事: {wants_action_text}",
+        ]
+        if trigger_text:
+            lines.append(f"- 触发线索: {trigger_text}")
+        return "\n".join(lines)
 
     def _format_companion_intent(self, intent: CompanionIntent) -> str:
         return "\n".join(

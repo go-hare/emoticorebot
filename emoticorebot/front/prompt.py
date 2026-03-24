@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from emoticorebot.affect import EmotionSignal
 from emoticorebot.brain_kernel import MemoryView
 
 
@@ -13,7 +14,13 @@ class FrontPromptBuilder:
     def __init__(self, workspace: Path):
         self.workspace = workspace
 
-    def build_user_prompt(self, *, user_text: str, memory: MemoryView) -> str:
+    def build_user_prompt(
+        self,
+        *,
+        user_text: str,
+        memory: MemoryView,
+        emotion_signal: EmotionSignal | None = None,
+    ) -> str:
         sections: list[str] = [
             "## 外显目标",
             "默认高陪伴、高在场。先接住用户，再表达内容。",
@@ -24,6 +31,14 @@ class FrontPromptBuilder:
             "优先短句、真一点、贴近一点，避免模板化的甜和夸张语气。",
             "",
         ]
+        if emotion_signal is not None:
+            sections.extend(
+                [
+                    "## 当前情绪线索",
+                    self._format_emotion_signal(emotion_signal),
+                    "",
+                ]
+            )
         needs_verification = self.requires_verification(user_text)
         if needs_verification:
             sections.extend(
@@ -84,6 +99,19 @@ class FrontPromptBuilder:
             if long_term_summary:
                 sections.extend(["", "## 长期记忆摘要", long_term_summary])
         return "\n".join(part for part in sections if part is not None)
+
+    def _format_emotion_signal(self, emotion_signal: EmotionSignal) -> str:
+        wants_action_text = "是" if emotion_signal.wants_action else "否"
+        lines = [
+            f"- 主情绪: {emotion_signal.primary_emotion}",
+            f"- 强度: {emotion_signal.intensity:.2f} / 置信度: {emotion_signal.confidence:.2f}",
+            f"- 更适合的支持方式: {emotion_signal.support_need}",
+            f"- 这一轮希望顺手推进事情: {wants_action_text}",
+        ]
+        trigger_text = str(emotion_signal.trigger_text or "").strip()
+        if trigger_text:
+            lines.append(f"- 触发线索: {trigger_text}")
+        return "\n".join(lines)
 
     def requires_verification(self, user_text: str) -> bool:
         text = str(user_text or "").strip().lower()

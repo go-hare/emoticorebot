@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from emoticorebot.affect import AffectState, PADVector
+from emoticorebot.affect import AffectState, AffectTurnResult, EmotionSignal, PADVector
 from emoticorebot.brain_kernel import (
     BrainOutput,
     BrainOutputType,
@@ -29,16 +29,18 @@ class FakeFront:
         *,
         user_text: str,
         memory: MemoryView,
+        emotion_signal: EmotionSignal | None = None,
         stream_handler=None,
     ) -> str:
         if stream_handler is not None:
             await stream_handler("front live hint")
-        self.reply_calls.append(
-            {
-                "user_text": user_text,
-                "memory": memory,
-            }
-        )
+        payload: dict[str, object] = {
+            "user_text": user_text,
+            "memory": memory,
+        }
+        if emotion_signal is not None:
+            payload["emotion_signal"] = emotion_signal
+        self.reply_calls.append(payload)
         return "front live hint"
 
     async def present(
@@ -47,6 +49,7 @@ class FakeFront:
         user_text: str,
         kernel_output: str,
         affect_state: AffectState | None = None,
+        emotion_signal: EmotionSignal | None = None,
         companion_intent: CompanionIntent | None = None,
         surface_expression: SurfaceExpression | None = None,
         stream_handler=None,
@@ -56,6 +59,7 @@ class FakeFront:
                 "user_text": user_text,
                 "kernel_output": kernel_output,
                 "affect_state": affect_state,
+                "emotion_signal": emotion_signal,
                 "companion_intent": companion_intent,
                 "surface_expression": surface_expression,
             }
@@ -171,15 +175,25 @@ class FakeAffectRuntime:
             turn_count=4,
             updated_at="2026-03-23T23:58:00",
         )
+        self.emotion_signal = EmotionSignal(
+            primary_emotion="overwhelmed",
+            intensity=0.79,
+            confidence=0.71,
+            support_need="focused",
+            wants_action=True,
+            trigger_text="日志",
+        )
 
     def evolve(self, *, user_text: str):
         self.calls.append(user_text)
-
-        class Result:
-            def __init__(self, state: AffectState) -> None:
-                self.state = state
-
-        return Result(self.state)
+        return AffectTurnResult(
+            previous_state=self.state,
+            state=self.state,
+            user_pad=self.state.last_user_pad,
+            delta_pad=self.state.last_delta_pad,
+            pressure_delta=0.12,
+            emotion_signal=self.emotion_signal,
+        )
 
 
 def _drain_front_packets(queue: asyncio.Queue[FrontOutputPacket]) -> list[FrontOutputPacket]:
@@ -235,6 +249,7 @@ def test_runtime_scheduler_forwards_user_turn_into_kernel_and_front() -> None:
                 "user_text": "帮我看看日志",
                 "kernel_output": "kernel raw for: 帮我看看日志",
                 "affect_state": None,
+                "emotion_signal": None,
                 "companion_intent": front.calls[0]["companion_intent"],
                 "surface_expression": front.calls[0]["surface_expression"],
             }
@@ -248,6 +263,8 @@ def test_runtime_scheduler_forwards_user_turn_into_kernel_and_front() -> None:
                     "event_type": "dialogue",
                     "user_text": "帮我看看日志",
                     "front_reply": "front live hint",
+                    "emotion": "",
+                    "tags": [],
                     "metadata": {
                         "source": "runtime_front_hint",
                     },
@@ -346,6 +363,7 @@ def test_runtime_scheduler_handle_user_text_emits_two_reply_done_events() -> Non
                 "user_text": "帮我看看日志",
                 "kernel_output": "kernel raw for: 帮我看看日志",
                 "affect_state": None,
+                "emotion_signal": None,
                 "companion_intent": front.calls[0]["companion_intent"],
                 "surface_expression": front.calls[0]["surface_expression"],
             }
@@ -392,6 +410,7 @@ def test_runtime_scheduler_presents_kernel_errors_to_front() -> None:
                 "user_text": "执行一下",
                 "kernel_output": "内核处理失败：kernel exploded",
                 "affect_state": None,
+                "emotion_signal": None,
                 "companion_intent": front.calls[0]["companion_intent"],
                 "surface_expression": front.calls[0]["surface_expression"],
             }
@@ -418,6 +437,7 @@ def test_runtime_scheduler_surface_state_falls_back_to_idle_on_front_error() -> 
             user_text: str,
             kernel_output: str,
             affect_state: AffectState | None = None,
+            emotion_signal: EmotionSignal | None = None,
             companion_intent: CompanionIntent | None = None,
             surface_expression: SurfaceExpression | None = None,
             stream_handler=None,
@@ -426,6 +446,7 @@ def test_runtime_scheduler_surface_state_falls_back_to_idle_on_front_error() -> 
                 user_text,
                 kernel_output,
                 affect_state,
+                emotion_signal,
                 companion_intent,
                 surface_expression,
                 stream_handler,
@@ -502,6 +523,8 @@ def test_runtime_scheduler_discards_none_task_outputs_after_front_hint() -> None
                     "event_type": "dialogue",
                     "user_text": "以后叫我阿青",
                     "front_reply": "front live hint",
+                    "emotion": "",
+                    "tags": [],
                     "metadata": {
                         "source": "runtime_front_hint",
                     },
@@ -574,11 +597,19 @@ def test_runtime_scheduler_passes_affect_state_into_front_and_surface() -> None:
 
         assert affect.calls == ["帮我看看日志"]
         assert front.reply_calls[0]["memory"] == MemoryView()
+        assert front.reply_calls[0]["emotion_signal"] == affect.emotion_signal
         assert kernel.published[0]["latest_front_reply"] == "front live hint"
         assert front.calls[0]["affect_state"] == affect.state
+        assert front.calls[0]["emotion_signal"] == affect.emotion_signal
         assert surface_states[0]["affect_pressure"] == affect.state.pressure
+        assert surface_states[0]["emotion_primary"] == affect.emotion_signal.primary_emotion
         assert surface_states[1]["affect_vitality"] == affect.state.vitality
+        assert surface_states[1]["emotion_support_need"] == affect.emotion_signal.support_need
         assert surface_states[-1]["affect_pleasure"] == affect.state.current_pad.pleasure
+        assert surface_states[-1]["emotion_wants_action"] is True
+        assert kernel.front_events[0]["front_event"]["emotion"] == affect.emotion_signal.primary_emotion
+        assert kernel.front_events[0]["front_event"]["metadata"]["emotion_primary"] == affect.emotion_signal.primary_emotion
+        assert kernel.front_events[1]["front_event"]["metadata"]["emotion_support_need"] == affect.emotion_signal.support_need
 
         await runtime.stop()
 

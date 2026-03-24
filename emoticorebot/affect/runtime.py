@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - optional dependency at import time
 
 from emoticorebot.affect.models import AffectState, AffectTurnResult, PADVector
 from emoticorebot.affect.pad_estimator import estimate_user_pad
+from emoticorebot.affect.semantic import infer_emotion_signal
 from emoticorebot.affect.store import AffectStateStore
 
 _EXTERNAL_DATA_RE = re.compile(r"\[\"(?P<path>.+?\.onnx\.data)\"\]")
@@ -142,6 +143,7 @@ class AffectRuntime:
             vitality=vitality,
             pressure=pressure,
         )
+        emotion_signal = infer_emotion_signal(user_text=user_text, affect_state=next_state)
         self.store.save(next_state)
         return AffectTurnResult(
             previous_state=previous_state,
@@ -149,6 +151,7 @@ class AffectRuntime:
             user_pad=user_pad,
             delta_pad=delta_pad,
             pressure_delta=pressure_delta,
+            emotion_signal=emotion_signal,
         )
 def create_affect_runtime(workspace: Path, model_path: Path | str | None) -> AffectRuntime | None:
     """Create a Chordia-backed affect runtime from an explicit model path."""

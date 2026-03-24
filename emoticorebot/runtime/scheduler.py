@@ -9,7 +9,7 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
-from emoticorebot.affect import AffectRuntime, AffectState
+from emoticorebot.affect import AffectRuntime, AffectState, AffectTurnResult, EmotionSignal
 from emoticorebot.brain_kernel import BrainKernel, BrainOutput, BrainOutputType, MemoryView, TaskType, make_id
 from emoticorebot.companion import CompanionIntent, SurfaceExpression, build_companion_surface
 from emoticorebot.front.service import FrontService
@@ -113,10 +113,16 @@ class RuntimeScheduler:
         turn_id = make_id("turn")
 
         try:
-            affect_state = self._evolve_affect_state(user_text)
+            affect_turn = self._evolve_affect_turn(user_text)
+            affect_state = affect_turn.state if affect_turn is not None else None
+            emotion_signal = affect_turn.emotion_signal if affect_turn is not None else None
             await self._push_surface_state(
                 thread_id,
-                self._build_listening_state(thread_id, affect_state=affect_state),
+                self._build_listening_state(
+                    thread_id,
+                    affect_state=affect_state,
+                    emotion_signal=emotion_signal,
+                ),
                 surface_state_handler=surface_state_handler,
             )
             memory = self._build_front_memory_view(thread_id=thread_id, user_text=user_text)
@@ -125,6 +131,7 @@ class RuntimeScheduler:
                 turn_id=turn_id,
                 user_text=user_text,
                 memory=memory,
+                emotion_signal=emotion_signal,
             )
             await self._publish_initial_front_event(
                 thread_id=thread_id,
@@ -132,6 +139,7 @@ class RuntimeScheduler:
                 turn_id=turn_id,
                 user_text=user_text,
                 front_reply=front_reply,
+                emotion_signal=emotion_signal,
             )
             event_id = make_id("brain_event")
             self._pending_kernel_deliveries[event_id] = {
@@ -140,6 +148,7 @@ class RuntimeScheduler:
                 "turn_id": turn_id,
                 "user_text": user_text,
                 "affect_state": affect_state,
+                "emotion_signal": emotion_signal,
                 "surface_state_handler": surface_state_handler,
             }
             try:
@@ -319,6 +328,7 @@ class RuntimeScheduler:
         thread_id: str,
         *,
         affect_state: AffectState | None,
+        emotion_signal: EmotionSignal | None,
     ) -> dict[str, Any]:
         state = {
             "thread_id": thread_id,
@@ -334,6 +344,7 @@ class RuntimeScheduler:
             "recommended_hold_ms": 0,
         }
         state.update(self._build_affect_payload(affect_state))
+        state.update(self._build_emotion_payload(emotion_signal))
         return state
 
     def _build_idle_state(
@@ -341,6 +352,7 @@ class RuntimeScheduler:
         thread_id: str,
         *,
         affect_state: AffectState | None,
+        emotion_signal: EmotionSignal | None = None,
     ) -> dict[str, Any]:
         state = {
             "thread_id": thread_id,
@@ -356,6 +368,7 @@ class RuntimeScheduler:
             "recommended_hold_ms": 0,
         }
         state.update(self._build_affect_payload(affect_state))
+        state.update(self._build_emotion_payload(emotion_signal))
         return state
 
     def _build_surface_state(
@@ -364,6 +377,7 @@ class RuntimeScheduler:
         *,
         phase: str,
         affect_state: AffectState | None,
+        emotion_signal: EmotionSignal | None,
         companion_intent: CompanionIntent,
         surface_expression: SurfaceExpression,
     ) -> dict[str, Any]:
@@ -400,12 +414,13 @@ class RuntimeScheduler:
             "recommended_hold_ms": recommended_hold_ms,
         }
         state.update(self._build_affect_payload(affect_state))
+        state.update(self._build_emotion_payload(emotion_signal))
         return state
 
-    def _evolve_affect_state(self, user_text: str) -> AffectState | None:
+    def _evolve_affect_turn(self, user_text: str) -> AffectTurnResult | None:
         if self.affect_runtime is None:
             return None
-        return self.affect_runtime.evolve(user_text=user_text).state
+        return self.affect_runtime.evolve(user_text=user_text)
 
     def _build_affect_payload(self, affect_state: AffectState | None) -> dict[str, Any]:
         if affect_state is None:
@@ -418,6 +433,19 @@ class RuntimeScheduler:
             "affect_pressure": affect_state.pressure,
         }
 
+    def _build_emotion_payload(self, emotion_signal: EmotionSignal | None) -> dict[str, Any]:
+        if emotion_signal is None:
+            return {}
+        payload = emotion_signal.to_dict()
+        return {
+            "emotion_primary": payload["primary_emotion"],
+            "emotion_intensity": payload["intensity"],
+            "emotion_confidence": payload["confidence"],
+            "emotion_support_need": payload["support_need"],
+            "emotion_wants_action": payload["wants_action"],
+            "emotion_trigger_text": payload["trigger_text"],
+        }
+
     async def _emit_front_reply(
         self,
         *,
@@ -425,12 +453,14 @@ class RuntimeScheduler:
         turn_id: str,
         user_text: str,
         memory: MemoryView,
+        emotion_signal: EmotionSignal | None,
     ) -> str:
         try:
             hint = (
                 await self.front.reply(
                     user_text=user_text,
                     memory=memory,
+                    emotion_signal=emotion_signal,
                     stream_handler=self._build_front_stream_handler(
                         thread_id=thread_id,
                         turn_id=turn_id,
@@ -519,9 +549,14 @@ class RuntimeScheduler:
         turn_id: str,
         user_text: str,
         front_reply: str,
+        emotion_signal: EmotionSignal | None,
     ) -> None:
         if not front_reply.strip():
             return
+        metadata = {
+            "source": "runtime_front_hint",
+        }
+        metadata.update(self._build_emotion_payload(emotion_signal))
         try:
             await self.kernel.publish_front_event(
                 conversation_id=thread_id,
@@ -531,9 +566,16 @@ class RuntimeScheduler:
                     "event_type": "dialogue",
                     "user_text": user_text,
                     "front_reply": front_reply,
-                    "metadata": {
-                        "source": "runtime_front_hint",
-                    },
+                    "emotion": emotion_signal.primary_emotion if emotion_signal is not None else "",
+                    "tags": [
+                        tag
+                        for tag in [
+                            emotion_signal.primary_emotion if emotion_signal is not None else "",
+                            emotion_signal.support_need if emotion_signal is not None else "",
+                        ]
+                        if str(tag or "").strip()
+                    ],
+                    "metadata": metadata,
                 },
             )
         except Exception:
@@ -549,7 +591,11 @@ class RuntimeScheduler:
                 thread_id = str(delivery["thread_id"])
                 await self._push_surface_state(
                     thread_id,
-                    self._build_idle_state(thread_id, affect_state=delivery["affect_state"]),
+                    self._build_idle_state(
+                        thread_id,
+                        affect_state=delivery["affect_state"],
+                        emotion_signal=delivery["emotion_signal"],
+                    ),
                     surface_state_handler=delivery["surface_state_handler"],
                 )
                 return
@@ -571,6 +617,7 @@ class RuntimeScheduler:
                     thread_id=thread_id,
                     phase="replying",
                     affect_state=delivery["affect_state"],
+                    emotion_signal=delivery["emotion_signal"],
                     companion_intent=companion_intent,
                     surface_expression=surface_expression,
                 ),
@@ -582,6 +629,7 @@ class RuntimeScheduler:
                     user_text=user_text,
                     kernel_output=kernel_output,
                     affect_state=delivery["affect_state"],
+                    emotion_signal=delivery["emotion_signal"],
                     companion_intent=companion_intent,
                     surface_expression=surface_expression,
                     stream_handler=self._build_front_stream_handler(
@@ -596,6 +644,7 @@ class RuntimeScheduler:
                         thread_id=thread_id,
                         phase="idle",
                         affect_state=delivery["affect_state"],
+                        emotion_signal=delivery["emotion_signal"],
                         companion_intent=companion_intent,
                         surface_expression=surface_expression,
                     ),
@@ -623,6 +672,7 @@ class RuntimeScheduler:
                 front_reply=final_reply,
                 kernel_output=kernel_output,
                 affect_state=delivery["affect_state"],
+                emotion_signal=delivery["emotion_signal"],
                 companion_intent=companion_intent,
                 surface_expression=surface_expression,
                 wait_for_record=False,
@@ -633,6 +683,7 @@ class RuntimeScheduler:
                     thread_id=thread_id,
                     phase="settling",
                     affect_state=delivery["affect_state"],
+                    emotion_signal=delivery["emotion_signal"],
                     companion_intent=companion_intent,
                     surface_expression=surface_expression,
                 ),
@@ -644,6 +695,7 @@ class RuntimeScheduler:
                     thread_id=thread_id,
                     phase="idle",
                     affect_state=delivery["affect_state"],
+                    emotion_signal=delivery["emotion_signal"],
                     companion_intent=companion_intent,
                     surface_expression=surface_expression,
                 ),
@@ -667,6 +719,7 @@ class RuntimeScheduler:
         front_reply: str,
         kernel_output: str,
         affect_state: AffectState | None,
+        emotion_signal: EmotionSignal | None,
         companion_intent: CompanionIntent,
         surface_expression: SurfaceExpression,
         wait_for_record: bool = True,
@@ -687,6 +740,7 @@ class RuntimeScheduler:
             "motion_hint": surface_expression.motion_hint,
         }
         metadata.update(self._build_affect_payload(affect_state))
+        metadata.update(self._build_emotion_payload(emotion_signal))
 
         try:
             event_id = make_id("brain_event")
@@ -708,6 +762,8 @@ class RuntimeScheduler:
                             surface_expression.text_style,
                             surface_expression.presence,
                             surface_expression.expression,
+                            emotion_signal.primary_emotion if emotion_signal is not None else "",
+                            emotion_signal.support_need if emotion_signal is not None else "",
                         ]
                         if str(tag or "").strip()
                     ],
