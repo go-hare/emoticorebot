@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from emoticorebot.affect import AffectState, PADVector
+from emoticorebot.affect import AffectState, EmotionSignal, PADVector
 from emoticorebot.companion.expression import build_surface_expression
 from emoticorebot.companion.intent import build_companion_intent
 from emoticorebot.companion.models import CompanionIntent
@@ -91,3 +91,39 @@ def test_companion_expression_rests_more_when_affect_vitality_is_low() -> None:
     assert expression.motion_hint == "minimal"
     assert expression.body_state == "resting_beside"
     assert expression.idle_phase == "resting"
+
+
+def test_companion_intent_can_follow_emotion_signal_support_need_for_focused() -> None:
+    intent = build_companion_intent(
+        user_text="在吗",
+        kernel_output="kernel raw for: 在吗",
+        emotion_signal=EmotionSignal(
+            primary_emotion="anxious",
+            intensity=0.72,
+            confidence=0.83,
+            support_need="focused",
+            wants_action=True,
+            trigger_text="在吗",
+        ),
+    )
+
+    assert intent.mode == "focused"
+    assert intent.initiative >= 0.55
+
+
+def test_companion_intent_maps_celebrate_signal_to_encourage() -> None:
+    intent = build_companion_intent(
+        user_text="今天还不错",
+        kernel_output="kernel raw for: 今天还不错",
+        emotion_signal=EmotionSignal(
+            primary_emotion="happy",
+            intensity=0.64,
+            confidence=0.76,
+            support_need="celebrate",
+            wants_action=False,
+            trigger_text="不错",
+        ),
+    )
+
+    assert intent.mode == "encourage"
+    assert intent.intensity >= 0.58

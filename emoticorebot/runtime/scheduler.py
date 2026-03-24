@@ -610,6 +610,7 @@ class RuntimeScheduler:
                 user_text=user_text,
                 kernel_output=kernel_output,
                 affect_state=delivery["affect_state"],
+                emotion_signal=delivery["emotion_signal"],
             )
             await self._push_surface_state(
                 thread_id,

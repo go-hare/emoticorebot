@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from emoticorebot.companion.models import CompanionIntent
 
 if TYPE_CHECKING:
-    from emoticorebot.affect import AffectState
+    from emoticorebot.affect import AffectState, EmotionSignal
 
 _COMFORT_KEYWORDS = (
     "累",
@@ -103,6 +103,14 @@ _DIRECT_HELP_KEYWORDS = (
     "please",
 )
 
+_SUPPORT_NEED_TO_MODE = {
+    "comfort": "comfort",
+    "encourage": "encourage",
+    "focused": "focused",
+    "quiet_company": "quiet_company",
+    "celebrate": "encourage",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class TurnSignals:
@@ -122,16 +130,17 @@ def build_companion_intent(
     user_text: str,
     kernel_output: str,
     affect_state: "AffectState | None" = None,
+    emotion_signal: "EmotionSignal | None" = None,
 ) -> CompanionIntent:
     """Infer a lightweight companionship strategy for the current turn."""
 
     signals = _collect_turn_signals(user_text=user_text, kernel_output=kernel_output)
-    mode = _pick_mode(signals, affect_state=affect_state)
+    mode = _pick_mode(signals, affect_state=affect_state, emotion_signal=emotion_signal)
     return CompanionIntent(
         mode=mode,
-        warmth=_score_warmth(mode, signals, affect_state=affect_state),
-        initiative=_score_initiative(mode, signals, affect_state=affect_state),
-        intensity=_score_intensity(mode, signals, affect_state=affect_state),
+        warmth=_score_warmth(mode, signals, affect_state=affect_state, emotion_signal=emotion_signal),
+        initiative=_score_initiative(mode, signals, affect_state=affect_state, emotion_signal=emotion_signal),
+        intensity=_score_intensity(mode, signals, affect_state=affect_state, emotion_signal=emotion_signal),
     )
 
 
@@ -152,7 +161,12 @@ def _collect_turn_signals(*, user_text: str, kernel_output: str) -> TurnSignals:
     )
 
 
-def _pick_mode(signals: TurnSignals, *, affect_state: "AffectState | None") -> str:
+def _pick_mode(
+    signals: TurnSignals,
+    *,
+    affect_state: "AffectState | None",
+    emotion_signal: "EmotionSignal | None",
+) -> str:
     if affect_state is not None:
         if (
             affect_state.pressure >= 0.42
@@ -163,6 +177,9 @@ def _pick_mode(signals: TurnSignals, *, affect_state: "AffectState | None") -> s
             return "comfort"
         if affect_state.vitality <= 0.28 and signals.playful >= 1.0:
             return "quiet_company"
+    semantic_mode = _pick_mode_from_emotion_signal(emotion_signal)
+    if semantic_mode:
+        return semantic_mode
     if signals.comfort >= 1.0:
         return "comfort"
     if signals.encourage >= 1.0 and signals.encourage >= signals.focused + 0.15:
@@ -185,6 +202,7 @@ def _score_warmth(
     signals: TurnSignals,
     *,
     affect_state: "AffectState | None",
+    emotion_signal: "EmotionSignal | None",
 ) -> float:
     base = {
         "comfort": 0.94,
@@ -205,6 +223,15 @@ def _score_warmth(
         value += 0.06 * max(0.0, -affect_state.current_pad.pleasure)
         if affect_state.vitality <= 0.35:
             value += 0.03
+    if emotion_signal is not None:
+        if emotion_signal.support_need == "comfort":
+            value += 0.05
+        elif emotion_signal.support_need == "quiet_company":
+            value += 0.03
+        elif emotion_signal.support_need in {"encourage", "celebrate"}:
+            value += 0.02
+        if emotion_signal.primary_emotion in {"sad", "hurt", "lonely", "overwhelmed"}:
+            value += 0.03
     return _clamp(value)
 
 
@@ -213,6 +240,7 @@ def _score_initiative(
     signals: TurnSignals,
     *,
     affect_state: "AffectState | None",
+    emotion_signal: "EmotionSignal | None",
 ) -> float:
     base = {
         "comfort": 0.36,
@@ -234,6 +262,17 @@ def _score_initiative(
         value -= 0.10 * max(0.0, -affect_state.current_pad.dominance)
         if affect_state.vitality <= 0.35:
             value -= 0.05
+    if emotion_signal is not None:
+        if emotion_signal.support_need == "focused":
+            value += 0.08
+        elif emotion_signal.support_need == "comfort":
+            value -= 0.04
+            if emotion_signal.wants_action:
+                value += 0.04
+        elif emotion_signal.support_need == "quiet_company":
+            value -= 0.06
+        elif emotion_signal.support_need in {"encourage", "celebrate"}:
+            value += 0.03
     return _clamp(value)
 
 
@@ -242,6 +281,7 @@ def _score_intensity(
     signals: TurnSignals,
     *,
     affect_state: "AffectState | None",
+    emotion_signal: "EmotionSignal | None",
 ) -> float:
     base = {
         "comfort": 0.30,
@@ -266,7 +306,31 @@ def _score_intensity(
             value -= 0.08
         if affect_state.pressure >= 0.38 and mode in {"comfort", "focused", "quiet_company"}:
             value -= 0.04
+    if emotion_signal is not None:
+        value += 0.10 * max(0.0, emotion_signal.intensity - 0.35)
+        if emotion_signal.support_need == "quiet_company":
+            value -= 0.05
+        elif emotion_signal.support_need in {"encourage", "celebrate"}:
+            value += 0.05
+        elif emotion_signal.support_need == "comfort":
+            value -= 0.02
     return _clamp(value)
+
+
+def _pick_mode_from_emotion_signal(emotion_signal: "EmotionSignal | None") -> str:
+    if emotion_signal is None:
+        return ""
+
+    support_need = str(emotion_signal.support_need or "").strip()
+    mapped_mode = _SUPPORT_NEED_TO_MODE.get(support_need, "")
+    if not mapped_mode:
+        return ""
+
+    confidence = float(emotion_signal.confidence or 0.0)
+    intensity = float(emotion_signal.intensity or 0.0)
+    if confidence < 0.45 and intensity < 0.55:
+        return ""
+    return mapped_mode
 
 
 def _keyword_score(
