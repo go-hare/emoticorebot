@@ -116,6 +116,9 @@ def build_desktop_state_packet(state: Mapping[str, Any]) -> DesktopStatePacket:
             "motion_hint": str(state.get("motion_hint", "") or "").strip(),
             "linger_hint": str(state.get("linger_hint", "") or "").strip(),
             "lifecycle_phase": str(state.get("lifecycle_phase", "") or "").strip(),
+            "affect_vitality": state.get("affect_vitality"),
+            "affect_pressure": state.get("affect_pressure"),
+            "affect_updated_at": str(state.get("affect_updated_at", "") or "").strip(),
         },
     )
 

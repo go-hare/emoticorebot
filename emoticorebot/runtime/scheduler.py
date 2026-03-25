@@ -431,6 +431,7 @@ class RuntimeScheduler:
             "affect_dominance": affect_state.current_pad.dominance,
             "affect_vitality": affect_state.vitality,
             "affect_pressure": affect_state.pressure,
+            "affect_updated_at": affect_state.updated_at,
         }
 
     def _build_emotion_payload(self, emotion_signal: EmotionSignal | None) -> dict[str, Any]:

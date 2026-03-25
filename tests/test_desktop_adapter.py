@@ -20,6 +20,9 @@ def test_build_desktop_state_packet_for_replying_focused_state() -> None:
             "breathing_hint": "steady_even",
             "linger_hint": "remain_available",
             "recommended_hold_ms": 0,
+            "affect_vitality": 0.61,
+            "affect_pressure": 0.14,
+            "affect_updated_at": "2026-03-25T21:07:44",
         }
     )
 
@@ -29,6 +32,9 @@ def test_build_desktop_state_packet_for_replying_focused_state() -> None:
     assert payload["bubble_mode"] == "speaking"
     assert payload["bubble_visible"] is True
     assert payload["mood"] == "steady"
+    assert payload["metadata"]["affect_vitality"] == 0.61
+    assert payload["metadata"]["affect_pressure"] == 0.14
+    assert payload["metadata"]["affect_updated_at"] == "2026-03-25T21:07:44"
 
 
 def test_build_desktop_state_packet_for_settling_quiet_company_state() -> None:

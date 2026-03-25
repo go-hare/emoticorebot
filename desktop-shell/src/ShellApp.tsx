@@ -18,6 +18,35 @@ function prettify(value: string): string {
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function coerceFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function extractAffectSnapshotFromPacket(packet: DesktopPacket): AffectStateSnapshot | null {
+  const metadata = packet.metadata ?? {};
+  const vitality = coerceFiniteNumber(metadata["affect_vitality"]);
+  const pressure = coerceFiniteNumber(metadata["affect_pressure"]);
+  const updatedAtRaw = metadata["affect_updated_at"];
+  const updatedAt = typeof updatedAtRaw === "string" ? updatedAtRaw.trim() : "";
+  if (vitality === undefined && pressure === undefined && !updatedAt) {
+    return null;
+  }
+  return {
+    vitality,
+    pressure,
+    updated_at: updatedAt || undefined,
+  };
+}
+
 function PetPresetPreview({
   spriteConfig,
   label,
@@ -74,6 +103,12 @@ export default function ShellApp() {
               isReplyStreamingRef.current = false;
             }
             setPacket(event.payload);
+            {
+              const snapshot = extractAffectSnapshotFromPacket(event.payload);
+              if (snapshot) {
+                setAffectState((current) => ({ ...(current ?? {}), ...snapshot }));
+              }
+            }
             phaseRef.current = event.payload.phase;
             break;
           case "reply_chunk":
@@ -139,16 +174,24 @@ export default function ShellApp() {
   }, []);
 
   useEffect(() => {
-    if (!affectPath || packet.phase !== "idle") {
+    if (!affectPath) {
       return;
     }
-
-    void readAffectStateSnapshot(affectPath).then((snapshot) => {
-      if (snapshot) {
-        setAffectState(snapshot);
-      }
-    });
-  }, [affectPath, packet.phase]);
+    let disposed = false;
+    const refresh = () => {
+      void readAffectStateSnapshot(affectPath).then((snapshot) => {
+        if (!disposed && snapshot) {
+          setAffectState(snapshot);
+        }
+      });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [affectPath]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
