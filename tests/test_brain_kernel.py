@@ -281,6 +281,72 @@ def test_append_patch_handles_existing_jsonl_without_trailing_newline(tmp_path: 
     assert rows == []
 
 
+def test_refresh_projections_keeps_existing_soul_without_updates(tmp_path: Path) -> None:
+    memory_store = JsonlMemoryStore(tmp_path)
+    soul_path = tmp_path / "SOUL.md"
+    soul_original = "# SOUL\n\n- baseline persona\n"
+    soul_path.write_text(soul_original, encoding="utf-8")
+
+    memory_store.append_patch(
+        MemoryPatch(
+            long_term_append=[
+                {
+                    "record_id": "mem_new",
+                    "summary": "new",
+                    "memory_candidates": [],
+                    "user_updates": ["喜欢极简设计"],
+                    "soul_updates": [],
+                }
+            ]
+        )
+    )
+
+    assert soul_path.read_text(encoding="utf-8") == soul_original
+
+
+def test_refresh_projections_merges_updates_without_overwrite(tmp_path: Path) -> None:
+    memory_store = JsonlMemoryStore(tmp_path)
+    soul_path = tmp_path / "SOUL.md"
+    soul_original = "# SOUL\n\n> keep this note\n\n- baseline persona\n"
+    soul_path.write_text(soul_original, encoding="utf-8")
+
+    memory_store.append_patch(
+        MemoryPatch(
+            long_term_append=[
+                {
+                    "record_id": "mem_new_1",
+                    "summary": "new",
+                    "memory_candidates": [],
+                    "user_updates": [],
+                    "soul_updates": ["对边界感保持高敏感"],
+                }
+            ]
+        )
+    )
+
+    first = soul_path.read_text(encoding="utf-8")
+    assert "> keep this note" in first
+    assert "- baseline persona" in first
+    assert "- 对边界感保持高敏感" in first
+
+    memory_store.append_patch(
+        MemoryPatch(
+            long_term_append=[
+                {
+                    "record_id": "mem_new_2",
+                    "summary": "new",
+                    "memory_candidates": [],
+                    "user_updates": [],
+                    "soul_updates": ["对边界感保持高敏感"],
+                }
+            ]
+        )
+    )
+
+    second = soul_path.read_text(encoding="utf-8")
+    assert second.count("- 对边界感保持高敏感") == 1
+
+
 def test_brain_kernel_can_store_front_event(tmp_path: Path) -> None:
     memory_store = JsonlMemoryStore(tmp_path)
     kernel = BrainKernel(agent_id="alice", memory_store=memory_store)
@@ -467,6 +533,18 @@ class FakeTaskRouterModel:
         return _Structured()
 
 
+class FrontAwareTaskRouterModel:
+    def with_structured_output(self, schema):
+        class _Structured:
+            async def ainvoke(self, messages):
+                merged = "\n".join(str(getattr(msg, "content", msg)) for msg in messages)
+                if "## Latest Front Reply" in merged and "今天是3月25号" in merged:
+                    return schema(task_type=TaskType.none)
+                return schema(task_type=TaskType.simple)
+
+        return _Structured()
+
+
 def test_brain_kernel_can_pause_for_client_tool_and_resume(tmp_path: Path) -> None:
     memory_store = JsonlMemoryStore(tmp_path)
     model = FakeClientToolModel()
@@ -616,6 +694,28 @@ def test_brain_kernel_does_not_create_run_for_none_task_type(tmp_path: Path) -> 
     assert result.context.input_text == "以后叫我阿青"
     assert result.conversation is not None
     assert result.conversation.active_run_ids == []
+    assert kernel.list_runs("conv") == []
+
+
+def test_brain_kernel_can_skip_kernel_when_front_already_answered(tmp_path: Path) -> None:
+    memory_store = JsonlMemoryStore(tmp_path)
+    kernel = BrainKernel(
+        agent_id="alice",
+        model=ImmediateReplyModel(),
+        task_router_model=FrontAwareTaskRouterModel(),
+        memory_store=memory_store,
+    )
+
+    result = asyncio.run(
+        kernel.handle_user_input(
+            conversation_id="conv",
+            text="今天几号",
+            latest_front_reply="今天是3月25号。",
+        )
+    )
+
+    assert result.task_type == TaskType.none
+    assert result.run is None
     assert kernel.list_runs("conv") == []
 
 

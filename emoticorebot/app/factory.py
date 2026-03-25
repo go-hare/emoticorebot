@@ -29,7 +29,7 @@ from emoticorebot.tools.file_tools import (
 )
 from emoticorebot.tools.web_tools import WebFetchTool, WebSearchTool
 from emoticorebot.utils.helpers import ensure_dir
-
+from datetime import datetime
 
 @dataclass(slots=True)
 class AppContext:
@@ -52,6 +52,7 @@ def build_app_context(config: Config | None = None) -> AppContext:
 
     front_service = FrontService(settings.workspace, front_factory.get_brain())
     sleep_agent = SleepAgent(memory_store=memory_store)
+    kernel_system_prompt = load_kernel_system_prompt(settings.workspace)
     kernel = BrainKernel(
         agent_id="emoticorebot",
         model=front_factory.get_executor(),
@@ -59,6 +60,7 @@ def build_app_context(config: Config | None = None) -> AppContext:
         tools=build_kernel_tools(settings),
         memory_store=memory_store,
         sleep_agent=sleep_agent,
+        system_prompt=kernel_system_prompt,
         max_steps=settings.core_mode.max_tool_iterations,
     )
     project_model_path = Path(__file__).resolve().parents[2] / "mode" / "Chordia"
@@ -129,3 +131,30 @@ def ensure_workspace_file(workspace: Path, name: str, target_dir: Path) -> None:
     if target.exists():
         return
     target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def load_kernel_system_prompt(workspace: Path) -> str:
+    sections: list[str] = []
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    agent_text = _read_non_empty(workspace / "AGENTS.md")
+    if agent_text:
+        sections.append(agent_text)
+
+    for filename, title in (
+        ("USER.md", "USER"),
+        ("SOUL.md", "SOUL"),
+        ("HEARTBEAT.md", "HEARTBEAT"),
+        ("TOOLS.md", "TOOLS"),
+    ):
+        content = _read_non_empty(workspace / filename)
+        if content:
+            sections.append(f"## {title}\n{content}")
+
+    sections.append(f"## CURRENT TIME\n{now}")
+    return "\n\n".join(sections).strip()
+
+
+def _read_non_empty(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()

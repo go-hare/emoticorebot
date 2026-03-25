@@ -213,6 +213,7 @@ class JsonlMemoryStore:
             projections={
                 "user_anchor": read_text(self.workspace / "USER.md"),
                 "soul_anchor": read_text(self.workspace / "SOUL.md"),
+                "front_anchor": read_text(self.workspace / "FRONT.md"),
             },
         )
 
@@ -300,8 +301,11 @@ class JsonlMemoryStore:
                 if text and text not in soul_updates:
                     soul_updates.append(text)
 
-        write_text(self.workspace / "USER.md", self.render_projection("用户画像", user_updates))
-        write_text(self.workspace / "SOUL.md", self.render_projection("灵魂锚点", soul_updates))
+        # Merge stable updates into projection files without overwriting existing content.
+        if user_updates:
+            self._merge_projection_file(self.workspace / "USER.md", "用户画像", user_updates)
+        if soul_updates:
+            self._merge_projection_file(self.workspace / "SOUL.md", "灵魂锚点", soul_updates)
 
     def render_projection(self, title: str, rows: list[str]) -> str:
         lines = [f"# {title}", ""]
@@ -310,6 +314,47 @@ class JsonlMemoryStore:
             return "\n".join(lines) + "\n"
         lines.extend(f"- {item}" for item in rows)
         return "\n".join(lines) + "\n"
+
+    def _merge_projection_file(self, path: Path, title: str, updates: list[str]) -> None:
+        normalized = [str(item or "").strip() for item in updates]
+        normalized = [item for item in normalized if item]
+        if not normalized:
+            return
+
+        existing = read_text(path)
+        if not existing.strip():
+            write_text(path, self.render_projection(title, list(dict.fromkeys(normalized))))
+            return
+
+        existing_bullets = self._extract_bullet_rows(existing)
+        to_append = [item for item in normalized if item not in existing_bullets]
+        if not to_append:
+            return
+
+        lines = existing.splitlines()
+        filtered_lines: list[str] = []
+        placeholder_removed = False
+        for line in lines:
+            if not placeholder_removed and line.strip() == "- 暂无稳定沉淀":
+                placeholder_removed = True
+                continue
+            filtered_lines.append(line)
+
+        merged = "\n".join(filtered_lines).rstrip()
+        if merged:
+            merged += "\n"
+        merged += "".join(f"- {item}\n" for item in to_append)
+        write_text(path, merged)
+
+    def _extract_bullet_rows(self, content: str) -> set[str]:
+        rows: set[str] = set()
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                value = stripped[2:].strip()
+                if value:
+                    rows.add(value)
+        return rows
 
     def score_candidate(self, candidate: dict[str, Any], tokens: set[str]) -> float:
         haystack = " ".join(

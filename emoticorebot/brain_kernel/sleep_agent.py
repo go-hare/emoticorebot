@@ -33,6 +33,8 @@ class SleepDigest(BaseModel):
     front_events: list[SleepEvent] = Field(default_factory=list)
     kernel_events: list[SleepEvent] = Field(default_factory=list)
     long_term_summary: str = ""
+    user_anchor: str = ""
+    soul_anchor: str = ""
 
 
 class SleepOutcome(BaseModel):
@@ -116,6 +118,8 @@ class SleepAgent:
             front_events=front_events,
             kernel_events=kernel_events,
             long_term_summary=str(memory.long_term_layer.get("summary", "") or "").strip(),
+            user_anchor=str(memory.projections.get("user_anchor", "") or "").strip(),
+            soul_anchor=str(memory.projections.get("soul_anchor", "") or "").strip(),
         )
 
     def build_default_outcome(self, digest: SleepDigest) -> SleepOutcome:
@@ -276,6 +280,8 @@ class SleepAgent:
     def _build_llm_messages(self, digest: SleepDigest) -> list[Any]:
         digest_payload = digest.model_dump()
         digest_json = json.dumps(digest_payload, ensure_ascii=False, indent=2)
+        user_anchor = self._clip(digest.user_anchor, 2000) if digest.user_anchor else "(empty)"
+        soul_anchor = self._clip(digest.soul_anchor, 2000) if digest.soul_anchor else "(empty)"
         return [
             SystemMessage(
                 content=(
@@ -285,11 +291,20 @@ class SleepAgent:
                     "Keep memory_candidates to at most 3 items.\n"
                     "Allowed memory_type values: relationship, fact, working, execution, reflection.\n"
                     "When the user states a stable preference, desire, identity, or naming preference, "
-                    "include it in user_updates."
+                    "include it in user_updates.\n"
+                    "Treat soul_updates as HIGH-RISK and default to an empty list.\n"
+                    "Only output soul_updates when the digest contains explicit, durable persona-edit "
+                    "instructions for the agent itself (not transient emotion, not one-off comfort style, "
+                    "not ordinary conversation tone).\n"
+                    "If uncertain, set user_updates and soul_updates to empty arrays."
                 )
             ),
             HumanMessage(
                 content=(
+                    "Current USER.md anchor:\n"
+                    f"{user_anchor}\n\n"
+                    "Current SOUL.md anchor:\n"
+                    f"{soul_anchor}\n\n"
                     "Turn digest JSON:\n"
                     f"{digest_json}\n\n"
                     "Return a JSON object with keys: summary, memory_candidates, user_updates, "

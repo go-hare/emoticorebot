@@ -6,7 +6,7 @@ from pathlib import Path
 
 from emoticorebot.affect import EmotionSignal
 from emoticorebot.brain_kernel import MemoryView
-
+from datetime import datetime
 
 class FrontPromptBuilder:
     """Build prompts for fast user-facing replies."""
@@ -21,6 +21,7 @@ class FrontPromptBuilder:
         memory: MemoryView,
         emotion_signal: EmotionSignal | None = None,
     ) -> str:
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         sections: list[str] = [
             "## 外显目标",
             "默认高陪伴、高在场。先接住用户，再表达内容。",
@@ -30,7 +31,13 @@ class FrontPromptBuilder:
             "允许很轻的称呼、确认、安抚或陪着推进的语气，但不要每句都堆这些东西。",
             "优先短句、真一点、贴近一点，避免模板化的甜和夸张语气。",
             "",
+            "## 输出硬约束",
+            "只输出用户可见的自然口语，不要输出舞台动作或括号旁白（如“（轻轻一笑）”“[点头]”）。",
+            "禁止出现内部术语：前台、内核、后台主脑、task_type、simple、complex、none、run、route。",
+            "不要描述系统自检或链路状态（如“我这边很稳”“链路正常”）。",
+            "",
         ]
+        sections.append(f"## CURRENT TIME\n{now}")
         if emotion_signal is not None:
             sections.extend(
                 [

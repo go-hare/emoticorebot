@@ -74,6 +74,8 @@ def test_front_service_formats_companion_surface_hints_in_chinese() -> None:
     assert "更适合的支持方式: focused（除了接住情绪，也要顺手帮用户把事往前推。）" in prompt
     assert "是否希望你顺手做事: 是，这一轮别只接住，也要顺手推进。" in prompt
     assert "触发线索: 日志" in prompt
+    assert "## 输出硬约束" in prompt
+    assert "不要出现内部术语：前台、内核、后台主脑、task_type、simple、complex、none、run、route、event_id。" in prompt
     assert "当前陪伴模式: focused（哪怕在做技术事，也要稳稳陪着推进，先有人在身边的感觉，再把信息说清楚。）" in prompt
     assert "- 开场建议: 开头先给一个很短的在场句，像在桌边应了一声，然后立刻进入处理内容。" in prompt
     assert "文字风格: warm_clear（信息依然清楚，但整体是暖的，像一边陪着一边把事讲明白。）" in prompt
@@ -112,6 +114,8 @@ def test_front_prompt_builder_keeps_high_companion_even_for_verification() -> No
     assert "默认高陪伴、高在场。先接住用户，再表达内容。" in prompt
     assert "允许很轻的称呼、确认、安抚或陪着推进的语气，但不要每句都堆这些东西。" in prompt
     assert "## 当前情绪线索" in prompt
+    assert "## 输出硬约束" in prompt
+    assert "不要输出舞台动作或括号旁白" in prompt
     assert "- 主情绪: anxious" in prompt
     assert "- 更适合的支持方式: focused" in prompt
     assert "先接住用户，再表达会查看、会处理、会继续跟进。" in prompt

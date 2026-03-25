@@ -1,6 +1,6 @@
 [project]
 name = "emoticorebot-ai"
-version = "0.0.2"
+version = "0.0.3"
 description = "A lightweight personal AI assistant framework"
 requires-python = ">=3.11"
 license = {text = "MIT"}
@@ -97,13 +97,9 @@ include = [
 [tool.hatch.build.targets.sdist]
 include = [
     "emoticorebot/",
-    "bridge/",
     "README.md",
     "LICENSE",
 ]
-
-[tool.hatch.build.targets.wheel.force-include]
-"bridge" = "emoticorebot/bridge"
 
 [tool.ruff]
 line-length = 100

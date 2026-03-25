@@ -127,6 +127,7 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
             conversation_id=conversation_id,
             text=text,
             memory=memory_view,
+            latest_front_reply=latest_front_reply,
         )
         if task_type == TaskType.none:
             return BrainResponse(
@@ -407,6 +408,7 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         conversation_id: str,
         text: str,
         memory: MemoryView,
+        latest_front_reply: str = "",
     ) -> TaskType:
         llm = self.task_router_model or self.model
         if llm is None:
@@ -423,38 +425,69 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         messages = [
             SystemMessage(
                 content=(
-                    "You classify the user's turn for a companion robot kernel.\n"
-                    'Return a JSON object with exactly one field: {"task_type": "none" | "simple" | "complex"}.\n'
-                    '"none": social chat, acknowledgement, emotional expression, preference or memory information '
-                    "that should not enter task execution.\n"
-                    '"simple": regular tasks that the current kernel can handle directly with its existing tool loop.\n'
-                    '"complex": larger, longer-horizon, more open-ended, or multi-stage tasks that should eventually '
-                    "go to a deeper agent path. For now complex still falls back to the simple kernel path.\n"
-                    "Use the active runs and memory in the prompt when deciding."
+                    "You are a task-type router for a companion robot kernel.\n"
+                    'Return STRICT JSON only with exactly one field: {"task_type": "none" | "simple" | "complex"}.\n'
+                    "No markdown. No prose. No extra keys.\n"
+                    "Classify only the CURRENT user turn; memory and active runs are secondary context.\n"
+                    "Decision rules (priority order):\n"
+                    '1) If the turn is run-control (cancel/switch/resume/continue/stop current run), output "simple".\n'
+                    '2) If Latest Front Reply already directly answers the current user input and no extra action/tool/run is required, output "none".\n'
+                    '3) Output "none" only when this is purely social/emotional chat with no concrete deliverable now.\n'
+                    "   Typical none examples: greeting/thanks/apology, emotional sharing, relationship talk, "
+                    "name preference, pure chit-chat like \"在吗\" \"你今天怎么样\".\n"
+                    '4) Output "simple" when there is one bounded request that can be completed in one focused run.\n'
+                    "   Typical simple examples: ask current time/date, quick factual Q&A, run one command, "
+                    "search/check one issue, summarize one source, fix one concrete bug.\n"
+                    '5) Output "complex" only for multi-phase or broad project work with multiple deliverables/dependencies.\n'
+                    "   Typical complex examples: architecture redesign, migration plan + implementation roadmap, "
+                    "multi-module refactor requiring staged execution.\n"
+                    "Anti-confusion rules:\n"
+                    '- Do NOT choose "none" if the user asks for any concrete answer/action now (including quick asks like current time).\n'
+                    '- Exception: if Latest Front Reply already gave that concrete answer and user did not ask for further action, choose "none".\n'
+                    '- Do NOT choose "complex" for single-step asks just because they are technical.\n'
+                    '- If uncertain between "none" and "simple", choose "simple" only when a concrete immediate output is requested.\n'
+                    '- If uncertain between "simple" and "complex", choose "simple".'
                 )
             ),
-            HumanMessage(content=self._build_input_prompt(context=context)),
+            HumanMessage(
+                content="\n\n".join(
+                    [
+                        self._build_input_prompt(context=context),
+                        "## Latest Front Reply",
+                        str(latest_front_reply or "").strip() or "(empty)",
+                    ]
+                )
+            ),
         ]
 
         try:
             response = await self._invoke_task_router(messages=messages, model=llm)
             return self._coerce_task_type(response)
-        except Exception:
+        except Exception as exc:
+            print(f"Task type error: {exc}")
             return TaskType.simple
 
     async def _invoke_task_router(self, *, messages: list[Any], model: Any) -> Any:
         if hasattr(model, "with_structured_output"):
-            structured = model.with_structured_output(TaskRouteDecision)
-            if hasattr(structured, "ainvoke"):
-                return await structured.ainvoke(messages)
-            if hasattr(structured, "invoke"):
-                return structured.invoke(messages)
+            try:
+                try:
+                    structured = model.with_structured_output(
+                        TaskRouteDecision,
+                        method="function_calling",
+                    )
+                except TypeError:
+                    structured = model.with_structured_output(TaskRouteDecision)
+                if hasattr(structured, "ainvoke"):
+                    return await structured.ainvoke(messages)
+                if hasattr(structured, "invoke"):
+                    return structured.invoke(messages)
+            except Exception:
+                pass
 
-        bound_model = model.bind(response_format={"type": "json_object"}) if hasattr(model, "bind") else model
-        if hasattr(bound_model, "ainvoke"):
-            return await bound_model.ainvoke(messages)
-        if hasattr(bound_model, "invoke"):
-            return bound_model.invoke(messages)
+        if hasattr(model, "ainvoke"):
+            return await model.ainvoke(messages)
+        if hasattr(model, "invoke"):
+            return model.invoke(messages)
         raise RuntimeError("Task router model does not support invoke or ainvoke.")
 
     def _coerce_task_type(self, response: Any) -> TaskType:
@@ -507,6 +540,13 @@ class BrainKernel(BrainKernelTurnMixin, BrainKernelRoutingMixin, BrainKernelResi
         prompt = system_prompt.strip() or self.system_prompt or (
             "You are the single brain of a companion robot. "
             "Use tools when needed. When enough information is available, answer directly."
+        )
+        prompt = (
+            f"{prompt}\n\n"
+            "## INTERNAL OUTPUT POLICY\n"
+            "- task_type/route/run-control labels are internal state; do not expose them in normal replies.\n"
+            "- Do not output meta text like `task_type: simple/none/complex` unless the user explicitly asks for debugging internals.\n"
+            "- For direct user questions, answer naturally and directly."
         )
         if context.tool_rule_prompt:
             prompt = f"{prompt}\n\n{context.tool_rule_prompt}"
