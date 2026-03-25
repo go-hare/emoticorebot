@@ -120,7 +120,6 @@ def ensure_workspace_layout(workspace: Path) -> None:
     ensure_workspace_file(workspace, "AGENTS.md", workspace)
     ensure_workspace_file(workspace, "TOOLS.md", workspace)
     ensure_workspace_file(workspace, "HEARTBEAT.md", workspace)
-    ensure_workspace_file(workspace, "drive_config.yaml", workspace)
     ensure_workspace_file(workspace, "FRONT.md", workspace / "templates")
 
 
